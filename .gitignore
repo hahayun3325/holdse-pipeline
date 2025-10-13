@@ -1,0 +1,398 @@
+# ============================================================================
+# HOLDSE Project .gitignore
+# HOLD + GHOP Integration Pipeline
+# ============================================================================
+
+# ============================================================================
+# LARGE DATA FILES & DATASETS
+# ============================================================================
+# Main data directories (excluded from cleaned backup)
+data/
+code/data/
+data/ghop/
+data/hold/
+data/lib/
+
+# Downloaded assets
+assets/mano/
+third_party/mano_v1_2/
+
+# CUDA installer
+cuda_*.run
+*.run
+
+# ============================================================================
+# MODEL CHECKPOINTS & OUTPUTS
+# ============================================================================
+# Checkpoint directories
+checkpoints/
+checkpoints/ghop/
+checkpoints/hold/
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.h5
+*.hdf5
+
+# Training outputs
+output/
+logs/
+saved_models/
+runs/
+tensorboard/
+wandb/
+
+# Generated videos and visualizations
+*.mp4
+*.avi
+*.gif
+create_videos.sh
+
+# ============================================================================
+# PYTHON
+# ============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Build artifacts
+code/build/
+build/lib.linux-x86_64-*/
+build/temp.linux-x86_64-*/
+*.cpython-*.so
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+#Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+ghop_hold_integrated/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# ============================================================================
+# PYTORCH & DEEP LEARNING
+# ============================================================================
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Training logs
+lightning_logs/
+tb_logs/
+
+# Data files
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+
+# CUDA extensions
+*.cu.o
+*.fatbin
+*.cubin
+
+# ============================================================================
+# SUBMODULES & DEPENDENCIES
+# ============================================================================
+# Git submodules (already tracked separately)
+submodules/kaolin/
+submodules/pytorch3d/
+submodules/smplx/
+
+# Generator dependencies (large external repos)
+generator/hamer/
+generator/hand_detector.d2/
+generator/Hierarchical-Localization/
+generator/MeshTransformer/
+generator/Segment-and-Track-Anything/
+
+# ============================================================================
+# IDE & EDITOR FILES
+# ============================================================================
+# VSCode
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.vim/
+tags
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# ============================================================================
+# OPERATING SYSTEM FILES
+# ============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ============================================================================
+# TEMPORARY & CACHE FILES
+# ============================================================================
+*.tmp
+*.temp
+*.bak
+*.backup
+*.cache
+tmp/
+temp/
+cache/
+
+# Training output files
+sanity_train_output.txt
+*_output.txt
+
+# ============================================================================
+# COMPRESSED FILES & ARCHIVES
+# ============================================================================
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.gz
+*.bz2
+*.xz
+
+# ============================================================================
+# SYMLINKS (keep track but content is ignored)
+# ============================================================================
+# Symlink itself is tracked, but target is ignored
+# code/data -> /home/fredcui/Projects/hold/code/data
+
+# ============================================================================
+# PROJECT-SPECIFIC EXCLUSIONS
+# ============================================================================
+# Monitoring scripts output
+monitor_*.log
+monitor_sanity.sh
+
+# Downloaded ARCTIC data
+bash/assets/
+
+# Test outputs
+tests/output/
+tests/__pycache__/
+
+# Script-generated files
+scripts/checksum.json
+scripts/__pycache__/
+
+# Verification outputs
+verify_*.log
+
+# ============================================================================
+# EXCEPTIONS (Files to INCLUDE despite above rules)
+# ============================================================================
+# Keep configuration files
+!confs/**/*.yaml
+!code/confs/**/*.yaml
+!generator/confs/**/*.yaml
+
+# Keep setup scripts
+!bash/*.sh
+!scripts/*.sh
+!code/*.sh
+
+# Keep requirements
+!requirements.txt
+!setup.py
+!Makefile
+
+# Keep documentation
+!docs/**/*.md
+!docs/static/**/*
+!README.md
+!LICENSE
+
+# Keep small reference data if needed
+# !data/lib/*.json
+# !data/lib/*.yaml

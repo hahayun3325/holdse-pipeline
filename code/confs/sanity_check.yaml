@@ -1,0 +1,139 @@
+# Sanity check configuration (minimal settings)
+# Inherits from general.yaml but with reduced complexity
+
+model:
+  implicit_network:
+    feature_vector_size: 128
+    d_in: 3
+    d_out: 1
+    dims: [128, 128, 128, 128]
+    init: geometry
+    bias: 0.6
+    skip_in: [2]
+    weight_norm: true
+    multires: 4
+    cond: pose
+
+  rendering_network:
+    feature_vector_size: 128
+    mode: pose
+    d_in: 14
+    d_out: 3
+    dims: [128, 128]
+    weight_norm: true
+    multires_view: -1
+
+  bg_implicit_network:
+    feature_vector_size: 128
+    d_in: 4
+    d_out: 1
+    dims: [128, 128, 128, 128]
+    init: none
+    bias: 0.0
+    skip_in: [2]
+    weight_norm: false
+    multires: 6
+    cond: frame
+    dim_frame_encoding: 16
+
+  bg_rendering_network:
+    feature_vector_size: 128
+    mode: nerf_frame_encoding
+    d_in: 3
+    d_out: 3
+    dims: [64]
+    weight_norm: false
+    multires_view: 2
+    dim_frame_encoding: 16
+
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  ray_sampler:
+    near: 0.0
+    N_samples: 32
+    N_samples_eval: 64
+    N_samples_extra: 16
+    eps: 0.1
+    beta_iters: 5
+    max_total_iters: 2
+    N_samples_inverse_sphere: 16
+    add_tiny: 1.0e-06
+
+dataset:
+  train:
+    type: train
+    batch_size: 2
+    drop_last: false
+    shuffle: true
+
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 256
+
+  test:
+    type: test
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 256
+
+phase3:
+  enabled: true
+  use_modular_init: true
+  warmup_iters: 2
+  w_sds: 1000.0
+  sds_iters: 5
+  contact_iters: 3
+  w_contact: 5.0
+  grid_resolution: 32
+  spatial_lim: 1.5
+  use_hand_field: true
+  hand_field_resolution: 32
+  hand_field_limit: 1.5
+
+  ghop:
+    vqvae_checkpoint: "../checkpoints/ghop/vqvae_last.ckpt"
+    unet_checkpoint: "../checkpoints/ghop/unet_last.ckpt"
+    config_path: "../checkpoints/ghop/config.yaml"
+    text_lib: "../data/lib/text_templates.json"
+    device: "cuda"
+
+  sds:
+    diffusion_steps: 1000
+    prediction_respacing: 20
+    noise_schedule: "linear"
+    min_step_ratio: 0.02
+    max_step_ratio: 0.98
+    guidance_scale: 2.0
+    grad_clip_val: 1.0
+
+phase4:
+  enabled: true
+  mesh_resolution: 64
+  mesh_iso_level: 0.0
+  contact_start_iter: 5
+  contact_duration: 3
+  contact_warmup_iters: 2
+  w_contact: 5.0
+  w_penetration: 50.0
+  w_attraction: 5.0
+  w_damping: 0.05
+  contact_thresh: 0.01
+  collision_thresh: 0.005
+  contact_zones: "zones"
+  log_contact_every: 1
+  enable_tb_logging: true
+  visualize_contact: false
+  use_mesh_cache: false
+  contact_grad_clip: 5.0
+  fallback_on_error: true
+  use_pytorch3d: true
+
+phase5:
+  enabled: false
