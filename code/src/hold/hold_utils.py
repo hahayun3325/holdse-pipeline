@@ -13,11 +13,8 @@ import trimesh
 import src.engine.volsdf_utils as volsdf_utils
 
 from src.engine.rendering import integrate
-
-
-import torch
 import numpy as np
-
+import torch.nn.functional as F
 
 class PointInSpace:
     def __init__(self, global_sigma=0.5, global_sigma_xyz=None, local_sigma=0.01):
@@ -122,16 +119,74 @@ def merge_factors(factors_list, check=True):
 
 
 def wubba_lubba_dub_dub(batch):
-    batch_size = batch["uv"].shape[0]
-    num_images = batch["uv"].shape[1]
+    """
+    Reshape batch data for processing.
+    Converts (batch_size, num_images, ...) -> (batch_size * num_images, ...)
 
-    # Iterate over each key, val pair in the dictionary
+    Handles mixed data types safely:
+    - Tensors: Reshaped if multi-dimensional
+    - Lists/strings/other: Kept unchanged
+
+    Args:
+        batch: Dictionary with batch data (tensors and metadata)
+
+    Returns:
+        Reshaped batch dictionary
+    """
+    import torch
+
+    # ============================================================
+    # PHASE 1: Extract batch dimensions from a reference tensor
+    # ============================================================
+    batch_size = None
+    num_images = None
+
+    # Try to get dimensions from "uv" tensor (original approach)
+    if "uv" in batch and isinstance(batch["uv"], torch.Tensor):
+        batch_size = batch["uv"].shape[0]
+        num_images = batch["uv"].shape[1]
+    else:
+        # Fallback: Find first valid tensor
+        for key, val in batch.items():
+            if isinstance(val, torch.Tensor) and val.ndim >= 2:
+                batch_size = val.shape[0]
+                num_images = val.shape[1]
+                break
+
+    # If no valid tensors found, return batch unchanged
+    if batch_size is None or num_images is None:
+        return batch
+
+    # ============================================================
+    # PHASE 2: Iterate and reshape with type checking
+    # ============================================================
     for key, val in batch.items():
+        # Skip known metadata keys (original behavior preserved)
         if key in ["im_path", "total_pixels", "pixel_per_batch", "img_size"]:
             continue
 
-        # Reshape each tensor while keeping the other dimensions unchanged
-        batch[key] = val.reshape(batch_size * num_images, *val.shape[2:])
+        # ============================================================
+        # CRITICAL FIX: Type-safe reshape operation
+        # ============================================================
+        if not isinstance(val, torch.Tensor):
+            # Skip non-tensor values (lists, strings, dicts, etc.)
+            # Keep them in batch unchanged
+            continue
+
+        # Only reshape tensors with at least 2 dimensions
+        if val.ndim >= 2:
+            try:
+                # Verify dimensions match before reshaping
+                if val.shape[0] == batch_size and val.shape[1] == num_images:
+                    batch[key] = val.reshape(batch_size * num_images, *val.shape[2:])
+                else:
+                    # Dimension mismatch - keep original value
+                    pass
+            except RuntimeError as e:
+                # Reshape failed - log and keep original
+                print(f"Warning: Could not reshape '{key}': {e}")
+                pass
+
     return batch
 
 

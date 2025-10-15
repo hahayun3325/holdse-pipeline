@@ -57,7 +57,17 @@ class GenericServer(torch.nn.Module):
         output = self.forward(*self.cano_params, absolute=True)
         self.verts_c = output["verts"]
         self.joints_c = output["jnts"]
-        self.tfs_c_inv = output["tfs"].squeeze(0).inverse()
+        # FIX: Compute inverse on CPU to avoid CUDA cuSPARSE issues
+        tfs = output["tfs"].squeeze(0)
+        if tfs.is_cuda:
+            # Move to CPU for safe inverse computation
+            tfs_cpu = tfs.cpu()
+            tfs_c_inv_cpu = tfs_cpu.inverse()
+            # Move result back to GPU
+            self.tfs_c_inv = tfs_c_inv_cpu.to(tfs.device)
+        else:
+            # Already on CPU, compute normally
+            self.tfs_c_inv = tfs.inverse()
 
     def forward(self, scene_scale, transl, thetas, betas, absolute=False):
         out = {}

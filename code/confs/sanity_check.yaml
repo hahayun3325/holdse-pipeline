@@ -85,33 +85,41 @@ dataset:
 
 phase3:
   enabled: true
-  use_modular_init: true
-  warmup_iters: 2
-  w_sds: 1000.0
-  sds_iters: 5
-  contact_iters: 3
-  w_contact: 5.0
-  grid_resolution: 32
-  spatial_lim: 1.5
-  use_hand_field: true
-  hand_field_resolution: 32
-  hand_field_limit: 1.5
+  use_modular_init: true  # CRITICAL: Enable modular initialization
 
+  # GHOP Unified Model Checkpoint
   ghop:
-    vqvae_checkpoint: "../checkpoints/ghop/vqvae_last.ckpt"
-    unet_checkpoint: "../checkpoints/ghop/unet_last.ckpt"
-    config_path: "../checkpoints/ghop/config.yaml"
-    text_lib: "../data/lib/text_templates.json"
+    # Disable pretrained weight loading
+    vqvae_checkpoint: null  # or keep path but set use_pretrained: false
+    unet_checkpoint: null
+    vqvae_use_pretrained: false  # ← Add this
+    unet_use_pretrained: false   # ← Add this
+
+    text_lib: "data/ghop/text_templates.json"
     device: "cuda"
 
+    # Architecture settings (match your implementation)
+    vqvae:
+      input_channels: 16  # 1 object + 15 hand
+      latent_channels: 3
+      resolution: 64
+
+    unet:
+      in_channels: 3
+      out_channels: 3
+      model_channels: 64
+      context_dim: 768  # CLIP embedding dimension
+
+  # Reduced weights for sanity check
   sds:
+    weight: 100.0  # Reduced from 5000 for random init
     diffusion_steps: 1000
-    prediction_respacing: 20
-    noise_schedule: "linear"
+    guidance_scale: 2.0
+    timestep_strategy: "uniform"
     min_step_ratio: 0.02
     max_step_ratio: 0.98
-    guidance_scale: 2.0
     grad_clip_val: 1.0
+    prediction_respacing: 20  # Fast for sanity check
 
 phase4:
   enabled: true

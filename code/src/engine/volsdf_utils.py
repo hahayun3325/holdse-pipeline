@@ -60,8 +60,6 @@ def extract_features(
     assert tfs.shape[3] == 4
     pnts_c = pnts_c.view(num_images, -1, 3)
     pnts_d = deformer.forward_skinning(pnts_c, None, tfs)
-    # pnts_d = pnts_d.reshape(-1, 3)
-    # pnts_c = pnts_c.reshape(-1, 3)
 
     num_dim = pnts_d.shape[-1]
     grads = []
@@ -77,8 +75,67 @@ def extract_features(
             only_inputs=True,
         )[0]
         grads.append(grad)
+
+    # Line 32: Stack gradients into Jacobian matrix
     grads = torch.stack(grads, dim=-2).reshape(-1, num_dim, num_dim)
-    grads_inv = grads.inverse()
+
+    # ============================================================
+    # LINES 33-60: REPLACE ORIGINAL LINE 33 WITH THIS BLOCK
+    # FIX: CPU inverse workaround for CUDA cuSPARSE compatibility
+    # Issue: RTX 4090 + CUDA 11.1 doesn't support cusparseCreate
+    # Solution: Compute Jacobian inverse on CPU, then move to GPU
+    # Context: Inverse Jacobian needed for normal transformation
+    # ============================================================
+
+    device = grads.device  # Remember original device
+
+    if grads.is_cuda:
+        # GPU tensor - move to CPU for inverse computation
+        grads_cpu = grads.cpu()
+
+        try:
+            # Compute inverse on CPU (stable and supported)
+            grads_inv_cpu = grads_cpu.inverse()
+        except RuntimeError as e:
+            # Fallback 1: Regularization for near-singular matrices
+            print(f"[extract_features] Warning: Jacobian inversion failed, applying regularization: {e}")
+            epsilon = 1e-6
+            batch_size = grads_cpu.shape[0]
+            identity = torch.eye(num_dim, device='cpu').unsqueeze(0).expand(batch_size, -1, -1)
+            grads_cpu_reg = grads_cpu + epsilon * identity
+
+            try:
+                grads_inv_cpu = grads_cpu_reg.inverse()
+            except RuntimeError as e2:
+                # Fallback 2: Pseudo-inverse (most stable)
+                print(f"[extract_features] Warning: Using pseudo-inverse: {e2}")
+                grads_inv_cpu = torch.linalg.pinv(grads_cpu)
+
+        # Move result back to GPU
+        grads_inv = grads_inv_cpu.to(device)
+    else:
+        # CPU tensor - compute directly
+        try:
+            grads_inv = grads.inverse()
+        except RuntimeError as e:
+            # Fallback with regularization
+            print(f"[extract_features] Warning: Jacobian inversion failed, applying regularization: {e}")
+            epsilon = 1e-6
+            batch_size = grads.shape[0]
+            identity = torch.eye(num_dim, device=device).unsqueeze(0).expand(batch_size, -1, -1)
+            grads_reg = grads + epsilon * identity
+
+            try:
+                grads_inv = grads_reg.inverse()
+            except RuntimeError as e2:
+                print(f"[extract_features] Warning: Using pseudo-inverse: {e2}")
+                grads_inv = torch.linalg.pinv(grads)
+
+    # ============================================================
+    # END OF FIX
+    # ============================================================
+
+    # Lines 34-58: Rest of function UNCHANGED
     output = implicit_network(pnts_c, cond)
 
     # [0]

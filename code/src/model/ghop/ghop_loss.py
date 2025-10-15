@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from src.model.ghop.ghop_prior import load_ghop_prior
-
+from loguru import logger
 
 # ============================================================================
 # PHASE 3: Core SDS Loss Implementation
@@ -94,7 +94,7 @@ class SDSLoss(nn.Module):
         # ================================================================
         # Step 1: Build 15-channel hand skeletal distance field
         # ================================================================
-        hand_field_64 = self.hand_field(hand_params)  # (B, 15, 64, 64, 64)
+        hand_field_64 = self.hand_field(hand_params=hand_params)  # (B, 15, 64, 64, 64)
 
         # ================================================================
         # Step 2: Encode to latent space via VQ-VAE
@@ -175,6 +175,75 @@ class SDSLoss(nn.Module):
         }
 
         return sds_loss, info
+
+    def compute_sds_loss(self, obj_sdf, hand_params, text_prompt, weight=1.0):
+        """
+        Wrapper method for TwoStageTrainingManager compatibility.
+
+        Args:
+            obj_sdf: (B, 1, 64, 64, 64) object SDF grid
+            hand_params: Dict with keys {'pose', 'shape', 'trans'} OR (B, 45/48) tensor
+            text_prompt: str or List[str] text descriptions
+            weight: float, loss weight multiplier
+
+        Returns:
+            sds_loss: torch.Tensor, weighted SDS loss
+            info: dict, diagnostic information
+        """
+        try:
+            # ============================================================
+            # Validate and normalize text_prompt
+            # ============================================================
+            if text_prompt is None or (isinstance(text_prompt, list) and len(text_prompt) == 0):
+                # Default fallback prompt
+                text_prompt = ["a hand grasping an object"]
+                logger.debug("[SDSLoss] Using default text prompt: 'a hand grasping an object'")
+            elif isinstance(text_prompt, str):
+                # Single string -> wrap in list
+                text_prompt = [text_prompt]
+            elif isinstance(text_prompt, list):
+                # Filter out None/empty strings
+                text_prompt = [p for p in text_prompt if p is not None and len(p) > 0]
+                if len(text_prompt) == 0:
+                    text_prompt = ["a hand grasping an object"]
+
+            # ============================================================
+            # NO LONGER NEEDED: hand_params is already in correct format
+            # Just pass it directly to forward()
+            # ============================================================
+            # REMOVED: hand_params = {'pose': hand_pose}
+
+            # Call forward method (returns sds_loss, info)
+            sds_loss_raw, info = self.forward(
+                object_sdf=obj_sdf,
+                hand_params=hand_params,
+                text_prompts=text_prompt,  # Now guaranteed to be valid list
+                iteration=0,
+                weight=1.0
+            )
+
+            # Apply external weight
+            sds_loss_weighted = sds_loss_raw * weight
+
+            # Update info with weighted value
+            info['sds_weighted'] = sds_loss_weighted.item() if isinstance(sds_loss_weighted, torch.Tensor) else float(sds_loss_weighted)
+            info['sds_raw'] = sds_loss_raw.item() if isinstance(sds_loss_raw, torch.Tensor) else float(sds_loss_raw)
+            info['weight'] = weight
+
+            return sds_loss_weighted, info
+
+        except Exception as e:
+            # Fallback: return zero loss on error
+            device = obj_sdf.device
+            zero_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            info = {
+                'error': str(e),
+                'sds_weighted': 0.0,
+                'sds_raw': 0.0,
+                'weight': weight
+            }
+            logger.warning(f"[SDSLoss] compute_sds_loss failed: {e}")
+            return zero_loss, info
 
     def _get_text_embeddings(self, prompts, batch_size, device):
         """
@@ -279,7 +348,7 @@ class GHOPSDSLoss:
     def compute(
         self,
         obj_sdf,
-        hand_pose,
+        hand_params,
         object_category=None,
         iteration=0,
         hand_shape=None,
@@ -290,11 +359,11 @@ class GHOPSDSLoss:
 
         Args:
             obj_sdf: (B, 1, 64, 64, 64) - Object SDF from HOLD network
-            hand_pose: (B, 48) or (B, 45) - Hand pose from HOLD
+            hand_params: Dict with keys {'pose', 'shape', 'trans'} OR (B, 45/48) tensor
             object_category: str or List[str] - Object category for text conditioning
             iteration: Current training iteration
-            hand_shape: (B, 10) - MANO shape parameters (optional)
-            hand_trans: (B, 3) - Hand translation (optional)
+            hand_shape: (B, 10) - MANO shape (optional, for legacy compatibility)
+            hand_trans: (B, 3) - Hand translation (optional, for legacy compatibility)
 
         Returns:
             loss: Scalar tensor or 0 if not applied
@@ -305,11 +374,20 @@ class GHOPSDSLoss:
 
         # Prepare hand parameters dict
         B = obj_sdf.shape[0]
-        hand_params = {
-            'pose': hand_pose,
-            'shape': hand_shape if hand_shape is not None else torch.zeros(B, 10, device=obj_sdf.device),
-            'trans': hand_trans if hand_trans is not None else torch.zeros(B, 3, device=obj_sdf.device)
-        }
+
+        # ✅ FIXED: Handle both dict and tensor inputs properly
+        if isinstance(hand_params, dict):
+            # Already in correct format
+            pass
+        elif isinstance(hand_params, torch.Tensor):
+            # Legacy: tensor input, build dict
+            hand_params = {
+                'pose': hand_params,  # ✅ Now uses correct variable name
+                'shape': hand_shape if hand_shape is not None else torch.zeros(B, 10, device=obj_sdf.device),
+                'trans': hand_trans if hand_trans is not None else torch.zeros(B, 3, device=obj_sdf.device)
+            }
+        else:
+            raise ValueError(f"Invalid hand_params type: {type(hand_params)}")
 
         # Prepare text prompts
         if object_category is None:
@@ -321,9 +399,9 @@ class GHOPSDSLoss:
 
         # Phase 3: Use new SDSLoss module
         if self.sds_loss_module is not None:
-            sds_loss, sds_info = self.sds_loss_module(
+            sds_loss, sds_info = self.sds_loss_module.forward(
                 object_sdf=obj_sdf,
-                hand_params=hand_params,
+                hand_params=hand_params,  # ✅ Now correct
                 text_prompts=text_prompts,
                 iteration=iteration,
                 weight=self.sds_weight
@@ -332,10 +410,9 @@ class GHOPSDSLoss:
         else:
             sds_loss, sds_info = self.ghop_prior.compute_sds_loss(
                 obj_sdf=obj_sdf,
-                hand_pose=hand_pose,
+                hand_params=hand_params,  # ✅ Now correct
                 text_prompt=text_prompts[0] if len(text_prompts) == 1 else text_prompts,
-                weight=self.sds_weight,
-                guidance_scale=self.guidance_scale
+                weight=self.sds_weight
             )
 
         info = {

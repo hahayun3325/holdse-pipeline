@@ -61,13 +61,13 @@ class HOLDLoss:
             self.interaction_builder = None
             print("Phase 2 disabled: using standard HOLD losses only")
 
-    def compute_sds_loss(self, object_node, hand_pose, category, iteration):
+    def compute_sds_loss(self, object_node, hand_params, category, iteration):
         """
         Compute SDS loss using GHOP prior.
 
         Args:
             object_node: HOLD's ObjectNode with implicit SDF representation
-            hand_pose: [B, 48] MANO parameters (global orient + hand pose)
+            hand_params: Dict with keys {'pose', 'shape', 'trans'} OR (B, 45/48) tensor
             category: str or List[str] - object category name(s)
             iteration: int - current training iteration
 
@@ -75,6 +75,17 @@ class HOLDLoss:
             loss_sds: scalar tensor - SDS loss value
             sds_info: dict - auxiliary information (grad norms, timesteps, etc.)
         """
+        # ============================================================
+        # Handle both dict and tensor inputs for backward compatibility
+        # ============================================================
+        if isinstance(hand_params, dict):
+            hand_pose = hand_params['pose']  # Phase 3 format
+        elif isinstance(hand_params, torch.Tensor):
+            hand_pose = hand_params  # Legacy format
+        else:
+            # Invalid input - return zero loss
+            return torch.tensor(0.0, device='cuda'), {}
+
         # Return zero loss if Phase 2 disabled or in warmup period
         if self.ghop_prior is None or iteration < self.warmup_iters:
             return torch.tensor(0.0, device=hand_pose.device if torch.is_tensor(hand_pose) else 'cuda'), {}

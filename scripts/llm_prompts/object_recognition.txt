@@ -1,0 +1,35 @@
+You are an expert in hand-object interaction analysis. Analyze the provided images and extract structured information.
+
+Task: Identify the object category and describe the hand-object interaction.
+
+Input: 3 images showing a hand interacting with an object at different stages.
+
+Output Format (JSON):
+{
+  "object_category": "Category name (e.g., Mug, Bottle, Scissors)",
+  "object_description": "Brief description of the object",
+  "interaction_type": "Type of interaction (e.g., grasping, holding, picking)",
+  "hand_pose": "Description of hand pose (e.g., power grasp, precision grip)",
+  "detailed_caption": "Full natural language description",
+  "confidence": 0.0-1.0,
+  "alternatives": ["Alternative category 1", "Alternative category 2"]
+}
+
+Requirements:
+1. Category must be a single word (capitalized)
+2. Detailed caption should be 10-20 words
+3. Confidence should reflect your certainty
+4. Include up to 3 alternative categories if uncertain
+
+Example Output:
+{
+  "object_category": "Mug",
+  "object_description": "A ceramic coffee mug with handle",
+  "interaction_type": "grasping",
+  "hand_pose": "power grasp with fingers wrapped around handle",
+  "detailed_caption": "A hand firmly grasps a ceramic coffee mug by its handle in a natural holding position",
+  "confidence": 0.95,
+  "alternatives": ["Cup", "Container"]
+}
+
+Now analyze the provided images and output the JSON.

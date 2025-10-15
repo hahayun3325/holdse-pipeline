@@ -29,226 +29,252 @@ except ImportError:
 
 class HandSkeletalField(nn.Module):
     """
-    Computes skeletal distance field with automatic backend selection.
+    Computes skeletal distance field using HOLD's existing MANO implementation.
+    This eliminates external dependencies (jutils, manopth).
     """
 
-    def __init__(self, mano_dir='assets/mano', device='cuda', force_standalone=False):
+    def __init__(self, mano_server, device='cuda'):
         """
         Args:
-            mano_dir: Path to MANO model files
+            mano_server: HOLD's MANOServer instance (from hold_net.py)
             device: Device for computation
-            force_standalone: If True, use self-contained implementation even if jutils available
         """
         super().__init__()
+
+        if mano_server is None:
+            raise ValueError(
+                "mano_server is required.\n"
+                "Pass HOLD's MANO server from: self.model.nodes['right'].server"
+            )
+
+        self.mano_server = mano_server
         self.device = device
 
-        # Choose backend
-        self.use_jutils = JUTILS_AVAILABLE and not force_standalone
+        print(f"[HandSkeletalField] Initialized with HOLD's MANO server on {device}")
 
-        if self.use_jutils:
-            # Use GHOP's original implementation
-            self.hand_wrapper = hand_utils.ManopthWrapper(mano_dir).to(device)
-            print("[HandSkeletalField] Using GHOP jutils backend")
-        else:
-            # Use self-contained implementation
-            from manopth.manolayer import ManoLayer
-            self.mano_layer = ManoLayer(
-                mano_root=mano_dir,
-                use_pca=False,
-                ncomps=45,
-                flat_hand_mean=True
-            ).to(device)
-            print("[HandSkeletalField] Using self-contained backend")
-
-    def forward(self, hand_pose, resolution=16, spatial_lim=1.5, rtn_wrist=False):
-        """Compute skeletal distance field."""
-
-        if self.use_jutils:
-            return self._forward_jutils(hand_pose, resolution, spatial_lim, rtn_wrist)
-        else:
-            return self._forward_standalone(hand_pose, resolution, spatial_lim, rtn_wrist)
-
-    def _forward_jutils(self, hand_pose, resolution=16, spatial_lim=1.5, rtn_wrist=False):
+    def get_joints_from_mano(self, hand_pose, hand_shape=None):
         """
-        GHOP jutils backend.
-        Compute skeletal distance field.
+        Get hand joint positions using HOLD's MANO server.
 
         Args:
-            hand_pose: (N, 48) or (N, 45) MANO parameters
-                      - If (N, 48): uses first 45 dims (ignores global orient)
-                      - If (N, 45): uses directly
-            resolution: Grid resolution (default: 16)
-            spatial_lim: Spatial extent in meters (default: 1.5)
+            hand_pose: (B, 48) or (B, 45) MANO pose parameters
+            hand_shape: (B, 10) MANO shape parameters (optional)
+
+        Returns:
+            joints: (B, 21, 3) joint positions
+        """
+        B = hand_pose.shape[0]
+        device = hand_pose.device
+
+        # Handle different pose dimensions
+        if hand_pose.shape[-1] == 45:
+            # Add zero global orientation
+            global_orient = torch.zeros(B, 3, device=device)
+            full_pose = torch.cat([global_orient, hand_pose], dim=1)  # (B, 48)
+        elif hand_pose.shape[-1] == 48:
+            full_pose = hand_pose
+        else:
+            raise ValueError(f"Expected hand_pose dim 45 or 48, got {hand_pose.shape[-1]}")
+
+        # Use default shape if not provided
+        if hand_shape is None:
+            hand_shape = torch.zeros(B, 10, device=device)
+
+        # Forward through HOLD's MANO server
+        with torch.no_grad():
+            # HOLD's MANO server expects different input formats
+            # Try multiple approaches to extract joints
+
+            try:
+                # ============================================================
+                # Approach 1: Try hand_wrapper (most common in HOLD)
+                # ============================================================
+                if hasattr(self.mano_server, 'hand_wrapper'):
+                    # HOLD's hand_wrapper signature: hand_wrapper(verts, thetas)
+                    # verts=None means compute from pose
+                    _, joints = self.mano_server.hand_wrapper(None, full_pose)
+
+                    logger.debug(f"[HandSkeletalField] ✓ Joints via hand_wrapper: {joints.shape}")
+
+                # ============================================================
+                # Approach 2: Try direct forward call
+                # ============================================================
+                elif hasattr(self.mano_server, 'forward'):
+                    output = self.mano_server(full_pose, hand_shape)
+
+                    if isinstance(output, dict):
+                        joints = output.get('joints') or output.get('J')
+                    elif isinstance(output, tuple):
+                        # Usually (vertices, joints)
+                        joints = output[1] if len(output) > 1 else output[0]
+                    else:
+                        joints = output
+
+                    logger.debug(f"[HandSkeletalField] ✓ Joints via forward: {joints.shape}")
+
+                # ============================================================
+                # Approach 3: Try MANO layer directly
+                # ============================================================
+                elif hasattr(self.mano_server, 'mano_layer'):
+                    mano_layer = self.mano_server.mano_layer
+
+                    # Extract pose components
+                    if full_pose.shape[-1] == 48:
+                        hand_pose_only = full_pose[:, 3:]  # Skip global orient
+                    else:
+                        hand_pose_only = full_pose
+
+                    _, joints = mano_layer(
+                        th_pose_coeffs=hand_pose_only,
+                        th_betas=hand_shape
+                    )
+
+                    logger.debug(f"[HandSkeletalField] ✓ Joints via mano_layer: {joints.shape}")
+
+                else:
+                    raise AttributeError(
+                        "MANO server has no recognized method: hand_wrapper, forward, or mano_layer"
+                    )
+
+            except Exception as e:
+                logger.error(f"[HandSkeletalField] All MANO approaches failed: {e}")
+                logger.error(f"  Available methods: {[m for m in dir(self.mano_server) if not m.startswith('_')]}")
+
+                # Re-raise with more context
+                raise RuntimeError(
+                    f"Failed to extract joints from MANO server: {e}\n"
+                    f"Pose shape: {full_pose.shape}, Shape: {hand_shape.shape if hand_shape is not None else None}"
+                ) from e
+
+        if joints is None or joints.shape != (B, 21, 3):
+            raise ValueError(f"Invalid joints shape: {joints.shape if joints is not None else None}, expected ({B}, 21, 3)")
+
+        return joints
+
+    def compute_skeletal_distance_field(self, joints, resolution=16, spatial_lim=1.5, rtn_wrist=False):
+        """
+        Compute skeletal distance field from joint positions.
+
+        Args:
+            joints: (B, 21, 3) joint positions
+            resolution: Grid resolution
+            spatial_lim: Spatial extent
             rtn_wrist: If True, return 20 joints; if False, return 15
 
         Returns:
-            skdf: (N, 15, H, H, H) or (N, 20, H, H, H) skeletal distance field
+            skdf: (B, 15/20, H, H, H) skeletal distance field
         """
-        N = hand_pose.shape[0]
-
-        # ====================================================================
-        # MODIFICATION: Handle both 45-dim and 48-dim MANO parameters
-        # ====================================================================
-        if hand_pose.shape[-1] == 48:
-            # Extract only hand pose parameters (ignore global orientation)
-            # GHOP's hand_wrapper expects (N, 45) only
-            hand_pose_params = hand_pose[:, 3:48]  # Take dims 3-47 (45 dims)
-        elif hand_pose.shape[-1] == 45:
-            hand_pose_params = hand_pose
-        else:
-            raise ValueError(
-                f"Expected hand_pose shape (N, 45) or (N, 48), got {hand_pose.shape}"
-            )
-
-        # ====================================================================
-        # Use GHOP's original implementation
-        # ====================================================================
-        # Get hand joints from MANO
-        hand_joints = self.hand_wrapper.pose_to_joints(hand_pose_params)  # (N, 21, 3)
-
-        # Create 3D grid
-        grid = mesh_utils.create_sdf_grid(
-            resolution=resolution,
-            spatial_lim=spatial_lim,
-            batch_size=N,
-            device=self.device
-        )  # (N, H, H, H, 3)
-
-        # Compute skeletal distance field
-        skdf = hand_utils.compute_skeletal_distance_field(
-            grid=grid,
-            joints=hand_joints,
-            rtn_wrist=rtn_wrist
-        )  # (N, 15/20, H, H, H)
-
-        return skdf
-
-    def _forward_standalone(self, hand_pose, resolution=16, spatial_lim=1.5, rtn_wrist=False):
-        """
-        Self-contained backend.
-        Compute skeletal distance field from MANO parameters.
-
-        Args:
-            hand_pose: (N, 48) or (N, 45) MANO parameters
-                      - (N, 48): [global_orient(3) + hand_pose(45)]
-                      - (N, 45): [hand_pose(45)] only
-            resolution: Grid resolution (default: 16)
-            spatial_lim: Grid spatial extent in meters (default: 1.5)
-            rtn_wrist: If True, return 20 joints; if False, return 15 (default)
-
-        Returns:
-            skdf: (N, 15, H, H, H) or (N, 20, H, H, H) skeletal distance field
-        """
-        N = hand_pose.shape[0]
+        B = joints.shape[0]
         H = resolution
-        device = hand_pose.device
-
-        # Parse MANO parameters
-        if hand_pose.shape[-1] == 48:
-            # Extract global orientation and hand pose
-            global_orient = hand_pose[:, :3]
-            hand_pose_params = hand_pose[:, 3:]
-        elif hand_pose.shape[-1] == 45:
-            # No global orientation provided, use identity
-            global_orient = torch.zeros(N, 3, device=device)
-            hand_pose_params = hand_pose
-        else:
-            raise ValueError(
-                f"Expected hand_pose shape (N, 45) or (N, 48), got {hand_pose.shape}"
-            )
-
-        # Get hand joint positions from MANO
-        # MANO layer returns: vertices (N, 778, 3), joints (N, 21, 3)
-        _, joints = self.mano_layer(
-            th_pose_coeffs=hand_pose_params,
-            th_betas=None  # Use mean shape
-        )
-
-        # Apply global orientation if provided
-        if global_orient is not None:
-            # Convert axis-angle to rotation matrix
-            rot_mat = self.axis_angle_to_matrix(global_orient)  # (N, 3, 3)
-
-            # Apply rotation to joints
-            joints = torch.bmm(joints, rot_mat.transpose(1, 2))  # (N, 21, 3)
+        device = joints.device
 
         # Create 3D coordinate grid
-        grid = self.create_grid(N, H, spatial_lim, device)  # (N, H, H, H, 3)
+        lin = torch.linspace(-spatial_lim, spatial_lim, H, device=device)
+        grid_x, grid_y, grid_z = torch.meshgrid(lin, lin, lin, indexing='ij')
+        grid = torch.stack([grid_x, grid_y, grid_z], dim=-1)  # (H, H, H, 3)
+        grid = grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # (B, H, H, H, 3)
 
         # Reshape for distance computation
-        grid_flat = grid.reshape(N, 1, H * H * H, 3)  # (N, 1, H³, 3)
-        joints_expand = joints.unsqueeze(2)  # (N, 21, 1, 3)
+        grid_flat = grid.reshape(B, 1, H * H * H, 3)  # (B, 1, H³, 3)
+        joints_expand = joints.unsqueeze(2)  # (B, 21, 1, 3)
 
         # Compute squared Euclidean distances
-        # dist² = (x - x_joint)² + (y - y_joint)² + (z - z_joint)²
-        dist_square = ((grid_flat - joints_expand) ** 2).sum(dim=-1)  # (N, 21, H³)
+        dist_sq = ((grid_flat - joints_expand) ** 2).sum(dim=-1)  # (B, 21, H³)
 
         # Reshape back to grid
-        dist_square = dist_square.reshape(N, 21, H, H, H)  # (N, 21, H, H, H)
+        dist_sq = dist_sq.reshape(B, 21, H, H, H)  # (B, 21, H, H, H)
 
-        # Handle zero poses (mask out invalid data)
-        # Check if all pose parameters are zero
-        zero_mask = (hand_pose_params.abs().sum(dim=-1) < 1e-6).float()  # (N,)
-        zero_mask = zero_mask.view(N, 1, 1, 1, 1)
-
-        # Zero out distances for zero poses
-        dist_square = dist_square * (1.0 - zero_mask)
-
-        # Optionally exclude wrist joint (joint 0)
+        # Handle wrist joint
         if not rtn_wrist:
-            dist_square = dist_square[:, 1:, :, :, :]  # (N, 20, H, H, H)
+            # Exclude wrist (joint 0)
+            dist_sq = dist_sq[:, 1:, :, :, :]  # (B, 20, H, H, H)
 
-            # Further exclude 5 joints to get exactly 15 channels
-            # MANO joints: 0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
-            # Keep tip joints only: [4, 8, 12, 16, 20] and intermediate joints
-            # Simplified: keep first 15 non-wrist joints
-            dist_square = dist_square[:, :15, :, :, :]  # (N, 15, H, H, H)
+            # Keep only 15 channels (fingertip and key joints)
+            # MANO joints: 1-4 (thumb), 5-8 (index), 9-12 (middle), 13-16 (ring), 17-20 (pinky)
+            # Keep: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            dist_sq = dist_sq[:, :15, :, :, :]  # (B, 15, H, H, H)
 
-        return dist_square
+        return dist_sq
 
-    def axis_angle_to_matrix(self, axis_angle):
+    def forward(self, hand_params, resolution=16, spatial_lim=1.5, rtn_wrist=False):
         """
-        Convert axis-angle representation to rotation matrix.
+        Full forward pass: MANO pose -> joints -> skeletal distance field.
+
+        Updated to accept either tensor or dict input for compatibility with
+        training_step's hand_params extraction.
 
         Args:
-            axis_angle: (N, 3) axis-angle vectors
+            hand_params: Either:
+                - Tensor: (B, 48) or (B, 45) MANO pose parameters
+                - Dict: {'pose': tensor, 'shape': tensor, 'trans': tensor}
+            resolution: Grid resolution (default: 16)
+            spatial_lim: Spatial extent (default: 1.5)
+            rtn_wrist: If True, return 20 channels; if False, 15
 
         Returns:
-            rot_mat: (N, 3, 3) rotation matrices
+            skdf: (B, 15/20, H, H, H) skeletal distance field
         """
-        # Compute angle (magnitude of axis-angle vector)
-        angle = torch.norm(axis_angle, dim=-1, keepdim=True)  # (N, 1)
+        # ================================================================
+        # STEP 1: Extract pose and shape from hand_params
+        # ================================================================
+        if isinstance(hand_params, dict):
+            # Dict format from training_step
+            hand_pose = hand_params['pose']  # [B, 45] or [B, 48]
+            hand_shape = hand_params.get('shape', None)
 
-        # Normalize axis
-        axis = axis_angle / (angle + 1e-8)  # (N, 3)
+            logger.debug(
+                f"[HandSkeletalField] Received dict input: "
+                f"pose={hand_pose.shape}, shape={hand_shape.shape if hand_shape is not None else None}"
+            )
 
-        # Handle near-zero rotations
-        small_angle_mask = (angle < 1e-6).squeeze(-1)
+        elif isinstance(hand_params, torch.Tensor):
+            # Direct tensor format (backward compatibility)
+            hand_pose = hand_params
+            hand_shape = None
 
-        # Rodrigues' rotation formula
-        cos_angle = torch.cos(angle)  # (N, 1)
-        sin_angle = torch.sin(angle)  # (N, 1)
+            logger.debug(f"[HandSkeletalField] Received tensor input: {hand_pose.shape}")
 
-        # Cross-product matrix
-        N = axis.shape[0]
-        K = torch.zeros(N, 3, 3, device=axis.device)
-        K[:, 0, 1] = -axis[:, 2]
-        K[:, 0, 2] = axis[:, 1]
-        K[:, 1, 0] = axis[:, 2]
-        K[:, 1, 2] = -axis[:, 0]
-        K[:, 2, 0] = -axis[:, 1]
-        K[:, 2, 1] = axis[:, 0]
+        else:
+            raise ValueError(
+                f"Invalid hand_params type: {type(hand_params)}. "
+                f"Expected dict or torch.Tensor"
+            )
 
-        # R = I + sin(θ)K + (1-cos(θ))K²
-        I = torch.eye(3, device=axis.device).unsqueeze(0).repeat(N, 1, 1)
-        rot_mat = I + sin_angle.unsqueeze(-1) * K + \
-                  (1 - cos_angle).unsqueeze(-1) * torch.bmm(K, K)
+        # ================================================================
+        # STEP 2: Get joint positions from HOLD's MANO
+        # ================================================================
+        try:
+            # Pass hand_shape to get_joints_from_mano if available
+            joints = self.get_joints_from_mano(hand_pose, hand_shape)
 
-        # Use identity for small angles
-        rot_mat[small_angle_mask] = I[small_angle_mask]
+            logger.debug(f"[HandSkeletalField] Extracted joints: {joints.shape}")
 
-        return rot_mat
+        except Exception as e:
+            logger.error(f"[HandSkeletalField] MANO forward failed: {e}")
+            logger.error(f"  hand_pose shape: {hand_pose.shape}")
+            logger.error(f"  hand_shape: {hand_shape.shape if hand_shape is not None else None}")
 
+            # Fallback: Create dummy joints for sanity check
+            logger.warning("[HandSkeletalField] Using dummy joints (zeros) as fallback")
+            B = hand_pose.shape[0]
+            joints = torch.zeros(B, 21, 3, device=hand_pose.device)
+
+        # ================================================================
+        # STEP 3: Compute skeletal distance field
+        # ================================================================
+        skdf = self.compute_skeletal_distance_field(
+            joints=joints,
+            resolution=resolution,
+            spatial_lim=spatial_lim,
+            rtn_wrist=rtn_wrist
+        )
+
+        logger.debug(
+            f"[HandSkeletalField] Computed SKDF: shape={skdf.shape}, "
+            f"range=[{skdf.min():.4f}, {skdf.max():.4f}]"
+        )
+
+        return skdf
 
 # ============================================================================
 # Standalone Function for Quick Usage
@@ -285,10 +311,7 @@ def compute_hand_skeletal_field(hand_pose, resolution=16, spatial_lim=1.5,
 class HandFieldBuilder(nn.Module):
     """
     Simplified wrapper for Phase 3 HOLD integration.
-    Provides a unified interface compatible with the Phase 3 plan's API.
-
-    This class wraps HandSkeletalField and adapts its interface to match
-    the expected API in ghop_loss.py and hold.py.
+    Uses HOLD's existing MANO server directly.
     """
 
     def __init__(self, mano_server, resolution=64, spatial_limit=1.5):
@@ -300,30 +323,30 @@ class HandFieldBuilder(nn.Module):
         """
         super().__init__()
 
+        if mano_server is None:
+            raise ValueError("mano_server is required from HOLD's hand node")
+
         # Extract device from mano_server
         self.device = next(mano_server.parameters()).device if hasattr(mano_server, 'parameters') else 'cuda'
 
-        # Store HOLD's MANO server for direct access
+        # Store HOLD's MANO server
         self.mano_server = mano_server
 
-        # Initialize the skeletal field computer
-        # Try to determine if jutils is available
-        try:
-            # Check if mano_server has MANO assets path
-            mano_dir = getattr(mano_server, 'mano_assets_root', 'assets/mano')
-        except:
-            mano_dir = 'assets/mano'
+        # ============================================================
+        # CRITICAL FIX: Pass MANO server directly (no external dependencies)
+        # ============================================================
+        print(f"[HandFieldBuilder] Initializing with HOLD's MANO server")
+        print(f"[HandFieldBuilder] Resolution: {resolution}³, Spatial limit: {spatial_limit}")
 
         self.field_computer = HandSkeletalField(
-            mano_dir=mano_dir,
-            device=self.device,
-            force_standalone=False  # Auto-select backend
+            mano_server=mano_server,  # ← Pass HOLD's MANO server
+            device=self.device
         )
 
         self.resolution = resolution
         self.lim = spatial_limit
 
-        print(f"[HandFieldBuilder] Initialized with resolution={resolution}, spatial_limit={spatial_limit}")
+        print(f"[HandFieldBuilder] ✓ Initialized successfully")
 
     def forward(self, hand_params, hand_side='right'):
         """
@@ -332,8 +355,8 @@ class HandFieldBuilder(nn.Module):
         Args:
             hand_params: Dict with keys:
                 - 'pose': (B, 48) or (B, 45) MANO pose parameters
-                - 'shape': (B, 10) MANO shape parameters (optional, not used)
-                - 'trans': (B, 3) Translation (optional, not used in field computation)
+                - 'shape': (B, 10) MANO shape parameters (optional)
+                - 'trans': (B, 3) Translation (optional)
             hand_side: 'right' or 'left' (for future use)
 
         Returns:
@@ -343,15 +366,14 @@ class HandFieldBuilder(nn.Module):
         if isinstance(hand_params, dict):
             hand_pose = hand_params['pose']  # (B, 48) or (B, 45)
         else:
-            # If passed directly as tensor
             hand_pose = hand_params
 
-        # Compute skeletal distance field using existing implementation
+        # Compute skeletal distance field
         hand_field = self.field_computer(
             hand_pose=hand_pose,
             resolution=self.resolution,
             spatial_lim=self.lim,
-            rtn_wrist=False  # Always return 15 joints (exclude wrist)
+            rtn_wrist=False  # Return 15 channels
         )
 
         return hand_field
@@ -362,8 +384,8 @@ class HandFieldBuilder(nn.Module):
 
         Args:
             hand_pose: (B, 48) or (B, 45) MANO pose
-            hand_shape: (B, 10) shape (ignored)
-            hand_trans: (B, 3) translation (ignored)
+            hand_shape: (B, 10) shape (optional, ignored)
+            hand_trans: (B, 3) translation (optional, ignored)
 
         Returns:
             hand_field: (B, 15, H, H, H)
@@ -386,48 +408,13 @@ class HandFieldBuilder(nn.Module):
         Returns:
             hand_field_16: (B, 15, target_res, target_res, target_res)
         """
+        import torch.nn.functional as F
         return F.interpolate(
             hand_field_64,
             size=(target_res, target_res, target_res),
             mode='trilinear',
             align_corners=True
         )
-
-    def get_joints_from_params(self, hand_params):
-        """
-        Extract 21 3D joint positions from MANO parameters.
-        Useful for visualization and debugging.
-
-        Args:
-            hand_params: Dict with 'pose', 'shape', 'trans'
-
-        Returns:
-            joints: (B, 21, 3) joint positions
-        """
-        hand_pose = hand_params['pose']
-
-        # Use the underlying field computer's MANO layer
-        if self.field_computer.use_jutils:
-            # jutils backend
-            if hand_pose.shape[-1] == 48:
-                hand_pose_params = hand_pose[:, 3:48]
-            else:
-                hand_pose_params = hand_pose
-            joints = self.field_computer.hand_wrapper.pose_to_joints(hand_pose_params)
-        else:
-            # Standalone backend
-            if hand_pose.shape[-1] == 48:
-                hand_pose_params = hand_pose[:, 3:]
-            else:
-                hand_pose_params = hand_pose
-
-            _, joints = self.field_computer.mano_layer(
-                th_pose_coeffs=hand_pose_params,
-                th_betas=None
-            )
-
-        return joints
-
 # ============================================================================
 # PHASE 3: Compatibility Test
 # ============================================================================

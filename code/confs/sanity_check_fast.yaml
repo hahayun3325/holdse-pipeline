@@ -1,0 +1,188 @@
+# File: confs/sanity_check_fast.yaml
+# Fast sanity check configuration - optimized for speed (~30 seconds)
+# Disables validation rendering which takes 99% of the time
+
+# ============================================================
+# MODEL CONFIGURATION (Minimal)
+# ============================================================
+model:
+  implicit_network:
+    feature_vector_size: 64  # Reduced from 128
+    d_in: 3
+    d_out: 1
+    dims: [64, 64, 64]  # Reduced from [128, 128, 128, 128]
+    init: geometry
+    bias: 0.6
+    skip_in: []  # No skip connections for speed
+    weight_norm: true
+    multires: 2  # Reduced from 4
+    cond: pose
+
+  rendering_network:
+    feature_vector_size: 64  # Reduced from 128
+    mode: pose
+    d_in: 14
+    d_out: 3
+    dims: [64]  # Reduced from [128, 128]
+    weight_norm: true
+    multires_view: -1
+
+  bg_implicit_network:
+    feature_vector_size: 64
+    d_in: 4
+    d_out: 1
+    dims: [64, 64, 64]  # Reduced
+    init: none
+    bias: 0.0
+    skip_in: []
+    weight_norm: false
+    multires: 4  # Reduced from 6
+    cond: frame
+    dim_frame_encoding: 8  # Reduced from 16
+
+  bg_rendering_network:
+    feature_vector_size: 64
+    mode: nerf_frame_encoding
+    d_in: 3
+    d_out: 3
+    dims: [32]  # Reduced from [64]
+    weight_norm: false
+    multires_view: 1  # Reduced from 2
+    dim_frame_encoding: 8
+
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  ray_sampler:
+    near: 0.0
+    N_samples: 16  # Reduced from 32
+    N_samples_eval: 32  # Reduced from 64
+    N_samples_extra: 8  # Reduced from 16
+    eps: 0.1
+    beta_iters: 3  # Reduced from 5
+    max_total_iters: 1  # Reduced from 2
+    N_samples_inverse_sphere: 8  # Reduced from 16
+    add_tiny: 1.0e-06
+
+# ============================================================
+# DATASET CONFIGURATION (Fast Loading)
+# ============================================================
+dataset:
+  train:
+    type: train
+    batch_size: 2
+    drop_last: false
+    shuffle: true
+    num_workers: 4  # Parallel loading
+    prefetch_factor: 2  # Prefetch batches
+
+  # ============================================================
+  # VALIDATION: DISABLED (Biggest speedup)
+  # ============================================================
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 64  # Minimal if validation is forced
+    enabled: false  # ← KEY: Disable validation
+
+  test:
+    type: test
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 64
+
+# ============================================================
+# PHASE 3: GHOP (Minimal for Speed)
+# ============================================================
+phase3:
+  enabled: true
+  use_modular_init: true
+
+  # GHOP Unified Model Checkpoint
+  ghop:
+    # Random initialization (no checkpoint loading)
+    vqvae_checkpoint: null
+    unet_checkpoint: null
+    vqvae_use_pretrained: false
+    unet_use_pretrained: false
+
+    text_lib: "data/ghop/text_templates.json"
+    device: "cuda"
+
+    # Minimal architecture
+    vqvae:
+      input_channels: 16
+      latent_channels: 3
+      resolution: 32  # Reduced from 64
+
+    unet:
+      in_channels: 3
+      out_channels: 3
+      model_channels: 32  # Reduced from 64
+      context_dim: 512  # Reduced from 768
+
+  # Fast SDS settings
+  sds:
+    weight: 100.0
+    diffusion_steps: 1000
+    guidance_scale: 2.0
+    timestep_strategy: "uniform"
+    min_step_ratio: 0.02
+    max_step_ratio: 0.98
+    grad_clip_val: 1.0
+    prediction_respacing: 10  # Very fast (reduced from 20)
+    num_sds_iterations: 5  # Explicit for clarity
+
+# ============================================================
+# PHASE 4: CONTACT (Minimal Mesh Resolution)
+# ============================================================
+phase4:
+  enabled: true
+  mesh_resolution: 32  # Reduced from 64 (8x fewer voxels)
+  mesh_iso_level: 0.0
+  contact_start_iter: 5
+  contact_duration: 3
+  contact_warmup_iters: 0  # No warmup
+  w_contact: 5.0
+  w_penetration: 50.0
+  w_attraction: 5.0
+  w_damping: 0.05
+  contact_thresh: 0.01
+  collision_thresh: 0.005
+  contact_zones: "zones"
+  log_contact_every: 999999  # Don't log during sanity
+  enable_tb_logging: false  # Disable tensorboard
+  visualize_contact: false
+  use_mesh_cache: false
+  contact_grad_clip: 5.0
+  fallback_on_error: true
+  use_pytorch3d: true
+
+# ============================================================
+# PHASE 5: DISABLED
+# ============================================================
+phase5:
+  enabled: false
+
+# ============================================================
+# LOGGING: MINIMAL
+# ============================================================
+logging:
+  log_every: 999999  # Don't log during training
+  log_images_every: 999999  # No image rendering
+  log_mesh_every: 999999  # No mesh extraction
+  enable_comet: false  # Optional: disable Comet.ml
+
+# ============================================================
+# CALLBACKS: DISABLED
+# ============================================================
+callbacks:
+  render_validation: false  # No validation rendering
+  mesh_extraction: false  # No mesh export
+  mesh_cano: false  # No canonical mesh
+  checkpoint_every_n_epochs: 999999  # Don't save during sanity

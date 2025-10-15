@@ -332,24 +332,105 @@ class GHOPVQVAEWrapper(nn.Module):
             param.requires_grad = False
 
     def _load_checkpoint(self, checkpoint_path):
-        """Load pretrained VQ-VAE weights with flexible key matching."""
-        print(f"Loading VQ-VAE checkpoint from {checkpoint_path}")
+        """
+        Load pretrained VQ-VAE weights from unified GHOP checkpoint.
+        Extracts only encoder, decoder, and quantizer parameters.
+        """
+        from loguru import logger
+
+        logger.info(f"[GHOPVQVAEWrapper] Loading from: {checkpoint_path}")
+
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-        # Try to load state dict
+        # Extract state dict
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
         else:
             state_dict = checkpoint
 
-        # Load with strict=False to allow partial loading
-        # (encoder weights may differ due to in_channels change)
-        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+        logger.info(f"  Total parameters in checkpoint: {len(state_dict)}")
 
-        if missing_keys:
-            print(f"Warning: Missing keys in checkpoint: {missing_keys[:5]}...")
-        if unexpected_keys:
-            print(f"Warning: Unexpected keys in checkpoint: {unexpected_keys[:5]}...")
+        # ============================================================
+        # CRITICAL FIX: Extract VQ-VAE with correct key filtering
+        # ============================================================
+        vqvae_state_dict = {}
+
+        for key, value in state_dict.items():
+            # Match VQ-VAE components based on actual checkpoint structure
+            # From verification: ae.model.encoder.*, ae.model.decoder.*, ae.model.quantize.*
+            if any(pattern in key for pattern in [
+                'encoder.',      # Encoder layers
+                'decoder.',      # Decoder layers
+                'quantize.',     # Quantizer
+                'quant_conv',    # Pre-quantization conv
+                'post_quant'     # Post-quantization conv
+            ]):
+                # Remove prefixes to match local model structure
+                new_key = key
+
+                # Remove 'ae.model.' prefix
+                if 'ae.model.' in new_key:
+                    new_key = new_key.replace('ae.model.', '')
+
+                # Remove 'first_stage_model.' prefix (alternative naming)
+                if 'first_stage_model.' in new_key:
+                    new_key = new_key.replace('first_stage_model.', '')
+
+                vqvae_state_dict[new_key] = value
+
+        logger.info(f"  Extracted VQ-VAE parameters: {len(vqvae_state_dict)}")
+
+        if len(vqvae_state_dict) == 0:
+            logger.warning("  ⚠️  No VQ-VAE parameters extracted!")
+            logger.warning("  Sample checkpoint keys:")
+            for i, key in enumerate(list(state_dict.keys())[:10]):
+                logger.warning(f"    {key}")
+            logger.warning("  Continuing with random initialization...")
+            return
+
+        # Show sample extracted keys
+        sample_keys = list(vqvae_state_dict.keys())[:5]
+        logger.info(f"  Sample extracted keys: {sample_keys}")
+
+        # ============================================================
+        # Load with architectural flexibility
+        # ============================================================
+        try:
+            # Get current model state for comparison
+            model_state = self.state_dict()
+            model_keys = set(model_state.keys())
+            ckpt_keys = set(vqvae_state_dict.keys())
+
+            # Find matching keys
+            matching_keys = model_keys & ckpt_keys
+            missing_in_ckpt = model_keys - ckpt_keys
+            unexpected_in_ckpt = ckpt_keys - model_keys
+
+            logger.info(f"  Matching keys: {len(matching_keys)}")
+            logger.info(f"  Missing in checkpoint: {len(missing_in_ckpt)}")
+            logger.info(f"  Unexpected in checkpoint: {len(unexpected_in_ckpt)}")
+
+            # Load matching keys only
+            filtered_state_dict = {k: v for k, v in vqvae_state_dict.items() if k in model_keys}
+
+            missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
+
+            if len(matching_keys) > 0:
+                logger.info(f"✓ VQ-VAE weights loaded: {len(matching_keys)} parameters")
+            else:
+                logger.warning("⚠️  No matching keys found - using random initialization")
+
+            # Log critical missing keys
+            critical_missing = [k for k in missing_in_ckpt if 'encoder' in k or 'decoder' in k]
+            if critical_missing:
+                logger.warning(f"  Critical missing keys: {len(critical_missing)}")
+                if len(critical_missing) <= 3:
+                    for key in critical_missing:
+                        logger.warning(f"    - {key}")
+
+        except Exception as e:
+            logger.error(f"Failed to load VQ-VAE weights: {e}")
+            logger.error("Continuing with random initialization...")
 
     def encode(self, object_sdf, hand_field=None):
         """

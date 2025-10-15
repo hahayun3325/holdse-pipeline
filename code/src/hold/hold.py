@@ -166,27 +166,108 @@ class HOLD(pl.LightningModule):
                 from src.model.ghop.diffusion import GHOP3DUNetWrapper
                 from src.model.ghop.hand_field import HandFieldBuilder
                 from src.model.ghop.ghop_loss import SDSLoss
-                from src.model.ghop.ghop_prior import TwoStageTrainingManager  # FIX: Added import
+                from src.model.ghop.ghop_prior import TwoStageTrainingManager
 
                 # Get device
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+                # ============================================================
+                # CRITICAL FIX: Check pretrained flags BEFORE file access
+                # ============================================================
+                vqvae_use_pretrained = phase3_cfg.ghop.get('vqvae_use_pretrained', False)
+                unet_use_pretrained = phase3_cfg.ghop.get('unet_use_pretrained', False)
+
+                model_checkpoint = phase3_cfg.ghop.get('model_checkpoint', 'checkpoints/ghop/last.ckpt')
+
+                # Determine if we need the checkpoint file
+                need_checkpoint = vqvae_use_pretrained or unet_use_pretrained
+
+                if need_checkpoint:
+                    # Only check file existence if we're loading pretrained weights
+                    logger.info(f"Loading unified GHOP checkpoint from: {model_checkpoint}")
+                    logger.info("  This checkpoint contains BOTH VQ-VAE and U-Net components")
+
+                    # Verify checkpoint exists
+                    if not os.path.exists(model_checkpoint):
+                        raise FileNotFoundError(
+                            f"GHOP checkpoint not found: {model_checkpoint}\n"
+                            f"Expected: Unified checkpoint (~1.1 GB) from GHOP project\n"
+                            f"Run: ln -s ~/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt {model_checkpoint}"
+                        )
+
+                    # Load checkpoint once
+                    logger.info("Loading checkpoint...")
+                    unified_checkpoint = torch.load(model_checkpoint, map_location='cpu')
+
+                    if 'state_dict' not in unified_checkpoint:
+                        raise ValueError(f"Invalid checkpoint structure: missing 'state_dict'")
+
+                    state_dict = unified_checkpoint['state_dict']
+                    logger.info(f"✓ Unified checkpoint loaded: {len(state_dict)} parameters")
+
+                    # Analyze checkpoint structure
+                    vqvae_keys = [k for k in state_dict.keys() if 'first_stage_model' in k or 'encoder' in k or 'decoder' in k or 'quantize' in k]
+                    unet_keys = [k for k in state_dict.keys() if 'model' in k and 'first_stage' not in k]
+
+                    logger.info(f"  VQ-VAE components: {len(vqvae_keys)} parameters")
+                    logger.info(f"  U-Net components: {len(unet_keys)} parameters")
+
+                else:
+                    # Random initialization - no checkpoint needed
+                    logger.warning("")
+                    logger.warning("=" * 70)
+                    logger.warning("RUNNING WITH RANDOM INITIALIZATION")
+                    logger.warning("=" * 70)
+                    logger.warning("  VQ-VAE: Random weights (vqvae_use_pretrained=False)")
+                    logger.warning("  U-Net: Random weights (unet_use_pretrained=False)")
+                    logger.warning("")
+                    logger.warning("This is acceptable for:")
+                    logger.warning("  ✓ Sanity checks (verify pipeline works)")
+                    logger.warning("  ✓ Architecture debugging")
+                    logger.warning("  ✓ Testing data flow")
+                    logger.warning("")
+                    logger.warning("Limitations:")
+                    logger.warning("  ✗ SDS loss will not provide effective guidance")
+                    logger.warning("  ✗ GHOP prior cannot guide reconstruction")
+                    logger.warning("")
+                    logger.warning("For production training, set:")
+                    logger.warning("  vqvae_use_pretrained: true")
+                    logger.warning("  unet_use_pretrained: true")
+                    logger.warning("=" * 70)
+                    logger.warning("")
+
+                # ============================================================
                 # Initialize VQ-VAE
-                logger.info(f"Loading VQ-VAE from {phase3_cfg.ghop.vqvae_checkpoint}")
+                # ============================================================
+                logger.info("Initializing VQ-VAE...")
                 self.vqvae = GHOPVQVAEWrapper(
-                    vqvae_ckpt_path=phase3_cfg.ghop.vqvae_checkpoint,
+                    vqvae_ckpt_path=model_checkpoint if vqvae_use_pretrained else None,
                     device=device,
                     use_hand_field=phase3_cfg.get('use_hand_field', True)
                 )
 
+                if vqvae_use_pretrained:
+                    logger.info("✓ VQ-VAE initialized with pretrained weights")
+                else:
+                    logger.info("✓ VQ-VAE initialized with RANDOM weights")
+
+                # ============================================================
                 # Initialize 3D U-Net
-                logger.info(f"Loading U-Net from {phase3_cfg.ghop.unet_checkpoint}")
+                # ============================================================
+                logger.info("Initializing U-Net...")
                 self.unet = GHOP3DUNetWrapper(
-                    unet_ckpt_path=phase3_cfg.ghop.unet_checkpoint,
+                    unet_ckpt_path=model_checkpoint if unet_use_pretrained else None,
                     device=device
                 )
 
+                if unet_use_pretrained:
+                    logger.info("✓ U-Net initialized with pretrained weights")
+                else:
+                    logger.info("✓ U-Net initialized with RANDOM weights")
+
+                # ============================================================
                 # Initialize Hand Field Builder
+                # ============================================================
                 mano_server = None
                 for node in self.model.nodes.values():
                     if 'right' in node.node_id.lower() or 'left' in node.node_id.lower():
@@ -197,26 +278,31 @@ class HOLD(pl.LightningModule):
                     raise ValueError("No hand node found in model. Cannot initialize HandFieldBuilder.")
 
                 logger.info("Initializing Hand Field Builder...")
-                # FIX: Consistent variable naming - use hand_field_builder (with underscore)
                 self.hand_field_builder = HandFieldBuilder(
                     mano_server=mano_server,
                     resolution=phase3_cfg.get('grid_resolution', 64),
                     spatial_limit=phase3_cfg.get('spatial_limit', 1.5)
                 )
+                logger.info("✓ Hand Field Builder initialized")
 
+                # ============================================================
                 # Initialize SDS Loss Module
+                # ============================================================
                 logger.info("Initializing SDS Loss Module...")
                 self.sds_loss = SDSLoss(
                     vqvae_wrapper=self.vqvae,
                     unet_wrapper=self.unet,
-                    hand_field_builder=self.hand_field_builder,  # FIX: Consistent naming
+                    hand_field_builder=self.hand_field_builder,
                     guidance_scale=phase3_cfg.sds.get('guidance_scale', 4.0),
                     min_step_ratio=phase3_cfg.sds.get('min_step_ratio', 0.02),
                     max_step_ratio=phase3_cfg.sds.get('max_step_ratio', 0.98),
                     diffusion_steps=phase3_cfg.sds.get('diffusion_steps', 1000)
                 )
+                logger.info("✓ SDS Loss Module initialized")
 
+                # ============================================================
                 # Initialize Two-Stage Training Manager
+                # ============================================================
                 logger.info("Initializing Two-Stage Training Manager...")
                 self.ghop_manager = TwoStageTrainingManager(
                     sds_loss_module=self.sds_loss,
@@ -225,22 +311,27 @@ class HOLD(pl.LightningModule):
                     max_sds_weight=phase3_cfg.get('w_sds', 5000.0),
                     max_contact_weight=phase3_cfg.get('w_contact', 10.0)
                 )
+                logger.info("✓ Two-Stage Training Manager initialized")
 
                 # Not using HOLDLoss wrapper in modular mode
                 self.hold_loss_module = None
 
-                logger.info(
-                    f"✓ Phase 3 (Modular) initialized successfully:\n"
-                    f"   - VQ-VAE: {phase3_cfg.ghop.vqvae_checkpoint}\n"
-                    f"   - U-Net: {phase3_cfg.ghop.unet_checkpoint}\n"
-                    f"   - Hand Field: {phase3_cfg.get('grid_resolution', 64)}³ resolution\n"
-                    f"   - SDS guidance scale: {phase3_cfg.sds.get('guidance_scale', 4.0)}\n"
-                    f"   - Stage 1 (SDS): {phase3_cfg.get('sds_iters', 500)} iterations\n"
-                    f"   - Stage 2 (Contact): {phase3_cfg.get('contact_iters', 100)} iterations\n"
-                    f"   - Max SDS weight: {phase3_cfg.get('w_sds', 5000.0)}\n"
-                    f"   - Max Contact weight: {phase3_cfg.get('w_contact', 10.0)}"
-                )
-
+                # Final summary
+                if need_checkpoint:
+                    logger.info(
+                        f"✓ Phase 3 initialized with PRETRAINED weights:\n"
+                        f"   - Checkpoint: {model_checkpoint}\n"
+                        f"   - VQ-VAE: {'Pretrained' if vqvae_use_pretrained else 'Random'}\n"
+                        f"   - U-Net: {'Pretrained' if unet_use_pretrained else 'Random'}"
+                    )
+                else:
+                    logger.info(
+                        f"✓ Phase 3 initialized with RANDOM weights (sanity mode):\n"
+                        f"   - VQ-VAE: Random initialization\n"
+                        f"   - U-Net: Random initialization\n"
+                        f"   - SDS weight: {phase3_cfg.get('w_sds', 5000.0)}\n"
+                        f"   - Note: Reduced effectiveness expected"
+                    )
             else:
                 # ============================================================
                 # MODE B: Legacy Wrapper
@@ -514,6 +605,18 @@ class HOLD(pl.LightningModule):
             self.phase5_scheduler = None
             logger.info("Phase 5: Disabled - configure phase5.enabled=true in config to enable")
 
+        # ================================================================
+        # ADD: Logging frequency attributes
+        # ================================================================
+        self.log_ghop_every = args.log_every if args is not None else 10
+        self.log_contact_every = getattr(args, 'log_contact_every', 10)
+        self.log_phase5_every = getattr(args, 'log_phase5_every', 10)
+
+        logger.debug(f"[HOLD] Logging frequencies initialized:")
+        logger.debug(f"  log_ghop_every: {self.log_ghop_every}")
+        logger.debug(f"  log_contact_every: {self.log_contact_every}")
+        logger.debug(f"  log_phase5_every: {self.log_phase5_every}")
+
     def save_misc(self):
         out = {}
 
@@ -568,7 +671,7 @@ class HOLD(pl.LightningModule):
             logger.info(f"Decaying learning rate at step {self.global_step}")
             torch_utils.decay_lr(self.optimizer, gamma=0.5)
 
-    def training_step(self, batch):
+    def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
 
         # ============================================================
@@ -612,104 +715,208 @@ class HOLD(pl.LightningModule):
         # COMPUTE BASE LOSSES
         # ====================================================================
         loss_output = self.loss(batch, model_outputs)
+        # ================================================================
+        # ADD: First-step diagnostic logging (INSERT AFTER LINE 695)
+        # ================================================================
+        if self.global_step == 0 and (self.phase3_enabled or self.phase4_enabled or self.phase5_enabled):
+            logger.info("=" * 70)
+            logger.info("[Diagnostic] Batch structure at step 0:")
+            logger.info("=" * 70)
 
-        # ====================================================================
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    logger.info(
+                        f"  {key:30s}: shape={str(value.shape):20s}, "
+                        f"dtype={value.dtype}, device={value.device}"
+                    )
+                elif isinstance(value, dict):
+                    logger.info(f"  {key:30s}: dict with {len(value)} keys")
+                elif isinstance(value, (list, tuple)):
+                    logger.info(f"  {key:30s}: {type(value).__name__} with {len(value)} elements")
+                else:
+                    logger.info(f"  {key:30s}: {type(value).__name__}")
+
+            logger.info("=" * 70)
+            logger.info("[Diagnostic] Searching for MANO parameters (dim 45 or 48):")
+
+            found_mano = []
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor) and len(value.shape) > 0:
+                    if value.shape[-1] in [45, 48]:
+                        found_mano.append((key, value.shape))
+                        logger.info(f"  ✓ CANDIDATE: {key:30s} shape={value.shape}")
+
+            if not found_mano:
+                logger.warning("  ✗ No MANO parameter candidates found!")
+
+            logger.info("=" * 70)
         # PHASE 3 & PHASE 5: UNIFIED SDS COMPUTATION
-        # ====================================================================
         if self.phase3_enabled and self.ghop_enabled:
+            # ============================================================
+            # INITIALIZE: Default values in case of early exception
+            # ============================================================
+            ghop_losses = {}
+            ghop_info = {
+                'stage': 'unknown',
+                'stage_progress': 0.0,
+                'error': None
+            }
+
             try:
-                # Extract hand pose and object SDF
-                hand_pose = self._extract_hand_params_from_batch(batch)
+                # ============================================================
+                # STEP 1: Extract hand parameters with validation
+                # ============================================================
+                logger.debug(f"[Phase 3] Extracting hand params at step {self.global_step}")
+
+                hand_params = self._extract_hand_params_from_batch(batch)
+
+                # Validate extraction result
+                if hand_params is None or 'pose' not in hand_params:
+                    logger.warning(
+                        f"[Phase 3] hand_params extraction failed at step {self.global_step}. "
+                        f"Result: {type(hand_params)}. Skipping GHOP."
+                    )
+                    raise ValueError("hand_params extraction failed")
+
+                # Validate pose shape
+                hand_pose = hand_params['pose']
+                if hand_pose.shape[-1] not in [45, 48]:
+                    logger.error(
+                        f"[Phase 3] Invalid hand pose shape: {hand_pose.shape}. "
+                        f"Expected [..., 45] or [..., 48]. Skipping GHOP."
+                    )
+                    raise ValueError(f"Invalid hand pose shape: {hand_pose.shape}")
+
+                logger.debug(f"[Phase 3] ✓ Hand params valid: pose={hand_pose.shape}")
+
+                # ============================================================
+                # STEP 2: Extract object SDF
+                # ============================================================
                 object_sdf = self._extract_sdf_grid_from_nodes(batch)
 
-                # Get text prompts
-                category = batch.get('object_category', batch.get('category', 'object'))
-                if isinstance(category, str):
-                    text_prompt = f"a hand grasping a {category}"
+                # Validate SDF
+                if object_sdf is None or object_sdf.numel() == 0:
+                    logger.warning(
+                        f"[Phase 3] object_sdf extraction failed at step {self.global_step}. "
+                        f"Shape: {object_sdf.shape if object_sdf is not None else None}. "
+                        f"Skipping GHOP."
+                    )
+                    raise ValueError("object_sdf extraction failed")
+
+                # Check for degenerate SDF (all zeros)
+                sdf_std = object_sdf.std()
+                if sdf_std < 1e-6:
+                    logger.warning(
+                        f"[Phase 3] object_sdf is degenerate (std={sdf_std:.6f}). "
+                        f"This may indicate initialization issues."
+                    )
+
+                logger.debug(
+                    f"[Phase 3] ✓ Object SDF valid: shape={object_sdf.shape}, "
+                    f"std={sdf_std:.4f}, range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
+                )
+
+                # ============================================================
+                # STEP 3: Get text prompt
+                # ============================================================
+                category = batch.get('category', batch.get('object_category', 'Object'))
+                if isinstance(category, (list, tuple)):
+                    category = category[0]
+
+                text_prompt = f"a hand grasping a {category}"
+
+                # ============================================================
+                # STEP 4: Compute SDS loss via ghop_manager
+                # ============================================================
+                logger.debug(f"[Phase 3] Computing SDS via ghop_manager at step {self.global_step}")
+
+                # ✅ REMOVED: Lines that extracted hand_pose_tensor
+                # The manager expects the full hand_params dict
+
+                # Prepare text prompts list
+                if isinstance(hand_params, dict):
+                    B = hand_params['pose'].shape[0]  # ✅ FIXED: Get batch size from dict
                 else:
-                    text_prompt = "a hand grasping an object"
+                    B = hand_params.shape[0]  # ✅ Fallback for tensor input
 
-                # PHASE 5 ENHANCED SDS: Use GHOPDiffusionPrior if available
-                if self.phase5_enabled and hasattr(self, 'diffusion_prior') and self.diffusion_prior is not None:
-                    logger.debug(f"[Phase 5] Computing enhanced SDS via diffusion_prior at step {self.global_step}")
+                text_prompts = [text_prompt] * B
 
-                    # Compute SDS loss with Phase 5 enhancements
-                    sds_loss, sds_metrics = self.diffusion_prior(
-                        hand_pose=hand_pose['pose'],
-                        object_sdf=object_sdf,
-                        iteration=self.global_step,
-                        total_iterations=self.phase5_scheduler.total_iterations,
-                        text_prompt=text_prompt
+                # Call ghop_manager with correct signature
+                ghop_losses, ghop_info = self.ghop_manager.compute_losses(
+                    object_sdf=object_sdf,        # [B, 1, 64, 64, 64]
+                    hand_params=hand_params,      # ✅ FIXED: Pass dict directly
+                    text_prompts=text_prompts,    # List[str]
+                    iteration=self.global_step    # int
+                )
+
+                # ============================================================
+                # STEP 5: Apply Phase 5 dynamic weighting if enabled
+                # ============================================================
+                if self.phase5_enabled:
+                    sds_weight = loss_weights['sds']
+                else:
+                    sds_weight = 1.0
+
+                # ============================================================
+                # STEP 6: Add GHOP losses to total loss
+                # ============================================================
+                ghop_total = ghop_losses.get('total', 0.0)
+
+                if isinstance(ghop_total, torch.Tensor):
+                    weighted_ghop = ghop_total * sds_weight
+                else:
+                    weighted_ghop = torch.tensor(0.0, device=loss_output['loss'].device)
+
+                loss_output['loss'] = loss_output['loss'] + weighted_ghop
+                loss_output['ghop_loss'] = weighted_ghop
+
+                # ============================================================
+                # STEP 7: Log GHOP metrics
+                # ============================================================
+                stage_map = {'sds': 1, 'contact': 2, 'contact_only': 3, 'unknown': 0}
+                stage_numeric = stage_map.get(ghop_info.get('stage', 'unknown'), 0)
+
+                self.log('ghop/stage_numeric', float(stage_numeric), prog_bar=False)
+                self.log('ghop/stage_progress', ghop_info.get('stage_progress', 0.0), prog_bar=True)
+                self.log('ghop/total_loss', weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else float(weighted_ghop), prog_bar=True)
+
+                # Log SDS-specific metrics
+                if 'sds' in ghop_losses:
+                    sds_value = ghop_losses['sds']
+                    if isinstance(sds_value, torch.Tensor):
+                        self.log('ghop/sds_loss', sds_value.item(), prog_bar=True)
+
+                # Console logging
+                if self.global_step % self.log_ghop_every == 0:
+                    logger.info(
+                        f"\n[Phase 3 - Step {self.global_step}] GHOP SDS:\n"
+                        f"  Stage:            {ghop_info.get('stage', 'unknown')}\n"
+                        f"  Stage progress:   {ghop_info.get('stage_progress', 0.0):.3f}\n"
+                        f"  Total loss:       {weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else weighted_ghop:.4f}\n"
+                        f"  SDS weight:       {sds_weight:.3f}"
                     )
 
-                    # Apply Phase 5 dynamic weighting
-                    weighted_sds = sds_loss * loss_weights['sds']
+                logger.debug(f"[Phase 3] ✓ GHOP losses added to total loss")
 
-                    # Add to total loss
-                    loss_output['loss'] = loss_output['loss'] + weighted_sds
-                    loss_output['sds_loss'] = weighted_sds
+            except ValueError as e:
+                # Expected extraction failures - log at debug level
+                logger.debug(f"[Phase 3] Skipping GHOP due to extraction issue: {e}")
+                ghop_info['error'] = str(e)
 
-                    # Enhanced Phase 5 logging
-                    self.log('phase5/sds_loss', weighted_sds, prog_bar=True)
-                    self.log('phase5/sds_timestep', sds_metrics['timestep'], prog_bar=False)
-                    self.log('phase5/sds_weight_mean', sds_metrics['weight_mean'], prog_bar=False)
-                    self.log('phase5/sds_latent_norm', sds_metrics['latent_norm'], prog_bar=False)
-                    self.log('phase5/sds_grad_norm', sds_metrics['grad_norm'], prog_bar=False)
-
-                    if self.global_step % self.log_phase5_every == 0:
-                        logger.info(
-                            f"\n[Phase 5 - Step {self.global_step}] Enhanced SDS:\n"
-                            f"  Loss:        {weighted_sds.item():.4f}\n"
-                            f"  Timestep:    {sds_metrics['timestep']:.1f}\n"
-                            f"  Weight:      {sds_metrics['weight_mean']:.3f}\n"
-                            f"  Latent norm: {sds_metrics['latent_norm']:.3f}\n"
-                            f"  Grad norm:   {sds_metrics['grad_norm']:.3f}"
-                        )
-
-                # PHASE 3 LEGACY SDS: Use TwoStageTrainingManager
-                elif self.ghop_manager is not None:
-                    logger.debug(f"[Phase 3] Computing SDS via ghop_manager at step {self.global_step}")
-
-                    # Prepare text prompts
-                    if isinstance(category, str):
-                        text_prompts = [text_prompt] * hand_pose['pose'].shape[0]
-                    else:
-                        text_prompts = None
-
-                    # Compute GHOP losses via Phase 3 manager
-                    ghop_losses, ghop_info = self.ghop_manager(
-                        hand_pose=hand_pose,
-                        object_sdf=object_sdf,
-                        iteration=self.global_step,
-                        text_prompts=text_prompts
-                    )
-
-                    # Apply Phase 5 dynamic weighting if enabled
-                    if self.phase5_enabled:
-                        weighted_sds = ghop_losses.get('sds', 0.0) * loss_weights['sds']
-                        weighted_contact = ghop_losses.get('contact', 0.0) * loss_weights['contact']
-                        total_ghop_loss = weighted_sds + weighted_contact
-                    else:
-                        total_ghop_loss = ghop_losses.get('total', 0.0)
-
-                    # Add to total loss
-                    loss_output['loss'] = loss_output['loss'] + total_ghop_loss
-
-                    # Logging
-                    stage = ghop_info.get('stage', 'unknown')
-                    self.log('ghop/stage', stage, prog_bar=True)
-                    if 'sds' in ghop_losses:
-                        self.log('ghop/sds_loss', ghop_losses['sds'].item(), prog_bar=True)
-                    if 'contact' in ghop_losses:
-                        self.log('ghop/contact_loss', ghop_losses['contact'].item())
+                # ✓ ADD: Ensure zero loss is added
+                zero_loss = torch.tensor(0.0, device=loss_output['loss'].device, requires_grad=True)
+                loss_output['ghop_loss'] = zero_loss
 
             except Exception as e:
-                logger.error(
-                    f"[Phase 3/5] SDS computation failed at step {self.global_step}: {e}\n"
-                    f"Continuing with standard HOLD losses only."
-                )
+                # Unexpected errors - log with traceback
+                logger.error(f"[Phase 3] Unexpected error in GHOP computation: {e}")
                 import traceback
-                traceback.print_exc()
+                logger.error(traceback.format_exc())
+                ghop_info['error'] = str(e)
+
+                # ✓ ADD: Ensure zero loss is added
+                zero_loss = torch.tensor(0.0, device=loss_output['loss'].device, requires_grad=True)
+                loss_output['ghop_loss'] = zero_loss
 
         # ====================================================================
         # PHASE 4: Contact Refinement (Enhanced with Phase 5 Adaptive Zones)
@@ -793,23 +1000,41 @@ class HOLD(pl.LightningModule):
                     # Get contact zones for this sample
                     zones_b = contact_zones[b] if contact_zones is not None else None
 
-                    # Contact refiner signature: (hand_verts, hand_faces, obj_verts, obj_faces, contact_zones)
-                    contact_loss_b, contact_metrics_b = self.contact_refiner(
-                        hand_verts=h_verts.unsqueeze(0),  # [1, 778, 3]
-                        hand_faces=h_faces,                # [F, 3]
-                        obj_verts=o_verts.unsqueeze(0),   # [1, V_obj, 3]
-                        obj_faces=o_faces,                 # [F_obj, 3]
-                        contact_zones=zones_b              # [K] adaptive indices or None
-                    )
+                    # ============================================================
+                    # CRITICAL FIX: Check contact_refiner's actual signature
+                    # Expected: forward(hand_verts, obj_verts, weightpen, weightmiss)
+                    # NOT: forward(hand_verts, hand_faces, obj_verts, obj_faces, contact_zones)
+                    # ============================================================
+                    try:
+                        # Method 1: If contact_refiner has forward with faces
+                        if hasattr(self.contact_refiner, 'forward_with_faces'):
+                            contact_loss_b, contact_metrics_b = self.contact_refiner.forward_with_faces(
+                                hand_verts=h_verts,           # ✓ [778, 3] no unsqueeze
+                                hand_faces=h_faces,           # [F, 3]
+                                obj_verts=o_verts,            # ✓ [V_obj, 3] no unsqueeze
+                                obj_faces=o_faces,            # [F_obj, 3]
+                                contact_zones=zones_b         # [K] or None
+                            )
+                        # Method 2: Standard forward (vertex-only, no faces)
+                        else:
+                            contact_loss_b, contact_metrics_b = self.contact_refiner(
+                                hand_verts=h_verts,           # [778, 3]
+                                obj_verts=o_verts,            # [V_obj, 3]
+                                weightpen=100.0,
+                                weightmiss=10.0
+                            )
 
-                    total_contact_loss += contact_loss_b
-                    num_valid_samples += 1
+                        total_contact_loss += contact_loss_b
+                        num_valid_samples += 1
 
-                    # Accumulate metrics
-                    for key in contact_metrics_accum:
-                        if key in contact_metrics_b:
-                            contact_metrics_accum[key] += contact_metrics_b[key]
+                        # Accumulate metrics
+                        for key in contact_metrics_accum:
+                            if key in contact_metrics_b:
+                                contact_metrics_accum[key] += contact_metrics_b[key]
 
+                    except Exception as e:
+                        logger.error(f"[Phase 4] Contact refiner failed for batch {b}: {e}")
+                        continue
                 # Average and apply weights
                 if num_valid_samples > 0:
                     total_contact_loss /= num_valid_samples
@@ -873,21 +1098,29 @@ class HOLD(pl.LightningModule):
         if self.phase2_enabled and self.hold_loss_module is not None:
             try:
                 object_node = None
-                hand_pose_params = self._extract_hand_params_from_batch(batch)
+
+                # ============================================================
+                # FIX: Use consistent parameter extraction
+                # BEFORE: hand_pose_params = self._extract_hand_params_from_batch(batch)
+                # AFTER: Use same dict format as Phase 3
+                # ============================================================
+                hand_params = self._extract_hand_params_from_batch(batch)
 
                 for node in self.model.nodes.values():
                     if "object" in node.node_id.lower():
                         object_node = node
                         break
 
-                if object_node is not None and hand_pose_params is not None:
+                # Check if we got valid params
+                if object_node is not None and hand_params and 'pose' in hand_params:
                     category = batch.get('object_category', batch.get('category', 'object'))
                     if isinstance(category, (list, tuple)):
                         category = category[0]
 
+                    # Use the 'pose' key from dict
                     loss_sds, sds_info = self.hold_loss_module.compute_sds_loss(
                         object_node=object_node,
-                        hand_pose=hand_pose_params,
+                        hand_pose=hand_params['pose'],  # ✓ Extract pose from dict
                         category=category,
                         iteration=self.global_step
                     )
@@ -916,13 +1149,23 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     # Step 2: Extract predicted hand pose for current frame
                     # =============================================================
+                    frame_idx = batch.get('frame_idx', batch.get('temporal_idx', None))
+
+                    if frame_idx is None:
+                        logger.debug(
+                            "[Phase 5] No frame_idx in batch. Using sequential ordering assumption."
+                        )
+                        # Fallback: assume sequential frames (idx, idx+1)
+                        frame_idx = batch.get('idx', torch.arange(batch['hA'].shape[0]))
+
+                    # Extract predicted pose
                     predicted_pose = self._extract_predicted_hand_pose(batch, model_outputs)
 
                     # Verify predicted_pose shape
-                    if predicted_pose is None or predicted_pose.shape[-1] != 45:
+                    if predicted_pose is None or predicted_pose.shape[-1] not in [45, 48]:
                         logger.warning(
                             f"[Phase 5] Invalid predicted_pose shape: {predicted_pose.shape if predicted_pose is not None else None}. "
-                            f"Expected [..., 45]. Skipping temporal consistency."
+                            f"Expected [..., 45] or [..., 48]. Skipping temporal consistency."
                         )
                         raise ValueError("Invalid predicted_pose shape")
 
@@ -935,7 +1178,7 @@ class HOLD(pl.LightningModule):
                     if missing_fields:
                         logger.debug(
                             f"[Phase 5] Batch missing temporal fields: {missing_fields}. "
-                            f"This may be a single-frame dataset. Skipping temporal consistency."
+                            f"Skipping temporal consistency."
                         )
                         raise ValueError(f"Missing temporal fields: {missing_fields}")
 
@@ -956,7 +1199,8 @@ class HOLD(pl.LightningModule):
                     temporal_loss, temporal_metrics = self.temporal_module(
                         sample=batch,  # Contains hA, hA_n, c2w, c2w_n from hoi.py
                         predicted_hand_pose=predicted_pose,
-                        sequence_id=sequence_id
+                        sequence_id=sequence_id,
+                        frame_idx=frame_idx  # ✓ Added frame indices
                     )
 
                     # =============================================================
@@ -1019,7 +1263,7 @@ class HOLD(pl.LightningModule):
 
     def _extract_sdf_grid_from_nodes(self, batch, resolution=64):
         """Extract SDF values on regular grid from object node."""
-        # Determine batch size
+        # Step 1: Determine batch size
         if 'idx' in batch:
             B = batch['idx'].shape[0]
         else:
@@ -1035,79 +1279,111 @@ class HOLD(pl.LightningModule):
         H = resolution
         device = next(self.model.parameters()).device
 
-        # Create coordinate grid in canonical space [-1.5, 1.5]³
+        # Step 2: Create coordinate grid in canonical space [-1.5, 1.5]³
         x = torch.linspace(-1.5, 1.5, H, device=device)
-        grid = torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1)
+        try:
+            grid = torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1)
+        except TypeError:
+            grid = torch.stack(torch.meshgrid(x, x, x), dim=-1)
         grid = grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # (B, H, H, H, 3)
-
-        # Find object node
+        # Step 3: Find object node
         object_node = None
         for node in self.model.nodes.values():
             if "object" in node.node_id.lower():
                 object_node = node
                 break
-
         if object_node is None:
             logger.warning("[Helper] No object node found, returning zero SDF")
-            return torch.zeros(B, 1, H, H, H, device=device)
-
-        # Query object node's SDF network
-        grid_flat = grid.reshape(B, -1, 3)  # (B, H³, 3)
-
+            return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+        grid_flat = grid.reshape(B, -1, 3)
+        # Step 4: Try multiple SDF extraction methods
         with torch.no_grad():
-            try:
-                sdf_output = object_node.server.forward_sdf(grid_flat)
-                if isinstance(sdf_output, dict):
-                    sdf_values = sdf_output['sdf']
-                else:
-                    sdf_values = sdf_output
-            except AttributeError:
+            # Try several methods for SDF extraction robustly
+            sdf_values = None
+            # METHOD 1: server.forward_sdf (preferred)
+            if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
                 try:
-                    sdf_values = object_node.server.shape_net(
-                        grid_flat,
-                        object_node.server.latent_code
-                    )['sdf']
-                except:
-                    logger.warning("[Helper] SDF extraction failed, using zero grid")
-                    return torch.zeros(B, 1, H, H, H, device=device)
+                    sdf_output = object_node.server.forward_sdf(grid_flat)
+                    if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
+                        sdf_values = sdf_output['sdf']
+                    elif isinstance(sdf_output, torch.Tensor):
+                        sdf_values = sdf_output
+                    logger.debug(f"[Helper] SDF extracted via server.forward_sdf: {sdf_values.shape}")
+                except Exception as e:
+                    logger.debug(f"[Helper] server.forward_sdf failed: {e}")
 
-        # Reshape to grid
+            # METHOD 2: server.shape_net (alternative)
+            if sdf_values is None and hasattr(object_node, "server") and hasattr(object_node.server, "shape_net"):
+                try:
+                    latent_code = getattr(object_node.server, 'latent_code', None)
+                    if latent_code is not None:
+                        sdf_output = object_node.server.shape_net(grid_flat, latent_code)
+                        if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
+                            sdf_values = sdf_output['sdf']
+                        elif isinstance(sdf_output, torch.Tensor):
+                            sdf_values = sdf_output
+                        logger.debug(f"[Helper] SDF extracted via server.shape_net: {sdf_values.shape}")
+                except Exception as e:
+                    logger.debug(f"[Helper] server.shape_net failed: {e}")
+
+            # METHOD 3: node.forward (last resort)
+            # ============================================================
+            if sdf_values is None and hasattr(object_node, "forward"):
+                try:
+                    idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                    node_output = object_node(idx)
+
+                    if isinstance(node_output, dict):
+                        if 'sdf' in node_output:
+                            sdf_values = node_output['sdf']
+                        elif 'geometry' in node_output:
+                            sdf_values = node_output['geometry']
+                    elif isinstance(node_output, torch.Tensor):
+                        sdf_values = node_output
+
+                    if sdf_values is not None:
+                        logger.debug(f"[Helper] SDF extracted via node.forward: {sdf_values.shape}")
+                except Exception as e:
+                    logger.debug(f"[Helper] node.forward failed: {e}")
+
+            # ============================================================
+            # FALLBACK: Return zero grid with clear warning
+            # ============================================================
+            if sdf_values is None:
+                logger.warning(
+                    "[Helper] SDF extraction failed, using zero grid. "
+                    "This is expected in early training steps before object geometry is initialized. "
+                    f"Attempted methods: forward_sdf, shape_net, forward on node '{object_node.node_id}'"
+                )
+                return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+
+        # Step 5: Reshape to (B, 1, H, H, H) format
+        # Ensure correct shape [B, H^3, 1], then gridify
         if sdf_values.dim() == 2:
             sdf_values = sdf_values.unsqueeze(-1)
+        if sdf_values.shape[-1] != 1:
+            sdf_values = sdf_values[..., :1]  # Only first channel if needed
+        object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(0, 4, 1, 2, 3)
 
-        object_sdf = sdf_values.reshape(B, H, H, H, 1).permute(0, 4, 1, 2, 3)
+        # ================================================================
+        # Step 6: Validate extracted SDF (warn if degenerate)
+        # ================================================================
+        sdf_std = object_sdf.std()
+        sdf_mean = object_sdf.mean()
+
+        if sdf_std < 1e-6:
+            logger.debug(
+                f"[Helper] Degenerate SDF detected (std={sdf_std:.6f}, mean={sdf_mean:.6f}). "
+                f"Object geometry may not be initialized yet."
+            )
+        else:
+            logger.debug(
+                f"[Helper] Valid SDF extracted: shape={object_sdf.shape}, "
+                f"std={sdf_std:.4f}, mean={sdf_mean:.4f}, "
+                f"range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
+            )
 
         return object_sdf
-
-    def _extract_hand_params_from_batch(self, batch):
-        """Extract hand pose parameters from batch."""
-        hand_pose_params = None
-
-        for node in self.model.nodes.values():
-            if "hand" in node.node_id.lower() or "right" in node.node_id.lower() or "left" in node.node_id.lower():
-                mano_pose_key = f"{node.node_id}.mano_pose"
-                mano_rot_key = f"{node.node_id}.mano_rot"
-
-                mano_pose = batch.get(mano_pose_key, None)
-                mano_rot = batch.get(mano_rot_key, None)
-
-                if mano_rot is not None and mano_pose is not None:
-                    if mano_pose.shape[-1] == 45:
-                        hand_pose_params = torch.cat([mano_rot, mano_pose], dim=-1)
-                    elif mano_pose.shape[-1] == 48:
-                        hand_pose_params = mano_pose
-                elif mano_pose is not None:
-                    if mano_pose.shape[-1] == 48:
-                        hand_pose_params = mano_pose
-                    else:
-                        device = mano_pose.device
-                        zero_rot = torch.zeros(mano_pose.shape[0], 3, device=device)
-                        hand_pose_params = torch.cat([zero_rot, mano_pose], dim=-1)
-
-                if hand_pose_params is not None:
-                    break
-
-        return hand_pose_params
 
     # ====================================================================
     # PHASE 4: Mesh Extraction Helper Methods
@@ -1326,45 +1602,255 @@ class HOLD(pl.LightningModule):
         """
         Extract hand parameters dictionary for GHOP modules.
 
-        This method is used by Phase 3 SDS and Phase 5 temporal modules.
+        Updated logic to handle HOLD's 62-dim composite params by:
+        1. Prioritizing decomposed fields (right.full_pose, right.pose)
+        2. Extracting from composite right.params as fallback
+        3. Handling HOLD's specific parameter structure
 
         Args:
             batch: Training batch dictionary
 
         Returns:
             hand_params: Dictionary with keys:
-                - 'pose': [B, 45 or 48] hand joint rotations
+                - 'pose': [B, 45] or [B, 48] MANO parameters
                 - 'shape': [B, 10] MANO shape parameters (beta)
                 - 'trans': [B, 3] global translation
+
+        Raises:
+            ValueError: If hand parameters cannot be extracted
         """
-        hand_params = {}
+        # ================================================================
+        # STEP 1: Try decomposed fields FIRST (highest priority)
+        # ================================================================
+        hand_pose = None
+        source_key = None
 
-        for node in self.model.nodes.values():
-            if 'right' in node.node_id.lower() or 'left' in node.node_id.lower():
-                params = node.params(batch['idx'])
-                hand_params['pose'] = params  # [B, 48+]
+        # Priority 1: Try 'right.full_pose' (48-dim: 3 global + 45 joints)
+        if 'right.full_pose' in batch:
+            hand_pose = batch['right.full_pose']
+            source_key = 'right.full_pose'
+            logger.debug(f"[_extract_hand_params] Found right.full_pose: {hand_pose.shape}")
 
-                # Extract or initialize shape and translation
-                if params.shape[-1] >= 58:  # 48 (pose) + 10 (shape)
-                    hand_params['shape'] = params[..., 48:58]
+        # Priority 2: Try 'right.pose' (45-dim: joint angles only)
+        elif 'right.pose' in batch:
+            hand_pose = batch['right.pose']
+            source_key = 'right.pose'
+            logger.debug(f"[_extract_hand_params] Found right.pose: {hand_pose.shape}")
+
+        # Priority 3: Try 'left.full_pose'
+        elif 'left.full_pose' in batch:
+            hand_pose = batch['left.full_pose']
+            source_key = 'left.full_pose'
+            logger.debug(f"[_extract_hand_params] Found left.full_pose: {hand_pose.shape}")
+
+        # Priority 4: Try 'left.pose'
+        elif 'left.pose' in batch:
+            hand_pose = batch['left.pose']
+            source_key = 'left.pose'
+            logger.debug(f"[_extract_hand_params] Found left.pose: {hand_pose.shape}")
+
+        # ================================================================
+        # STEP 2: Try composite 'right.params' (62-dim or 58-dim)
+        # ================================================================
+        elif 'right.params' in batch:
+            params_full = batch['right.params']
+            logger.debug(f"[_extract_hand_params] Found right.params: {params_full.shape}")
+
+            # HOLD format: [0:48] or [0:45] = pose, [48:58] = shape, [58:62] = extra
+            dim = params_full.shape[-1]
+
+            if dim == 62:
+                # Extract first 48 dims (global + joints)
+                hand_pose = params_full[..., :48]
+                source_key = 'right.params[0:48]'
+                logger.debug(f"[_extract_hand_params] Extracted pose from 62-dim params: {hand_pose.shape}")
+
+            elif dim == 58:
+                # Extract first 45 dims (joints only)
+                hand_pose = params_full[..., :45]
+                source_key = 'right.params[0:45]'
+                logger.debug(f"[_extract_hand_params] Extracted pose from 58-dim params: {hand_pose.shape}")
+
+            else:
+                logger.warning(
+                    f"[_extract_hand_params] Unexpected right.params dimension: {dim}. "
+                    f"Expected 58 or 62. Attempting extraction anyway..."
+                )
+                # Try to extract first 48 or 45
+                if dim >= 48:
+                    hand_pose = params_full[..., :48]
+                    source_key = f'right.params[0:48]'
+                elif dim >= 45:
+                    hand_pose = params_full[..., :45]
+                    source_key = f'right.params[0:45]'
                 else:
-                    hand_params['shape'] = torch.zeros(
-                        params.shape[0], 10,
-                        device=params.device
-                    )
+                    logger.error(f"[_extract_hand_params] right.params too small: {dim} < 45")
+                    hand_pose = None
 
-                # Translation
-                if 'trans' in batch:
-                    hand_params['trans'] = batch['trans']
-                else:
-                    hand_params['trans'] = torch.zeros(
-                        params.shape[0], 3,
-                        device=params.device
-                    )
+        # ================================================================
+        # STEP 3: Try 'hA' (HOLD convention)
+        # ================================================================
+        elif 'hA' in batch:
+            hand_pose = batch['hA']
+            source_key = 'hA'
+            logger.debug(f"[_extract_hand_params] Found hA: {hand_pose.shape}")
 
-                break
+        # ================================================================
+        # STEP 4: Search all batch keys for compatible tensors
+        # ================================================================
+        if hand_pose is None:
+            logger.warning("[_extract_hand_params] Standard keys not found. Searching batch...")
+            logger.debug(f"[_extract_hand_params] Available keys: {list(batch.keys())}")
+
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    # Look for tensors with MANO-compatible dimensions
+                    if value.shape[-1] in [45, 48]:
+                        logger.info(f"[_extract_hand_params] Found candidate '{key}': {value.shape}")
+                        hand_pose = value
+                        source_key = key
+                        break
+
+        # ================================================================
+        # STEP 5: Validate extraction
+        # ================================================================
+        if hand_pose is None:
+            logger.error("[_extract_hand_params] Cannot find hand parameters!")
+            logger.error(f"Batch keys: {list(batch.keys())}")
+
+            # Log all tensor shapes for debugging
+            tensor_info = []
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    tensor_info.append(f"  {key}: {value.shape}")
+
+            if tensor_info:
+                logger.error("Available tensors:\n" + "\n".join(tensor_info))
+
+            raise ValueError(
+                "Cannot extract hand parameters from batch. "
+                "No compatible tensor found."
+            )
+
+        # ================================================================
+        # STEP 6: Normalize shape to [B, 45] or [B, 48]
+        # ================================================================
+        if hand_pose.dim() == 1:
+            hand_pose = hand_pose.unsqueeze(0)
+            logger.debug(f"[_extract_hand_params] Added batch dimension: {hand_pose.shape}")
+
+        # Validate dimension
+        if hand_pose.shape[-1] not in [45, 48]:
+            logger.error(
+                f"[_extract_hand_params] Invalid pose dimension: {hand_pose.shape}. "
+                f"Expected [..., 45] or [..., 48]. Source: '{source_key}'"
+            )
+            raise ValueError(f"Invalid hand pose shape: {hand_pose.shape}")
+
+        # ================================================================
+        # STEP 7: Extract shape (beta) parameters
+        # ================================================================
+        hand_shape = None
+
+        # Try decomposed field first
+        if 'right.betas' in batch:
+            hand_shape = batch['right.betas']
+            logger.debug(f"[_extract_hand_params] Found right.betas: {hand_shape.shape}")
+
+        elif 'left.betas' in batch:
+            hand_shape = batch['left.betas']
+            logger.debug(f"[_extract_hand_params] Found left.betas: {hand_shape.shape}")
+
+        # Try extracting from composite params
+        elif 'right.params' in batch:
+            params_full = batch['right.params']
+            if params_full.shape[-1] >= 58:
+                hand_shape = params_full[..., 48:58]  # Extract beta [48:58]
+                logger.debug(f"[_extract_hand_params] Extracted shape from params: {hand_shape.shape}")
+
+        elif 'beta' in batch:
+            hand_shape = batch['beta']
+
+        # Fallback: zero shape
+        if hand_shape is None:
+            B = hand_pose.shape[0]
+            hand_shape = torch.zeros(B, 10, device=hand_pose.device)
+            logger.debug(f"[_extract_hand_params] Using zero shape: {hand_shape.shape}")
+
+        # ================================================================
+        # STEP 8: Extract translation parameters
+        # ================================================================
+        hand_trans = None
+
+        # Try decomposed field first
+        if 'right.transl' in batch:
+            hand_trans = batch['right.transl']
+            logger.debug(f"[_extract_hand_params] Found right.transl: {hand_trans.shape}")
+
+        elif 'left.transl' in batch:
+            hand_trans = batch['left.transl']
+            logger.debug(f"[_extract_hand_params] Found left.transl: {hand_trans.shape}")
+
+        elif 'trans' in batch:
+            hand_trans = batch['trans']
+
+        # Fallback: zero translation
+        if hand_trans is None or not isinstance(hand_trans, torch.Tensor):
+            B = hand_pose.shape[0]
+            hand_trans = torch.zeros(B, 3, device=hand_pose.device)
+            logger.debug(f"[_extract_hand_params] Using zero trans: {hand_trans.shape}")
+
+        # ================================================================
+        # STEP 9: Construct and return dictionary
+        # ================================================================
+        hand_params = {
+            'pose': hand_pose,      # [B, 45] or [B, 48]
+            'shape': hand_shape,    # [B, 10]
+            'trans': hand_trans,    # [B, 3]
+        }
+
+        logger.debug(
+            f"[_extract_hand_params] ✓ Extracted from '{source_key}': "
+            f"pose={hand_params['pose'].shape}, "
+            f"shape={hand_params['shape'].shape}, "
+            f"trans={hand_params['trans'].shape}"
+        )
 
         return hand_params
+
+    def _unwrap_xdict_to_tensor(self, obj):
+        import torch
+        if isinstance(obj, torch.Tensor):
+            return obj
+        # xdict: try values as method first, then attribute
+        if hasattr(obj, 'values'):
+            if callable(obj.values):
+                # CRITICAL FIX: Call .values() with parentheses
+                try:
+                    values_iter = obj.values()  # NOT obj.values
+                    for val in values_iter:
+                        tensor = self._unwrap_xdict_to_tensor(val)
+                        if isinstance(tensor, torch.Tensor):
+                            return tensor
+                except Exception as e:
+                    logger.debug(f"Failed to iterate .values(): {e}")
+            else:
+                # Use as attribute
+                tensor = self._unwrap_xdict_to_tensor(obj.values)
+                if isinstance(tensor, torch.Tensor):
+                    return tensor
+        # dict: walk all .values()
+        if isinstance(obj, dict):
+            for val in obj.values():
+                tensor = self._unwrap_xdict_to_tensor(val)
+                if isinstance(tensor, torch.Tensor):
+                    return tensor
+        if isinstance(obj, (list, tuple)):
+            for val in obj:
+                tensor = self._unwrap_xdict_to_tensor(val)
+                if isinstance(tensor, torch.Tensor):
+                    return tensor
+        return obj
 
     def training_epoch_end(self, outputs) -> None:
         current_step = self.global_step

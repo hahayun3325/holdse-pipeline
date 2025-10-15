@@ -211,13 +211,13 @@ class GHOPPriorModule(nn.Module):
         return noise_pred
 
     def compute_sds_loss(
-            self,
-            obj_sdf,
-            hand_pose,
-            text_prompt,
-            weight=1.0,
-            t=None,
-            guidance_scale=None
+        self,
+        obj_sdf,
+        hand_params,  # ✅ FIXED: hand_pose → hand_params
+        text_prompt,
+        weight=1.0,
+        t=None,
+        guidance_scale=None
     ):
         """
         Compute Score Distillation Sampling (SDS) loss.
@@ -226,7 +226,7 @@ class GHOPPriorModule(nn.Module):
 
         Args:
             obj_sdf: (N, 1, 64, 64, 64) - Object SDF from HOLD
-            hand_pose: (N, 45) - Hand pose from HOLD
+            hand_params: Dict with keys {'pose', 'shape', 'trans'} OR (N, 45) tensor
             text_prompt: str or List[str] - Object category
             weight: Loss weight multiplier
             t: Optional timestep (random if None)
@@ -235,6 +235,16 @@ class GHOPPriorModule(nn.Module):
             sds_loss: Scalar tensor - Differentiable SDS loss
             info: Dict with auxiliary information
         """
+        # ============================================================
+        # Extract hand_pose from dict or use tensor directly
+        # ============================================================
+        if isinstance(hand_params, dict):
+            hand_pose = hand_params['pose']
+        elif isinstance(hand_params, torch.Tensor):
+            hand_pose = hand_params
+        else:
+            raise ValueError(f"Invalid hand_params type: {type(hand_params)}")
+
         N = len(obj_sdf)
 
         # 1. Construct interaction grid
@@ -260,14 +270,12 @@ class GHOPPriorModule(nn.Module):
         noise_pred = self.predict_noise(x_noisy, t, text_embeddings, guidance_scale)
 
         # 6. Compute SDS gradient
-        # SDS formula: grad = w(t) * (noise_pred - noise)
         w = self.compute_sds_weight(t)  # (N,)
         w = w.view(-1, 1, 1, 1, 1)  # Broadcast shape
 
         grad = weight * w * (noise_pred - noise)
 
         # 7. Create differentiable loss using MSE trick
-        # This allows backprop through the loss
         target = (interaction_grid - grad).detach()
         sds_loss = 0.5 * F.mse_loss(interaction_grid, target, reduction='sum') / N
 
@@ -413,6 +421,10 @@ class TwoStageTrainingManager:
             info: Dict with diagnostic information
         """
         weights = self.get_stage_weights(iteration)
+        device = object_sdf.device
+
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+
         losses = {}
         info = {
             'stage': weights['stage'],
@@ -421,29 +433,30 @@ class TwoStageTrainingManager:
             'contact_weight': weights['contact_weight']
         }
 
-        # ================================================================
-        # Always compute SDS loss (with varying weight)
-        # ================================================================
+        # SDS loss
         if weights['sds_weight'] > 0:
-            # Handle hand_params format
-            if isinstance(hand_params, dict):
-                hand_pose = hand_params['pose']
-            else:
-                hand_pose = hand_params
-
-            # Convert to expected format (B, 45) if needed
-            if hand_pose.shape[-1] == 48:
-                hand_pose = hand_pose[:, 3:]  # Remove global rotation
-
-            # Prepare text prompts
-            if isinstance(text_prompts, str):
+            # Normalize text prompts
+            if text_prompts is None:
+                text_prompts = ["a hand grasping an object"]
+            elif isinstance(text_prompts, str):
                 text_prompts = [text_prompts]
+            elif isinstance(text_prompts, list):
+                # Filter out None/empty
+                text_prompts = [p for p in text_prompts if p is not None and (isinstance(p, str) and len(p) > 0)]
+                if len(text_prompts) == 0:
+                    text_prompts = ["a hand grasping an object"]
+            else:
+                # Unknown type, use default
+                text_prompts = ["a hand grasping an object"]
 
             try:
-                # Use existing GHOPPriorModule.compute_sds_loss method
+                # ============================================================
+                # CRITICAL FIX: Pass hand_params directly (not hand_pose)
+                # SDSLoss.compute_sds_loss will handle dict/tensor conversion
+                # ============================================================
                 sds_loss, sds_info = self.sds_loss.compute_sds_loss(
                     obj_sdf=object_sdf,
-                    hand_pose=hand_pose,
+                    hand_params=hand_params,  # ✅ Pass full hand_params dict
                     text_prompt=text_prompts[0] if len(text_prompts) == 1 else text_prompts,
                     weight=weights['sds_weight']
                 )
@@ -452,11 +465,11 @@ class TwoStageTrainingManager:
 
             except Exception as e:
                 print(f"Warning: SDS loss computation failed: {e}")
-                losses['sds'] = torch.tensor(0.0, device=object_sdf.device)
+                losses['sds'] = torch.tensor(0.0, device=device, requires_grad=True)
                 info['sds_error'] = str(e)
 
         # ================================================================
-        # Add contact loss in Stage 2 (placeholder implementation)
+        # Contact loss computation
         # ================================================================
         if weights['contact_weight'] > 0:
             # TODO: Implement contact loss from HOLD's fitting/loss.py
@@ -470,14 +483,25 @@ class TwoStageTrainingManager:
                 object_sdf, hand_params, weights['contact_weight']
             )
             losses['contact'] = contact_loss
-            info['contact_loss'] = contact_loss.item()
+            # FIXED: Check if tensor before calling .item()
+            if isinstance(contact_loss, torch.Tensor):
+                info['contact_loss'] = contact_loss.item()
+            else:
+                info['contact_loss'] = float(contact_loss)
 
         # ================================================================
-        # Total loss
+        # CRITICAL FIX: Safely sum losses and convert to item()
         # ================================================================
-        total_loss = sum(losses.values())
+        if losses:
+            total_loss = sum(losses.values())
+
         losses['total'] = total_loss
-        info['total_loss'] = total_loss.item()
+
+        # Safe item() extraction with type checking
+        if isinstance(total_loss, torch.Tensor):
+            info['total_loss'] = total_loss.item()
+        else:
+            info['total_loss'] = float(total_loss)
 
         return losses, info
 
@@ -606,7 +630,14 @@ def test_two_stage_manager():
 
     # Mock SDS loss module
     class MockSDSLoss:
-        def compute_sds_loss(self, obj_sdf, hand_pose, text_prompt, weight=1.0):
+        def compute_sds_loss(self, obj_sdf, hand_params, text_prompt, weight=1.0):  # ✅ FIXED
+            """Mock SDS loss for testing."""
+            # Handle dict input
+            if isinstance(hand_params, dict):
+                hand_pose = hand_params['pose']
+            else:
+                hand_pose = hand_params
+
             loss = weight * torch.rand(1, device=obj_sdf.device) * 0.01
             info = {'timestep': 250, 'weight': weight, 'grad_norm': 0.5}
             return loss, info

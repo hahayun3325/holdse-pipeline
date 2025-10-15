@@ -474,12 +474,18 @@ class GHOP3DUNetWrapper(nn.Module):
         print(f"[GHOP3DUNetWrapper] Initialized on {device}")
 
     def _load_checkpoint(self, checkpoint_path):
-        """Load pretrained U-Net weights."""
-        print(f"Loading U-Net checkpoint from {checkpoint_path}")
+        """
+        Load pretrained U-Net weights from unified GHOP checkpoint.
+        Note: GHOP checkpoint may not contain standard U-Net keys.
+        """
+        from loguru import logger
+
+        logger.info(f"[GHOP3DUNetWrapper] Loading from: {checkpoint_path}")
+
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-            # Handle different checkpoint formats
+            # Extract state dict
             if 'state_dict' in checkpoint:
                 state_dict = checkpoint['state_dict']
             elif 'model' in checkpoint:
@@ -487,22 +493,75 @@ class GHOP3DUNetWrapper(nn.Module):
             else:
                 state_dict = checkpoint
 
-            # Remove 'module.' prefix if present (from DataParallel)
-            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            logger.info(f"  Total parameters in checkpoint: {len(state_dict)}")
 
-            # Load with strict=False to allow partial loading
-            missing_keys, unexpected_keys = self.unet.load_state_dict(state_dict, strict=False)
+            # ============================================================
+            # CRITICAL: Extract U-Net parameters (exclude VQ-VAE)
+            # ============================================================
+            unet_state_dict = {}
 
-            if missing_keys:
-                print(f"Warning: Missing keys: {len(missing_keys)}")
-            if unexpected_keys:
-                print(f"Warning: Unexpected keys: {len(unexpected_keys)}")
+            # Define VQ-VAE patterns to EXCLUDE
+            vqvae_patterns = [
+                'encoder.',
+                'decoder.',
+                'quantize.',
+                'quant_conv',
+                'post_quant'
+            ]
 
-            print("✓ U-Net checkpoint loaded successfully")
+            for key, value in state_dict.items():
+                # Skip VQ-VAE components
+                if any(pattern in key for pattern in vqvae_patterns):
+                    continue
+
+                # Include everything else (U-Net diffusion model)
+                new_key = key
+
+                # Remove common prefixes
+                if 'ae.model.' in new_key:
+                    new_key = new_key.replace('ae.model.', '')
+
+                # Try to map to unet submodule
+                if not new_key.startswith('unet.'):
+                    # Check if this looks like a U-Net parameter
+                    if any(pattern in new_key for pattern in ['conv', 'norm', 'attn', 'resblock', 'down', 'up', 'middle']):
+                        new_key = 'unet.' + new_key
+
+                unet_state_dict[new_key] = value
+
+            logger.info(f"  Extracted non-VQ-VAE parameters: {len(unet_state_dict)}")
+
+            if len(unet_state_dict) == 0:
+                logger.warning("  ⚠️  No U-Net parameters extracted!")
+                logger.warning("  Sample checkpoint keys:")
+                for i, key in enumerate(list(state_dict.keys())[:10]):
+                    logger.warning(f"    {key}")
+                logger.warning("  Continuing with random initialization...")
+                return
+
+            # Show sample keys
+            sample_keys = list(unet_state_dict.keys())[:5]
+            logger.info(f"  Sample extracted keys: {sample_keys}")
+
+            # Try loading
+            missing_keys, unexpected_keys = self.load_state_dict(unet_state_dict, strict=False)
+
+            logger.info(f"  Missing keys: {len(missing_keys)}")
+            logger.info(f"  Unexpected keys: {len(unexpected_keys)}")
+
+            # Check if any meaningful keys were loaded
+            model_keys = set(self.state_dict().keys())
+            loaded_keys = set(unet_state_dict.keys()) & model_keys
+
+            if len(loaded_keys) > 0:
+                logger.info(f"✓ U-Net weights loaded: {len(loaded_keys)} parameters matched")
+            else:
+                logger.warning("⚠️  No matching keys found - using random initialization")
+                logger.warning("  This is expected if GHOP checkpoint doesn't contain standard U-Net")
 
         except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-            print("Continuing with randomly initialized weights...")
+            logger.warning(f"⚠️  Checkpoint loading failed: {e}")
+            logger.warning("  Continuing with randomly initialized U-Net...")
 
     def predict_noise(self, noisy_latent, timestep, text_emb=None):
         """
@@ -511,7 +570,7 @@ class GHOP3DUNetWrapper(nn.Module):
         Args:
             noisy_latent: (B, 3, 16, 16, 16) noisy latent
             timestep: (B,) or scalar timestep(s)
-            text_emb: (B, seq_len, 768) text embeddings (optional)
+            text_emb: (B, 768) OR (B, seq_len, 768) text embeddings (optional)
 
         Returns:
             noise_pred: (B, 3, 16, 16, 16) predicted noise
@@ -522,6 +581,25 @@ class GHOP3DUNetWrapper(nn.Module):
                                     device=self.device)
         elif timestep.ndim == 0:
             timestep = timestep.unsqueeze(0).expand(noisy_latent.shape[0])
+
+        # ============================================================
+        # FIX: Ensure context has correct shape for cross-attention
+        # PyTorch MultiheadAttention expects: [seq_len, batch, embed_dim]
+        # But we may receive: [batch, embed_dim]
+        # ============================================================
+        if text_emb is not None:
+            if text_emb.ndim == 2:
+                # Shape: (B, 768) -> (B, 1, 768) for single token
+                # Then transpose to (1, B, 768) for attention
+                text_emb = text_emb.unsqueeze(1)  # (B, 1, 768)
+
+            # Ensure shape is (B, seq_len, embed_dim)
+            if text_emb.shape[0] == noisy_latent.shape[0]:
+                # Shape is (B, seq_len, embed_dim) - correct
+                pass
+            else:
+                # May need transposing depending on your attention implementation
+                pass
 
         with torch.no_grad():
             noise_pred = self.unet(noisy_latent, timestep, text_emb)
