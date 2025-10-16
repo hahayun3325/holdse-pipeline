@@ -32,19 +32,71 @@ phase3:
     max_step_ratio: 0.98
     guidance_scale: 4.0
 
+# ========================================================================
+# PHASE 4: CONTACT REFINEMENT (NEW - Optimized for 2-minute runs)
+# ========================================================================
 phase4:
-  enabled: true                              # ← SET THIS TO TRUE
+  # Master switch
+  enabled: true
 
-  # Contact refinement parameters
-  contact_thresh: 0.01                       # 10mm contact zone radius
-  collision_thresh: 0.005                    # 5mm penetration threshold
-  contact_start_iter: 500                    # Start after SDS stage completes
-  w_contact: 10.0                            # Contact loss weight
-  mesh_resolution: 128                       # Marching cubes resolution (128³)
-  contact_warmup_iters: 100                  # Warmup from 0 to w_contact over 100 iters
+  # ======================================================================
+  # FAST TEST SCHEDULE: Total 30 iterations (20 SDS + 10 Contact)
+  # ======================================================================
+  contact_start_iter: 20          # Start RIGHT after Phase 3 ends
+  contact_duration: 10            # Only 10 iterations for testing
+  contact_warmup_iters: 5         # Fast warmup (5 iterations)
 
-  # Logging
-  log_contact_every: 50                      # Log contact metrics every 50 steps
+  # ======================================================================
+  # Contact Refinement Module (NESTED - matches code expectations)
+  # ======================================================================
+  contact_refinement:
+    enabled: true
+
+    # Thresholds (keep reasonable values)
+    contact_thresh: 0.01            # 10mm contact zone
+    collision_thresh: 0.005         # 5mm penetration threshold
+
+    # Loss weights (moderate values for testing)
+    w_penetration: 50.0             # REDUCED from 100.0 for stability
+    w_attraction: 5.0               # REDUCED from 10.0 for stability
+    w_damping: 0.0                  # Disabled for speed
+
+    # Contact zones
+    contact_zones: "zones"          # Fixed fingertips (fastest)
+
+  # ======================================================================
+  # Mesh Extraction (NESTED - matches code expectations)
+  # ======================================================================
+  mesh_extraction:
+    enabled: true
+
+    # CRITICAL: Low resolution for speed
+    resolution: 64                  # REDUCED from 128 for 2x speedup
+    threshold: 0.0
+    extract_every: 1                # Extract every iteration
+
+  # ======================================================================
+  # Master Contact Weight
+  # ======================================================================
+  w_contact: 10.0                   # Master multiplier
+
+  # ======================================================================
+  # Logging (Minimal for speed)
+  # ======================================================================
+  log_contact_every: 5              # Log every 5 iterations
+  enable_tb_logging: true           # Keep metrics
+  visualize_contact: false          # CRITICAL: No visualization (slow)
+  visualize_every: 100
+  visualize_output_dir: "phase4_visualizations"
+
+  # ======================================================================
+  # Advanced Options (Optimized for speed)
+  # ======================================================================
+  use_mesh_cache: true              # Cache meshes when possible
+  cache_max_age: 5                  # Refresh cache every 5 iters
+  contact_grad_clip: 5.0            # Prevent gradient explosion
+  fallback_on_error: true           # Continue on errors
+  use_pytorch3d: true               # Use fast distance computation
 
 phase5:
   enabled: false
@@ -67,7 +119,7 @@ dataset:
     type: "train"
     batch_size: 2
     drop_last: false  # ← ADDED: Required by create_dataset
-    shuffle: false
+    shuffle: true
     num_workers: 0
     prefetch_factor: 2  # Optional but good
 
@@ -78,7 +130,7 @@ dataset:
     drop_last: false
     shuffle: false      # ← CRITICAL: Missing field causing error
     num_workers: 0
-    pixel_per_batch: 512
+    pixel_per_batch: 256  # Reduced from 512
 
 # ========================================================================
 # MINIMAL MODEL (tiny architecture)
@@ -90,12 +142,12 @@ model:
     d_in: 3
     d_out: 1
     dims: [32, 32]
-    init: geometry          # ← Was missing (was geometric_init)
+    init: geometry
     bias: 0.6
     skip_in: []
     weight_norm: true
     multires: 1
-    cond: pose              # ← CRITICAL: Was missing!
+    cond: pose
 
   rendering_network:
     feature_vector_size: 32
@@ -104,9 +156,9 @@ model:
     d_out: 3
     dims: [32]
     weight_norm: true
-    multires_view: -1       # ← Was multires: 0 (use correct field name)
+    multires_view: -1
 
-  bg_implicit_network:      # ← Was missing entire section
+  bg_implicit_network:
     feature_vector_size: 32
     d_in: 4
     d_out: 1
@@ -129,14 +181,14 @@ model:
     multires_view: 1
     dim_frame_encoding: 8
 
-  density:                  # ← Was missing entire section
+  density:
     params_init:
       beta: 0.1
     beta_min: 0.0001
 
   ray_sampler:
     near: 0.0
-    N_samples: 8
+    N_samples: 8          # Reduced for speed
     N_samples_eval: 8
     N_samples_extra: 4
     eps: 0.1
@@ -165,4 +217,6 @@ validation:
 
 # Optimizer (not critical for single step)
 optimizer:
-  lr: 1.0e-4
+  lr: 0.0001
+  type: "adam"
+  weight_decay: 0.0

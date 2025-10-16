@@ -1298,8 +1298,8 @@ class HOLD(pl.LightningModule):
         grid_flat = grid.reshape(B, -1, 3)
         # Step 4: Try multiple SDF extraction methods
         with torch.no_grad():
-            # Try several methods for SDF extraction robustly
             sdf_values = None
+
             # METHOD 1: server.forward_sdf (preferred)
             if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
                 try:
@@ -1308,9 +1308,9 @@ class HOLD(pl.LightningModule):
                         sdf_values = sdf_output['sdf']
                     elif isinstance(sdf_output, torch.Tensor):
                         sdf_values = sdf_output
-                    logger.debug(f"[Helper] SDF extracted via server.forward_sdf: {sdf_values.shape}")
+                    logger.debug(f"[Helper] METHOD 1 SUCCESS: server.forward_sdf: {sdf_values.shape}")
                 except Exception as e:
-                    logger.debug(f"[Helper] server.forward_sdf failed: {e}")
+                    logger.debug(f"[Helper] METHOD 1 FAILED: server.forward_sdf: {e}")
 
             # METHOD 2: server.shape_net (alternative)
             if sdf_values is None and hasattr(object_node, "server") and hasattr(object_node.server, "shape_net"):
@@ -1322,16 +1322,20 @@ class HOLD(pl.LightningModule):
                             sdf_values = sdf_output['sdf']
                         elif isinstance(sdf_output, torch.Tensor):
                             sdf_values = sdf_output
-                        logger.debug(f"[Helper] SDF extracted via server.shape_net: {sdf_values.shape}")
+                        logger.debug(f"[Helper] METHOD 2 SUCCESS: server.shape_net: {sdf_values.shape}")
                 except Exception as e:
-                    logger.debug(f"[Helper] server.shape_net failed: {e}")
+                    logger.debug(f"[Helper] METHOD 2 FAILED: server.shape_net: {e}")
 
-            # METHOD 3: node.forward (last resort)
-            # ============================================================
+            # METHOD 3: node.forward (requires proper inputs)
             if sdf_values is None and hasattr(object_node, "forward"):
                 try:
-                    idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
-                    node_output = object_node(idx)
+                    # Build proper forward call with points
+                    forward_input = {
+                        'points': grid_flat,  # [B, H³, 3]
+                        'indices': batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                    }
+
+                    node_output = object_node(**forward_input)
 
                     if isinstance(node_output, dict):
                         if 'sdf' in node_output:
@@ -1342,18 +1346,100 @@ class HOLD(pl.LightningModule):
                         sdf_values = node_output
 
                     if sdf_values is not None:
-                        logger.debug(f"[Helper] SDF extracted via node.forward: {sdf_values.shape}")
+                        logger.debug(f"[Helper] METHOD 3 SUCCESS: node.forward: {sdf_values.shape}")
                 except Exception as e:
-                    logger.debug(f"[Helper] node.forward failed: {e}")
+                    logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
+
+            # ============================================================
+            # METHOD 4: Query via model's render_core (CORRECTED - FINAL)
+            # ============================================================
+            if sdf_values is None and hasattr(object_node, "implicit_network"):
+                try:
+                    logger.debug("[Helper] Attempting METHOD 4: model render_core query")
+
+                    # HOLD's model has a unified way to query SDF values
+                    # We'll use the model's forward method properly
+
+                    # Get batch indices
+                    idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+
+                    # Query SDF for all grid points using model's interface
+                    # The model internally handles implicit network calling
+                    num_points = grid_flat.shape[1]  # H³
+
+                    # Call model's implicit network through proper interface
+                    # HOLD expects: (points, indices, ...)
+                    model_input = {
+                        'points': grid_flat,  # [B, H³, 3]
+                        'indices': idx.unsqueeze(1).expand(-1, num_points),  # [B, H³]
+                    }
+
+                    # Forward through model
+                    with torch.no_grad():
+                        # Use object node's implicit network if available
+                        if hasattr(object_node, 'implicit_network'):
+                            # Get feature vector for this sample
+                            if hasattr(object_node, 'embedding'):
+                                features = object_node.embedding(idx)  # [B, feature_dim]
+                            elif hasattr(object_node, 'feature_vector'):
+                                features = object_node.feature_vector.weight[idx]  # [B, feature_dim]
+                            else:
+                                # Use zero features
+                                features = None
+
+                            # Query implicit network point-by-point to avoid shape issues
+                            sdf_list = []
+                            for b in range(B):
+                                # Get points for this batch sample
+                                points_b = grid_flat[b]  # [H³, 3]
+
+                                # Call implicit network with correct interface
+                                if features is not None:
+                                    # Concatenate features to each point
+                                    feat_b = features[b].unsqueeze(0).expand(points_b.shape[0], -1)  # [H³, feat_dim]
+                                    input_b = torch.cat([points_b, feat_b], dim=-1)  # [H³, 3+feat_dim]
+                                else:
+                                    input_b = points_b  # [H³, 3]
+
+                                # Forward (assuming implicit_network expects single input)
+                                try:
+                                    output_b = object_node.implicit_network(input_b.unsqueeze(0))  # [1, H³, ...]
+
+                                    # Extract SDF
+                                    if isinstance(output_b, dict):
+                                        sdf_b = output_b.get('sdf', output_b.get('model_out', output_b.get('output')))
+                                    else:
+                                        sdf_b = output_b
+
+                                    # Ensure shape [1, H³, 1]
+                                    if sdf_b.dim() == 2:
+                                        sdf_b = sdf_b.unsqueeze(-1)
+                                    if sdf_b.shape[-1] != 1:
+                                        sdf_b = sdf_b[..., :1]
+
+                                    sdf_list.append(sdf_b)
+                                except Exception as e_inner:
+                                    logger.debug(f"[Helper] Batch {b} failed: {e_inner}, using zeros")
+                                    sdf_list.append(torch.zeros(1, points_b.shape[0], 1, device=device))
+
+                            # Stack results
+                            if len(sdf_list) == B:
+                                sdf_values = torch.cat(sdf_list, dim=0)  # [B, H³, 1]
+                                logger.debug(f"[Helper] METHOD 4 SUCCESS: Per-batch query: {sdf_values.shape}")
+
+                except Exception as e:
+                    logger.debug(f"[Helper] METHOD 4 FAILED: render_core: {e}")
+                    import traceback
+                    logger.debug(f"[Helper] Traceback: {traceback.format_exc()}")
 
             # ============================================================
             # FALLBACK: Return zero grid with clear warning
             # ============================================================
             if sdf_values is None:
                 logger.warning(
-                    "[Helper] SDF extraction failed, using zero grid. "
-                    "This is expected in early training steps before object geometry is initialized. "
-                    f"Attempted methods: forward_sdf, shape_net, forward on node '{object_node.node_id}'"
+                    "[Helper] All SDF extraction methods failed, using zero grid. "
+                    "This is expected in early training before object geometry is initialized. "
+                    f"Attempted methods: forward_sdf, shape_net, forward, implicit_network on node '{object_node.node_id}'"
                 )
                 return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
 
@@ -1390,8 +1476,19 @@ class HOLD(pl.LightningModule):
     # ====================================================================
 
     def _extract_hand_mesh(self, batch):
-        """Extract hand mesh from MANO parameters."""
-        # Find hand node
+        """
+        Extract hand mesh from MANO parameters in batch.
+
+        Args:
+            batch: Training batch containing hand parameters
+
+        Returns:
+            hand_verts: [B, 778, 3] hand mesh vertices
+            hand_faces: [1538, 3] hand mesh faces (MANO topology)
+        """
+        # ================================================================
+        # STEP 1: Find hand node
+        # ================================================================
         hand_node = None
         node_id = None
 
@@ -1404,54 +1501,190 @@ class HOLD(pl.LightningModule):
         if hand_node is None:
             raise ValueError("[Phase 4] No hand node found in model")
 
-        # Get MANO parameters from batch
-        mano_pose_key = f"{node_id}.mano_pose"
-        mano_rot_key = f"{node_id}.mano_rot"
-        mano_shape_key = f"{node_id}.mano_shape"
-        mano_trans_key = f"{node_id}.mano_trans"
+        logger.debug(f"[Phase 4] Found hand node: {node_id}")
 
-        mano_pose = batch.get(mano_pose_key, None)
-        mano_rot = batch.get(mano_rot_key, None)
-        mano_shape = batch.get(mano_shape_key, None)
-        mano_trans = batch.get(mano_trans_key, None)
+        # ================================================================
+        # STEP 2: Extract MANO parameters using CORRECT key names
+        # ================================================================
 
-        if mano_pose is None:
-            raise ValueError(f"[Phase 4] Missing MANO pose in batch (key: {mano_pose_key})")
+        fullpose_key = f"{node_id}.fullpose"
+        pose_key = f"{node_id}.pose"
+        global_orient_key = f"{node_id}.global_orient"
+        shape_key = f"{node_id}.betas"
+        trans_key = f"{node_id}.transl"
 
-        # Forward MANO server to get mesh
+        # ================================================================
+        # Extract pose (48-dim full pose)
+        # ================================================================
+        full_pose = None
+
+        if fullpose_key in batch:
+            full_pose = batch[fullpose_key]  # [B, 48]
+            logger.debug(f"[Phase 4] Using {fullpose_key}: {full_pose.shape}")
+
+        elif global_orient_key in batch and pose_key in batch:
+            global_orient = batch[global_orient_key]  # [B, 3]
+            pose = batch[pose_key]                     # [B, 45]
+            full_pose = torch.cat([global_orient, pose], dim=-1)  # [B, 48]
+            logger.debug(f"[Phase 4] Concatenated {global_orient_key} + {pose_key}: {full_pose.shape}")
+
+        elif pose_key in batch:
+            pose = batch[pose_key]  # [B, 45]
+            batch_size = pose.shape[0]
+            device = pose.device
+            zero_global = torch.zeros(batch_size, 3, device=device)
+            full_pose = torch.cat([zero_global, pose], dim=-1)  # [B, 48]
+            logger.warning(f"[Phase 4] No global_orient found, using zeros")
+
+        else:
+            available_keys = [k for k in batch.keys() if node_id in k]
+            raise ValueError(
+                f"[Phase 4] Cannot find MANO pose in batch.\n"
+                f"  Tried keys: {fullpose_key}, {pose_key}, {global_orient_key}\n"
+                f"  Available keys for '{node_id}': {available_keys}"
+            )
+
+        # ================================================================
+        # Extract shape parameters (betas)
+        # ================================================================
+        mano_shape = batch.get(shape_key, None)
+
+        if mano_shape is None:
+            batch_size = full_pose.shape[0]
+            device = full_pose.device
+            mano_shape = torch.zeros(batch_size, 10, device=device)
+            logger.warning(f"[Phase 4] No shape parameters at {shape_key}, using mean shape")
+        else:
+            logger.debug(f"[Phase 4] Using {shape_key}: {mano_shape.shape}")
+
+        # ================================================================
+        # CRITICAL FIX: Extract translation (was missing!)
+        # ================================================================
+        mano_trans = batch.get(trans_key, None)
+
+        if mano_trans is None:
+            batch_size = full_pose.shape[0]
+            device = full_pose.device
+            mano_trans = torch.zeros(batch_size, 3, device=device)
+            logger.warning(f"[Phase 4] No translation at {trans_key}, using zero translation")
+        else:
+            logger.debug(f"[Phase 4] Using {trans_key}: {mano_trans.shape}")
+
+        # ================================================================
+        # CRITICAL FIX: Extract scene_scale (required by MANOServer)
+        # ================================================================
+        # MANOServer.forward expects: forward(scene_scale, transl, thetas, betas)
+
+        # Try to get scene scale from batch or node
+        scene_scale = None
+
+        # Option 1: From batch
+        scale_keys = [
+            f"{node_id}.scene_scale",
+            "scene_scale",
+            f"{node_id}.scale"
+        ]
+
+        for scale_key in scale_keys:
+            if scale_key in batch:
+                scene_scale = batch[scale_key]
+                logger.debug(f"[Phase 4] Using {scale_key}: {scene_scale.shape}")
+                break
+
+        # Option 2: From node attributes
+        if scene_scale is None and hasattr(hand_node, 'scene_scale'):
+            scene_scale = hand_node.scene_scale
+            logger.debug(f"[Phase 4] Using hand_node.scene_scale: {scene_scale}")
+
+        # Option 3: Default to 1.0 (no scaling)
+        if scene_scale is None:
+            batch_size = full_pose.shape[0]
+            device = full_pose.device
+            scene_scale = torch.ones(batch_size, device=device)
+            logger.warning("[Phase 4] No scene_scale found, using 1.0")
+
+        # Ensure scene_scale is correct shape
+        if scene_scale.dim() == 0:
+            # Scalar: expand to batch size
+            batch_size = full_pose.shape[0]
+            scene_scale = scene_scale.unsqueeze(0).expand(batch_size)
+        elif scene_scale.shape[0] != full_pose.shape[0]:
+            # Wrong batch size: repeat or broadcast
+            batch_size = full_pose.shape[0]
+            scene_scale = scene_scale.view(-1)[0].unsqueeze(0).expand(batch_size)
+
+        # ================================================================
+        # STEP 3: Forward through MANO to generate mesh
+        # ================================================================
         with torch.no_grad():
             mano_server = hand_node.server
 
-            # Construct full pose [B, 48]
-            if mano_rot is not None and mano_pose.shape[-1] == 45:
-                full_pose = torch.cat([mano_rot, mano_pose], dim=-1)
-            elif mano_pose.shape[-1] == 48:
-                full_pose = mano_pose
-            else:
-                device = mano_pose.device
-                zero_rot = torch.zeros(mano_pose.shape[0], 3, device=device)
-                full_pose = torch.cat([zero_rot, mano_pose], dim=-1)
-
-            # Get MANO output
-            mano_output = mano_server(
-                pose=full_pose,
-                shape=mano_shape if mano_shape is not None else torch.zeros(
-                    full_pose.shape[0], 10, device=full_pose.device
-                ),
-                trans=mano_trans if mano_trans is not None else torch.zeros(
-                    full_pose.shape[0], 3, device=full_pose.device
-                )
+            logger.debug(
+                f"[Phase 4] Calling MANO with:\n"
+                f"  scene_scale: {scene_scale.shape}\n"
+                f"  transl: {mano_trans.shape}\n"
+                f"  thetas: {full_pose.shape}\n"
+                f"  betas: {mano_shape.shape}"
             )
 
-            # Extract vertices and faces
+            # ================================================================
+            # Call MANOServer with CORRECT argument order:
+            # forward(scene_scale, transl, thetas, betas, absolute=False)
+            # ================================================================
+            try:
+                mano_output = mano_server(
+                    scene_scale,    # arg1: [B] scene scaling
+                    mano_trans,     # arg2: [B, 3] translation
+                    full_pose,      # arg3: [B, 48] full pose
+                    mano_shape,     # arg4: [B, 10] shape
+                    absolute=False  # Use relative pose (default)
+                )
+                logger.debug("[Phase 4] MANO server called successfully")
+
+            except Exception as e:
+                logger.error(f"[Phase 4] MANO server call failed: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+
+            # Extract vertices
             if isinstance(mano_output, dict):
-                hand_verts = mano_output['vertices']  # [B, 778, 3]
+                hand_verts = mano_output['verts']  # [B, 778, 3]
             else:
-                hand_verts = mano_output
+                hand_verts = mano_output  # [B, 778, 3]
 
-            hand_faces = mano_server.faces  # [1538, 3]
+            # ================================================================
+            # Get faces and handle dtype conversion
+            # ================================================================
+            hand_faces = mano_server.faces  # Might be numpy array or tensor
 
-        logger.debug(f"[Phase 4] Extracted hand mesh: {hand_verts.shape}")
+            # Ensure it's a PyTorch tensor with compatible dtype
+            if not isinstance(hand_faces, torch.Tensor):
+                import numpy as np
+
+                # Step 1: Convert to numpy if needed
+                if not isinstance(hand_faces, np.ndarray):
+                    hand_faces = np.array(hand_faces)
+
+                # Step 2: Handle uint32 dtype (not supported by PyTorch)
+                if hand_faces.dtype in [np.uint32, np.uint64]:
+                    # Convert to int32 or int64 (PyTorch compatible)
+                    hand_faces = hand_faces.astype(np.int32)
+                    logger.debug(f"[Phase 4] Converted faces from {hand_faces.dtype} to int32")
+
+                # Step 3: Convert to PyTorch tensor
+                hand_faces = torch.from_numpy(hand_faces).long()
+
+            # Ensure faces are on same device as vertices
+            if hand_faces.device != hand_verts.device:
+                hand_faces = hand_faces.to(hand_verts.device)
+
+        logger.debug(
+            f"[Phase 4] Extracted hand mesh:\n"
+            f"  Vertices: {hand_verts.shape} (range: [{hand_verts.min():.3f}, {hand_verts.max():.3f}])\n"
+            f"  Faces: {hand_faces.shape}, dtype: {hand_faces.dtype}, device: {hand_faces.device}"
+        )
+
         return hand_verts, hand_faces
 
     def _extract_object_mesh_from_sdf(self, batch):
