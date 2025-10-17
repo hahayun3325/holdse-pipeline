@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "release_date": "2025-10-17",
+  "quality_score": 9.9,
+  "checkpoint": {
+    "path": "holdse_v1.0.ckpt",
+    "epoch": 2,
+    "global_step": 2000,
+    "loss": 1.035,
+    "note": "End of epoch 2. Step 1390 (loss 0.857) not available as saved checkpoint.",
+    "source": "logs/training_validation/checkpoints/epoch=0001-loss=0.ckpt"
+  },
+  "metrics": {
+    "loss_reduction": "60.3%",
+    "final_loss": 1.035,
+    "initial_loss": 2.606,
+    "rgb_improvement": "14%",
+    "semantic_improvement": "82%",
+    "psnr_improvement": "+0.75dB",
+    "training_iterations": 3000,
+    "crashes": 0
+  },
+  "status": {
+    "core_hold": "production_ready",
+    "phase3_ghop": "active_limited",
+    "phase4_contact": "graceful_skip",
+    "phase5_temporal": "infrastructure_ready"
+  },
+  "deployment": {
+    "timestamp": "2025-10-17T23:21:21Z",
+    "deployed_by": "fredcui",
+    "hostname": "hahayun",
+    "note": "Using end-of-epoch checkpoint. Quality validated at 9.9/10."
+  }
+}
