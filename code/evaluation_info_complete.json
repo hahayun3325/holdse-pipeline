@@ -1,0 +1,52 @@
+{
+  "timestamp": "2025-10-17T13:32:24.573253",
+  "project": "HOLDSE",
+  "training_run": "training_validation",
+  "checkpoints": {
+    "total": 3,
+    "files": [
+      "epoch=0000-loss=0.ckpt",
+      "epoch=0001-loss=0.ckpt",
+      "epoch=0002-loss=0.ckpt"
+    ]
+  },
+  "visuals": {
+    "types": [
+      "bg_rgb",
+      "mask_prob",
+      "imap",
+      "right.normal",
+      "right.fg_rgb.vis",
+      "object.normal",
+      "rgb",
+      "normal",
+      "object.mask_prob",
+      "object.fg_rgb.vis",
+      "fg_rgb.vis",
+      "right.mask_prob"
+    ],
+    "total_images": 36
+  },
+  "config": {
+    "git_commit": "4c105da34edf6275b764abaadb0c99398ed33c53",
+    "git_branch": "main",
+    "comet_key": "0aa50566020342f187675a5317eec959"
+  },
+  "log": {
+    "total_lines": 36338,
+    "last_10_lines": [
+      "\u001b[32m2025-10-16 20:51:33.613\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36m_extract_hand_mesh\u001b[0m:\u001b[36m1611\u001b[0m - \u001b[33m\u001b[1m[Phase 4] No scene_scale found, using 1.0\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.644\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36m_extract_object_mesh_from_sdf\u001b[0m:\u001b[36m1730\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Marching Cubes failed for batch 0: No surface found at the given iso value.\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.658\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36m_extract_object_mesh_from_sdf\u001b[0m:\u001b[36m1730\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Marching Cubes failed for batch 1: No surface found at the given iso value.\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.673\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36m_extract_object_mesh_from_sdf\u001b[0m:\u001b[36m1730\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Marching Cubes failed for batch 2: No surface found at the given iso value.\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.687\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36m_extract_object_mesh_from_sdf\u001b[0m:\u001b[36m1730\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Marching Cubes failed for batch 3: No surface found at the given iso value.\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.688\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36mtraining_step\u001b[0m:\u001b[36m1004\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Empty object mesh for batch 0, skipping\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.688\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36mtraining_step\u001b[0m:\u001b[36m1004\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Empty object mesh for batch 1, skipping\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.688\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36mtraining_step\u001b[0m:\u001b[36m1004\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Empty object mesh for batch 2, skipping\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.688\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36mtraining_step\u001b[0m:\u001b[36m1004\u001b[0m - \u001b[33m\u001b[1m[Phase 4] Empty object mesh for batch 3, skipping\u001b[0m\n",
+      "\u001b[32m2025-10-16 20:51:33.688\u001b[0m | \u001b[33m\u001b[1mWARNING \u001b[0m | \u001b[36msrc.hold.hold\u001b[0m:\u001b[36mtraining_step\u001b[0m:\u001b[36m1092\u001b[0m - \u001b[33m\u001b[1m[Phase 4] No valid samples at step 2999, skipping contact loss\u001b[0m\n"
+    ]
+  },
+  "gpu": "NVIDIA GeForce RTX 4090, 24564 MiB",
+  "disk_usage": "676M"
+}

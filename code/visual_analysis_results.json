@@ -1,0 +1,17 @@
+{
+  "scores": {
+    "rgb": 10.0,
+    "right.fg_rgb.vis": 9.960558294270951,
+    "object.fg_rgb.vis": 9.996119071502058,
+    "right.mask_prob": 9.99481462191358,
+    "object.mask_prob": 10.0,
+    "right.normal": 9.865365316037236,
+    "object.normal": 9.765368026099548,
+    "normal": 10.0
+  },
+  "warnings": [],
+  "recommendations": [],
+  "overall_score": 9.947778166227922,
+  "recommendation": "EXCELLENT - Ready for production",
+  "next_step": "Proceed to GHOP multi-object testing"
+}

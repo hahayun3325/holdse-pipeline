@@ -572,13 +572,20 @@ class HOLD(pl.LightningModule):
                 # Component 4: Phase 5 Training Scheduler
                 # ============================================================
                 logger.info("Initializing Phase 5 Training Scheduler...")
+
+                # ================================================================
+                # FIX 3: Extract phase3_start from config
+                # ================================================================
+                phase3_start = opt.phase3.get('phase3_start_iter', 0)
+                phase4_start = self.contact_start_iter if hasattr(self, 'contact_start_iter') else 500
+
                 self.phase5_scheduler = Phase5TrainingScheduler(
                     total_iterations=phase5_cfg.get('total_iterations', 1000),
-                    warmup_iters=phase5_cfg.get('warmup_iters', 100),
-                    phase3_start=100,  # Standard warmup period
-                    phase4_start=self.contact_start_iter if hasattr(self, 'contact_start_iter') else 500,
-                    phase5_start=phase5_cfg.get('phase5_start_iter', 600),
-                    finetune_start=phase5_cfg.get('finetune_start_iter', 800)
+                    warmup_iters=phase5_cfg.get('warmup_iters', 0),      # Will be 0 after fix
+                    phase3_start=phase3_start,                            # ✅ From config, not hardcoded
+                    phase4_start=phase4_start,                            # = 20
+                    phase5_start=phase5_cfg.get('phase5_start_iter', 100),  # = 100
+                    finetune_start=phase5_cfg.get('finetune_start_iter', 800)  # = 800
                 )
 
                 # Store Phase 5 hyperparameters
@@ -1773,16 +1780,16 @@ class HOLD(pl.LightningModule):
         """
         Extract predicted hand pose from model outputs for temporal consistency.
 
-        Retrieves the predicted hand parameters from HOLD's node-based architecture
-        and formats them for TemporalConsistencyModule.
+        CRITICAL: Returns [B, 45] (articulation only) for TemporalConsistencyModule.
+        Strips global_orient if present (first 3 dims of 48-dim MANO pose).
 
         Args:
             batch: Training batch dictionary
             model_outputs: Model forward pass outputs
 
         Returns:
-            hand_pose: [B, 45] predicted hand pose parameters
-                       Format: global_orient(3) + hand_pose(45) from MANO
+            hand_pose: [B, 45] predicted hand articulation parameters
+                       (global_orient stripped for temporal consistency)
         """
         hand_pose = None
 
@@ -1790,43 +1797,92 @@ class HOLD(pl.LightningModule):
         for node_id, node in self.model.nodes.items():
             if 'right' in node_id.lower() or 'left' in node_id.lower():
                 # Get predicted pose parameters from node
-                # node.params(batch['idx']) returns optimized parameters
                 params = node.params(batch['idx'])  # [B, 48] or [B, 51]
 
-                # Extract pose (first 48 parameters: 3 global_orient + 45 hand_pose)
+                # Extract pose and convert to [B, 45] format
                 if params.shape[-1] >= 48:
-                    hand_pose = params[..., :48]  # [B, 48]
+                    # Params are [B, 48+]: Take first 48, then strip global_orient
+                    full_pose = params[..., :48]  # [B, 48]
+                    hand_pose = full_pose[..., 3:]  # [B, 45] - strip first 3 dims
+                elif params.shape[-1] == 45:
+                    # Already 45-dim (articulation only)
+                    hand_pose = params
                 else:
+                    # Unexpected shape
+                    logger.warning(
+                        f"[Phase 5] Unexpected param shape from node '{node_id}': "
+                        f"{params.shape}. Expected [..., 45] or [..., 48+]"
+                    )
                     hand_pose = params
 
                 logger.debug(
                     f"[Phase 5] Extracted hand pose from node '{node_id}': "
-                    f"shape={hand_pose.shape}"
+                    f"original_shape={params.shape}, output_shape={hand_pose.shape}"
                 )
                 break  # Use first hand node found
 
+        # ================================================================
         # Method 2: Fallback to batch data if node extraction fails
+        # ================================================================
         if hand_pose is None:
             if 'hA' in batch:
-                hand_pose = batch['hA']  # [B, 45] or [B, 48]
+                # hoi.py dataset provides [B, 45] articulation
+                hand_pose = batch['hA']  # [B, 45]
                 logger.debug(
                     f"[Phase 5] Using batch 'hA' as hand pose fallback: "
                     f"shape={hand_pose.shape}"
                 )
+
+            elif 'right.fullpose' in batch:
+                # MANO fullpose [B, 48]: strip global_orient
+                full_pose = batch['right.fullpose']  # [B, 48]
+                hand_pose = full_pose[..., 3:]  # [B, 45]
+                logger.debug(
+                    f"[Phase 5] Using batch 'right.fullpose', stripped to [B, 45]: "
+                    f"shape={hand_pose.shape}"
+                )
+
+            elif 'right.pose' in batch:
+                # Already articulation only [B, 45]
+                hand_pose = batch['right.pose']  # [B, 45]
+                logger.debug(
+                    f"[Phase 5] Using batch 'right.pose': shape={hand_pose.shape}"
+                )
+
             else:
                 logger.warning(
                     "[Phase 5] Could not extract hand pose from model or batch. "
-                    "Temporal consistency will be skipped."
+                    "Temporal consistency will be skipped for this batch."
                 )
                 return None
 
-        # Ensure correct shape [B, 45] or [B, 48]
+        # ================================================================
+        # Validation: Ensure [B, 45] format
+        # ================================================================
+        # Ensure batch dimension
         if hand_pose.ndim == 1:
             hand_pose = hand_pose.unsqueeze(0)
 
-        # Truncate to 45 if needed (remove translation/shape if present)
-        if hand_pose.shape[-1] > 48:
-            hand_pose = hand_pose[..., :48]
+        # Final shape check and correction
+        if hand_pose.shape[-1] == 48:
+            # Still 48-dim: strip global_orient
+            hand_pose = hand_pose[..., 3:]  # [B, 45]
+            logger.debug("[Phase 5] Stripped global_orient: final shape [B, 45]")
+
+        elif hand_pose.shape[-1] > 48:
+            # More than 48 dims (includes shape/trans): take first 48, then strip
+            hand_pose = hand_pose[..., 3:48]  # [B, 45]
+            logger.debug("[Phase 5] Extracted dims 3-48 from extended params: [B, 45]")
+
+        elif hand_pose.shape[-1] != 45:
+            # Unexpected dimension
+            raise ValueError(
+                f"[Phase 5] Invalid hand pose shape: {hand_pose.shape}. "
+                f"After processing, expected [B, 45], got [B, {hand_pose.shape[-1]}]. "
+                f"TemporalConsistencyModule requires exactly 45 dimensions (articulation only)."
+            )
+
+        logger.debug(f"[Phase 5] Final hand pose shape: {hand_pose.shape} (validated [B, 45])")
 
         return hand_pose
 
