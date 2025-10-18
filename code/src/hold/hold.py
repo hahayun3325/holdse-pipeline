@@ -107,6 +107,9 @@ class HOLD(pl.LightningModule):
     def __init__(self, opt, args) -> None:
         super().__init__()
 
+        # GHOP FIX: Disable automatic optimization for manual control
+        self.automatic_optimization = False
+
         self.opt = opt
         self.args = args
         num_frames = args.n_images
@@ -768,7 +771,8 @@ class HOLD(pl.LightningModule):
                 'stage_progress': 0.0,
                 'error': None
             }
-
+            # GHOP FIX: Initialize weighted_ghop to prevent NameError
+            weighted_ghop = torch.tensor(0.0, device=loss_output['loss'].device, requires_grad=True)
             try:
                 # ============================================================
                 # STEP 1: Extract hand parameters with validation
@@ -867,14 +871,21 @@ class HOLD(pl.LightningModule):
                 # ============================================================
                 # STEP 6: Add GHOP losses to total loss
                 # ============================================================
-                ghop_total = ghop_losses.get('total', 0.0)
+                # GHOP FIX: Conditional detach to prevent double backward
+                # Only detach if Phase 4 or Phase 5 are also active (multiple loss graphs)
+                phase4_active = (hasattr(self, 'phase4_enabled') and self.phase4_enabled and
+                                 self.global_step >= self.contact_start_iter)
+                phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
+                                 self.global_step >= self.phase5_start_iter)
 
-                if isinstance(ghop_total, torch.Tensor):
-                    weighted_ghop = ghop_total * sds_weight
+                if phase4_active or phase5_active:
+                    # Multiple phases: detach to prevent graph conflicts
+                    loss_output['loss'] = loss_output['loss'] + weighted_ghop.detach()
+                    logger.debug(f"[Phase 3] Detached GHOP loss (multi-phase mode)")
                 else:
-                    weighted_ghop = torch.tensor(0.0, device=loss_output['loss'].device)
+                    # Only Phase 3: keep gradients for full performance
+                    loss_output['loss'] = loss_output['loss'] + weighted_ghop
 
-                loss_output['loss'] = loss_output['loss'] + weighted_ghop
                 loss_output['ghop_loss'] = weighted_ghop
 
                 # ============================================================
@@ -1055,14 +1066,19 @@ class HOLD(pl.LightningModule):
                     )
 
                     # Apply Phase 5 dynamic weighting if enabled
-                    if self.phase5_enabled:
-                        base_weight = self.w_contact * contact_progress
-                        weighted_contact_loss = total_contact_loss * base_weight * loss_weights['contact']
-                    else:
-                        weighted_contact_loss = total_contact_loss * self.w_contact * contact_progress
+                    # CONTACT FIX: Conditional detach to prevent double backward
+                    # Only detach if Phase 5 is also active (temporal loss will follow)
+                    phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
+                                    self.global_step >= self.phase5_start_iter)
 
-                    # Add to total loss
-                    loss_output["loss"] = loss_output["loss"] + weighted_contact_loss
+                    if phase5_active:
+                        # Phase 5 active: detach to prevent graph conflicts
+                        loss_output["loss"] = loss_output["loss"] + weighted_contact_loss.detach()
+                        logger.debug(f"[Phase 4] Detached contact loss (Phase 5 active)")
+                    else:
+                        # Only Phase 4: keep gradients
+                        loss_output["loss"] = loss_output["loss"] + weighted_contact_loss
+
                     loss_output['contact_loss'] = weighted_contact_loss
 
                     # Log metrics
@@ -1127,12 +1143,26 @@ class HOLD(pl.LightningModule):
                     # Use the 'pose' key from dict
                     loss_sds, sds_info = self.hold_loss_module.compute_sds_loss(
                         object_node=object_node,
-                        hand_pose=hand_params['pose'],  # ✓ Extract pose from dict
+                        hand_pose=hand_params['pose'],
                         category=category,
                         iteration=self.global_step
                     )
 
-                    loss_output["loss"] = loss_output["loss"] + loss_sds
+                    # PHASE 2 FIX: Conditional detach if other phases active
+                    phase3_active = hasattr(self, 'phase3_enabled') and self.phase3_enabled and self.ghop_enabled
+                    phase4_active = (hasattr(self, 'phase4_enabled') and self.phase4_enabled and
+                                    self.global_step >= self.contact_start_iter)
+                    phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
+                                    self.global_step >= self.phase5_start_iter)
+
+                    if phase3_active or phase4_active or phase5_active:
+                        # Other phases active: detach to prevent graph conflicts
+                        loss_output["loss"] = loss_output["loss"] + loss_sds.detach()
+                        logger.debug(f"[Phase 2] Detached HOLD SDS loss (multi-phase mode)")
+                    else:
+                        # Only Phase 2: keep gradients
+                        loss_output["loss"] = loss_output["loss"] + loss_sds
+
                     loss_output["sds_loss"] = loss_sds
 
                     if loss_sds.item() > 0:
@@ -1262,7 +1292,50 @@ class HOLD(pl.LightningModule):
                 epoch=self.current_epoch,
             )
 
-        return loss_output['loss']
+        # GHOP FIX: Manual optimization to prevent double backward
+        final_loss = loss_output['loss']
+
+        # Handle NaN/Inf
+        if torch.isnan(final_loss) or torch.isinf(final_loss):
+            logger.warning(
+                f"[Step {self.global_step}] Loss is NaN/Inf. Skipping optimization."
+            )
+            # Return small valid loss
+            return torch.tensor(1e-4, device=final_loss.device, requires_grad=True)
+
+        # Get optimizer
+        opt = self.optimizers()
+
+        # Zero gradients
+        opt.zero_grad()
+
+        # CRITICAL FIX: Clone the loss tensor to create a fresh computational graph
+        # This prevents the "backward through the graph a second time" error
+        loss_for_backward = final_loss.clone()
+
+        # Manual backward on the cloned tensor
+        self.manual_backward(loss_for_backward)
+
+        # Gradient clipping
+        if hasattr(self.args, 'gradient_clip_val') and self.args.gradient_clip_val:
+            torch.nn.utils.clip_grad_norm_(
+                self.parameters(),
+                self.args.gradient_clip_val
+            )
+
+        # Optimizer step
+        opt.step()
+
+        # Learning rate scheduler
+        sch = self.lr_schedulers()
+        if sch is not None:
+            sch.step()
+
+        # Log
+        self.log('train/loss', final_loss.detach(), prog_bar=True)
+
+        # Return detached original loss for logging
+        return final_loss.detach()
 
     # ====================================================================
     # HELPER METHODS

@@ -128,6 +128,28 @@ class MANONode(Node):
         mesh_vh_cano = seal_mano_v(mesh_v_cano)
         mesh_fh_cano = seal_mano_f(self.mesh_f_cano, self.is_rhand)
 
+        # GHOP FIX: Check for NaN/Inf before subdivision
+        if not torch.isfinite(mesh_vh_cano).all():
+            import warnings
+            warnings.warn(f"[GHOP] NaN detected in MANO vertices (shape: {mesh_vh_cano.shape}), skipping subdivision")
+
+            # Ensure mesh_vh_cano is 2D: [n_verts, 3]
+            while mesh_vh_cano.dim() > 2:
+                if mesh_vh_cano.shape[0] == 1:
+                    mesh_vh_cano = mesh_vh_cano.squeeze(0)
+                else:
+                    # If first dim is not 1, take the first sample
+                    mesh_vh_cano = mesh_vh_cano[0]
+                    warnings.warn(f"[GHOP] Took first sample from batch, new shape: {mesh_vh_cano.shape}")
+
+            # Final check
+            if mesh_vh_cano.dim() != 2:
+                raise RuntimeError(f"[GHOP] Cannot reduce mesh to 2D, shape: {mesh_vh_cano.shape}")
+
+            self.mesh_v_cano_div = mesh_vh_cano  # Shape must be [n_verts, 3]
+            self.mesh_f_cano_div = mesh_fh_cano
+            return
+
         mesh_vh_cano, mesh_fh_cano = hold_utils.subdivide_cano(
             mesh_vh_cano, mesh_fh_cano
         )

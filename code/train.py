@@ -12,7 +12,7 @@ from src.utils.parser import parser_args
 from common.torch_utils import reset_all_seeds
 import torch
 from src.hold.loss import HOLDLoss
-
+from src.datasets.ghop_hoi_dataset import GHOPHOIDataset  # NEW IMPORT
 
 def validate_phase4_config(opt, model):
     """
@@ -94,6 +94,114 @@ def validate_phase4_config(opt, model):
         traceback.print_exc()
         return False
 
+def create_dataset_with_ghop_support(dataset_config, args):
+    """
+    Create dataset with GHOP HOI4D support.
+
+    This function replaces the hardcoded ImageDataset creation
+    to support both HOLD (single images) and GHOP HOI4D (video sequences).
+
+    Args:
+        dataset_config: Dataset configuration from YAML
+        args: Command-line arguments
+
+    Returns:
+        Dataset instance (ImageDataset or GHOPHOIDataset)
+    """
+    from src.datasets.utils import create_dataset as create_image_dataset
+
+    # ================================================================
+    # STEP 1: Check dataset type from config
+    # ================================================================
+    dataset_type = dataset_config.get('type', 'train')
+
+    # Check for GHOP-specific markers in config
+    use_ghop = (
+            hasattr(args, 'use_ghop') and args.use_ghop or
+            dataset_config.get('dataset_type', '') == 'ghop_hoi' or
+            dataset_config.get('is_video', False) or
+            'ghop' in args.case.lower()  # Case name contains 'ghop'
+    )
+
+    # ================================================================
+    # STEP 2: Create appropriate dataset
+    # ================================================================
+    if use_ghop:
+        logger.info("=" * 70)
+        logger.info("CREATING GHOP HOI4D VIDEO DATASET")
+        logger.info("=" * 70)
+
+        # Extract GHOP data directory from args.case
+        # Expected: args.case = 'ghop_bottle_1'
+        # Maps to: ~/Projects/ghop/data/HOI4D_clip/Bottle_1
+        case_name = args.case.lower()
+
+        # Parse object name from case (e.g., 'ghop_bottle_1' -> 'Bottle_1')
+        if 'ghop_' in case_name:
+            obj_name = case_name.replace('ghop_', '')
+            # Convert back to title case (bottle_1 -> Bottle_1)
+            obj_name = '_'.join(word.capitalize() for word in obj_name.split('_'))
+        else:
+            obj_name = 'Bottle_1'  # Default fallback
+
+        # Build GHOP data path
+        ghop_root = os.path.expanduser('~/Projects/ghop/data/HOI4D_clip')
+        data_dir = os.path.join(ghop_root, obj_name)
+
+        logger.info(f"GHOP Configuration:")
+        logger.info(f"  Case name: {args.case}")
+        logger.info(f"  Object name: {obj_name}")
+        logger.info(f"  Data directory: {data_dir}")
+        logger.info(f"  Split: {dataset_type}")
+
+        # Verify directory exists
+        if not os.path.exists(data_dir):
+            raise FileNotFoundError(
+                f"GHOP data directory not found: {data_dir}\n"
+                f"Expected structure: ~/Projects/ghop/data/HOI4D_clip/{obj_name}/\n"
+                f"Please ensure GHOP HOI4D dataset is extracted correctly."
+            )
+
+        # Create GHOP HOI4D dataset
+        dataset = GHOPHOIDataset(
+            data_dir=data_dir,
+            split=dataset_type,  # 'train' or 'val'
+            args=args
+        )
+
+        logger.info(f"✓ GHOP dataset created:")
+        logger.info(f"  Total frames: {dataset.n_frames}")
+        logger.info(f"  Frame pairs: {len(dataset)}")
+        logger.info(f"  Category: {dataset.category}")
+
+        # ✅ CRITICAL: Verify temporal fields present
+        sample = dataset[0]
+        if 'hA_n' in sample and 'c2w_n' in sample:
+            logger.info(f"  ✅ Temporal fields: hA_n, c2w_n present")
+            logger.info(f"  ✅ Phase 5 will ACTIVATE")
+        else:
+            logger.warning(f"  ⚠️  Temporal fields missing!")
+            logger.warning(f"  ⚠️  Phase 5 will SKIP")
+
+        logger.info("=" * 70)
+
+    else:
+        # ================================================================
+        # HOLD Single-Image Dataset (Original)
+        # ================================================================
+        logger.info("=" * 70)
+        logger.info("CREATING HOLD SINGLE-IMAGE DATASET")
+        logger.info("=" * 70)
+
+        dataset = create_image_dataset(dataset_config, args)
+
+        logger.info(f"✓ HOLD dataset created:")
+        logger.info(f"  Images: {len(dataset)}")
+        logger.info(f"  Type: Single-image")
+        logger.info(f"  ⚠️  Phase 5 temporal will SKIP (no video data)")
+        logger.info("=" * 70)
+
+    return dataset
 
 def main():
     args, opt = parser_args()
@@ -111,7 +219,7 @@ def main():
     trainer = pl.Trainer(
         gpus=1,
         accelerator="gpu",
-        gradient_clip_val=0.5,
+        # gradient_clip_val=0.5,removed - handled manually in HOLD.training_step for GHOP compatibility
         callbacks=[checkpoint_callback],
         max_epochs=args.num_epoch,
         check_val_every_n_epoch=args.eval_every_epoch,

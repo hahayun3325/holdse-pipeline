@@ -1,0 +1,58 @@
+GHOP Quick Test Summary
+Start: Sat Oct 18 01:50:52 PM CDT 2025
+
+
+========================================================================
+Quick Testing: Bottle_1 (case: ghop_bottle_1)
+========================================================================
+
+✓ Dataset: /home/fredcui/Projects/ghop/data/HOI4D_clip/Bottle_1
+✓ Case name: ghop_bottle_1
+
+Creating config by copying test_checkpoint_loading.yaml...
+✓ Config: confs/ghop_quick_bottle_1.yaml
+
+Starting quick test...
+Command: python train.py --config confs/ghop_quick_bottle_1.yaml --case ghop_bottle_1 --gpu_id 0 --num_epoch 1
+Log: ../ghop_quick_test_results/quick_bottle_1_20251018_135052.log
+
+
+Test status: ✅ COMPLETED
+Duration: 123s
+
+========================================================================
+ANALYSIS
+========================================================================
+
+✅ Dataset: Loaded
+2025-10-18 13:50:59.647 | INFO     | src.datasets.image_dataset:__init__:61 - [ImageDataset] Text prompt metadata loaded
+2025-10-18 13:50:59.647 | INFO     | src.datasets.image_dataset:__init__:63 -   Category: 'Bottle'
+2025-10-18 13:50:59.653 | INFO     | src.datasets.image_dataset:__init__:61 - [ImageDataset] Text prompt metadata loaded
+
+✅ Phase 5: ACTIVATED
+2025-10-18 13:51:03.313 | INFO     | src.hold.hold:__init__:577 - Initializing Phase 5 Training Scheduler...
+2025-10-18 13:51:03.313 | INFO     | src.hold.hold:__init__:601 - ✓ Phase 5 initialized successfully
+  - Phase 5 start iteration: 100
+2025-10-18 13:51:03.313 | DEBUG    | src.hold.hold:__init__:628 -   log_phase5_every: 10
+2025-10-18 13:51:04.726 | DEBUG    | src.hold.hold:training_step:960 - [Phase 5] Detecting adaptive contact zones at step 20
+
+✅ Training: Progress
+Epoch 0:  99%|█████████▉| 991/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:30.519 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 991
+Epoch 0:  99%|█████████▉| 992/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:30.605 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 992
+Epoch 0:  99%|█████████▉| 993/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]Epoch 0:  99%|█████████▉| 993/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:30.690 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 993
+Epoch 0:  99%|█████████▉| 994/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:30.777 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 994
+Epoch 0: 100%|█████████▉| 995/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:30.862 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 995
+Epoch 0: 100%|█████████▉| 996/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:30.948 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 996
+Epoch 0: 100%|█████████▉| 997/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]Epoch 0: 100%|█████████▉| 997/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:31.033 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 997
+Epoch 0: 100%|█████████▉| 998/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:31.118 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 998
+Epoch 0: 100%|█████████▉| 999/1000 [01:27<00:00, 11.37it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]2025-10-18 13:52:31.441 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 999
+Epoch 0: 100%|██████████| 1000/1000 [01:28<00:00, 11.34it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]Epoch 0: 100%|██████████| 1000/1000 [01:28<00:00, 11.34it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]Epoch 0: 100%|██████████| 1000/1000 [01:28<00:00, 11.34it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=1.120, ghop/sds_loss=0.000]
+
+⚠️ Errors found
+2025-10-18 13:51:03.004 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
+2025-10-18 13:51:03.004 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
+
+========================================================================
+✅ QUICK TEST COMPLETE
+========================================================================
+End: Sat Oct 18 01:52:56 PM CDT 2025
