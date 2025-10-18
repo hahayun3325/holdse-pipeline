@@ -1,59 +1,0 @@
-GHOP Quick Test Summary
-Start: Sat Oct 18 01:44:29 PM CDT 2025
-
-
-========================================================================
-Quick Testing: Bottle_1 (case: ghop_bottle_1)
-========================================================================
-
-✓ Dataset: /home/fredcui/Projects/ghop/data/HOI4D_clip/Bottle_1
-✓ Case name: ghop_bottle_1
-
-Creating config by copying test_checkpoint_loading.yaml...
-✓ Config: confs/ghop_quick_bottle_1.yaml
-
-Starting quick test...
-Command: python train.py --config confs/ghop_quick_bottle_1.yaml --case ghop_bottle_1 --gpu_id 0 --num_epoch 1
-Log: ../ghop_quick_test_results/quick_bottle_1_20251018_134429.log
-
-
-Test status: ✅ COMPLETED
-Duration: 34s
-
-========================================================================
-ANALYSIS
-========================================================================
-
-✅ Dataset: Loaded
-2025-10-18 13:44:35.924 | INFO     | src.datasets.image_dataset:__init__:61 - [ImageDataset] Text prompt metadata loaded
-2025-10-18 13:44:35.924 | INFO     | src.datasets.image_dataset:__init__:63 -   Category: 'Bottle'
-2025-10-18 13:44:35.929 | INFO     | src.datasets.image_dataset:__init__:61 - [ImageDataset] Text prompt metadata loaded
-
-✅ Phase 5: ACTIVATED
-2025-10-18 13:44:39.569 | INFO     | src.hold.hold:__init__:577 - Initializing Phase 5 Training Scheduler...
-2025-10-18 13:44:39.570 | INFO     | src.hold.hold:__init__:601 - ✓ Phase 5 initialized successfully
-  - Phase 5 start iteration: 100
-2025-10-18 13:44:39.570 | DEBUG    | src.hold.hold:__init__:628 -   log_phase5_every: 10
-2025-10-18 13:44:40.937 | DEBUG    | src.hold.hold:training_step:960 - [Phase 5] Detecting adaptive contact zones at step 20
-
-✅ Training: Progress
-Epoch 0:  19%|█▉        | 193/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]Epoch 0:  19%|█▉        | 193/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.038 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 193
-Epoch 0:  19%|█▉        | 194/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.123 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 194
-Epoch 0:  20%|█▉        | 195/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.208 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 195
-Epoch 0:  20%|█▉        | 196/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.297 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 196
-Epoch 0:  20%|█▉        | 197/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]Epoch 0:  20%|█▉        | 197/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.383 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 197
-Epoch 0:  20%|█▉        | 198/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.469 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 198
-Epoch 0:  20%|█▉        | 199/1000 [00:16<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.553 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 199
-Epoch 0:  20%|██        | 200/1000 [00:17<01:08, 11.75it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]/home/fredcui/Projects/holdse/code/src/model/renderables/mano_node.py:134: UserWarning: [GHOP] NaN detected in MANO vertices (shape: torch.Size([4, 779, 3])), skipping subdivision
-Epoch 0:  20%|██        | 201/1000 [00:17<01:08, 11.73it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]Epoch 0:  20%|██        | 201/1000 [00:17<01:08, 11.73it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]2025-10-18 13:44:56.757 | DEBUG    | src.hold.hold:training_step:780 - [Phase 3] Extracting hand params at step 201
-Epoch 0:  20%|██        | 201/1000 [00:23<01:32,  8.59it/s, ghop/stage_progress=1.000, ghop/total_loss=0.000, train/loss=nan.0, ghop/sds_loss=0.000]
-
-⚠️ Errors found
-2025-10-18 13:44:39.256 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
-2025-10-18 13:44:39.256 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
-RuntimeError: Trying to backward through the graph a second time (or directly access saved variables after they have already been freed). Saved intermediate values of the graph are freed when you call .backward() or autograd.grad(). Specify retain_graph=True if you need to backward through the graph a second time or if you need to access saved variables after calling backward.
-
-========================================================================
-✅ QUICK TEST COMPLETE
-========================================================================
-End: Sat Oct 18 01:45:03 PM CDT 2025
