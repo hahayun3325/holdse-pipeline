@@ -365,11 +365,85 @@ def sample_on_barycentric_mesh(verts, faces, num_samples):
 
 
 def downsample_rendering(batch, k):
-    im_h = batch["img_size"][0].item()
-    im_w = batch["img_size"][1].item()
+    """
+    Downsample rendering batch for faster inference.
+
+    Args:
+        batch: Batch dict with img_size or default to reasonable values
+        k: Downsample factor
+
+    Returns:
+        batch: Downsampled batch
+    """
+    # ================================================================
+    # FIX: Handle missing or batched img_size
+    # ================================================================
+    if "img_size" in batch:
+        # img_size can be either:
+        # - [H, W] (single sample)
+        # - [B, 2] (batched samples)
+        # - List of tensors [[H], [W]]
+
+        img_size = batch["img_size"]
+
+        # Case 1: List of tensors (HOLD's format after overwrite)
+        if isinstance(img_size, list):
+            im_h = img_size[0].item() if img_size[0].numel() == 1 else img_size[0][0].item()
+            im_w = img_size[1].item() if img_size[1].numel() == 1 else img_size[1][0].item()
+
+        # Case 2: Single tensor
+        elif isinstance(img_size, torch.Tensor):
+            if img_size.dim() == 1:
+                # Shape [2]: [H, W]
+                im_h = img_size[0].item()
+                im_w = img_size[1].item()
+            elif img_size.dim() == 2:
+                # Shape [B, 2]: Take first sample
+                im_h = img_size[0, 0].item()
+                im_w = img_size[0, 1].item()
+            else:
+                # Unexpected shape
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"[downsample_rendering] Unexpected img_size shape: {img_size.shape}. "
+                    f"Using default [480, 640]"
+                )
+                im_h, im_w = 480, 640
+        else:
+            # Unknown type
+            im_h, im_w = 480, 640
+
+    else:
+        # GHOP HOI4D default: infer from intrinsics or use standard resolution
+        if "intrinsics" in batch:
+            # Try to infer from intrinsics (principal point * 2 ≈ image size)
+            K = batch["intrinsics"]  # [B, 3, 3] or [B, 4, 4]
+            if K.dim() == 3:
+                # cx ≈ W/2, cy ≈ H/2
+                cx = K[0, 0, 2].item() if K.shape[-1] >= 3 else 320
+                cy = K[0, 1, 2].item() if K.shape[-1] >= 3 else 240
+                im_w = int(cx * 2)
+                im_h = int(cy * 2)
+            else:
+                # Fallback to HOI4D standard
+                im_h, im_w = 480, 640
+        else:
+            # Ultimate fallback
+            im_h, im_w = 480, 640
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            f"[downsample_rendering] img_size not in batch, "
+            f"inferred/defaulted to [{im_h}, {im_w}]"
+        )
+
+    # Rest of the function remains the same
     im_h_new = im_h
     im_w_new = im_w
     num_pixels = im_h * im_w
+
     for key, val in batch.items():
         if (
             isinstance(val, torch.Tensor)
@@ -385,8 +459,27 @@ def downsample_rendering(batch, k):
                     :, ::k, ::k, :
                 ].reshape(val.shape[0], -1, val.shape[-1])
             batch.overwrite(key, val)
+
     im_h_new = torch.LongTensor(np.array([im_h_new])).cuda()
     im_w_new = torch.LongTensor(np.array([im_w_new])).cuda()
-    batch.overwrite("img_size", [im_h_new, im_w_new])
-    batch.overwrite("total_pixels", im_h_new * im_w_new)
+
+    # ================================================================
+    # FIX: Use overwrite for existing keys, __setitem__ for new keys
+    # ================================================================
+    # Check if img_size exists
+    if "img_size" in batch:
+        # Key exists: use overwrite
+        batch.overwrite("img_size", [im_h_new, im_w_new])
+    else:
+        # Key doesn't exist: use regular assignment
+        batch["img_size"] = [im_h_new, im_w_new]
+
+    # Check if total_pixels exists
+    if "total_pixels" in batch:
+        # Key exists: use overwrite
+        batch.overwrite("total_pixels", im_h_new * im_w_new)
+    else:
+        # Key doesn't exist: use regular assignment
+        batch["total_pixels"] = im_h_new * im_w_new
+
     return batch

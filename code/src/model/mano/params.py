@@ -5,7 +5,20 @@ from src.model.generic.params import GenericParams
 
 class MANOParams(GenericParams):
     def forward(self, frame_ids):
-        """Forward with diagnostics and correct concatenation."""
+        """
+        Forward pass to retrieve MANO parameters.
+
+        Args:
+            frame_ids: [B] tensor of frame indices
+
+        Returns:
+            dict with keys:
+                - {node_id}.betas: [B, 10]
+                - {node_id}.global_orient: [B, 3]
+                - {node_id}.transl: [B, 3]
+                - {node_id}.pose: [B, 45]
+                - {node_id}.full_pose: [B, 48] (global_orient + pose)
+        """
         logger.info("="*70)
         logger.info("[MANOParams.forward] ENTRY")
         logger.info("="*70)
@@ -37,15 +50,12 @@ class MANOParams(GenericParams):
         logger.info(f"  {node_id}.global_orient: {params[f'{node_id}.global_orient'].shape}")
         logger.info(f"  {node_id}.pose: {params[f'{node_id}.pose'].shape}")
 
-        # ================================================================
-        # ✅ FIX: Concatenate on dim=2 (feature dimension), not dim=1
-        # ================================================================
-        # Shapes: global_orient [B, 1, 3], pose [B, 1, 45]
-        # Result: full_pose [B, 1, 48]
-
+        # Shapes: global_orient [B, 3], pose [B, 45]
+        # Result: full_pose [B, 48]
         full_pose = torch.cat(
-            (params[f"{node_id}.global_orient"], params[f"{node_id}.pose"]),
-            dim=2  # ← CHANGED from dim=1 to dim=2
+            (params[f"{node_id}.global_orient"],
+             params[f"{node_id}.pose"]),
+            dim=1  # Concatenate along feature dimension
         )
         params[f"{node_id}.full_pose"] = full_pose
 

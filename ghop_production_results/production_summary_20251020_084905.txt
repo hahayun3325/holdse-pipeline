@@ -1,0 +1,80 @@
+========================================================================
+GHOP PRODUCTION TRAINING - Bottle_1
+========================================================================
+Start: Mon Oct 20 08:49:05 AM CDT 2025
+
+Configuration:
+  Dataset:       ghop_bottle_1 (71 frames)
+  Epochs:        20 (full training)
+  Duration:      6-8 hours
+  Expected:
+    - Phase 5 ACTIVE at step 100
+    - Temporal loss computed
+    - Object SDF converges (Phase 4 activates)
+========================================================================
+
+✓ Found working config: confs/ghop_quick_bottle_1.yaml
+
+Creating production config...
+✓ Created: confs/ghop_production_bottle_1.yaml
+
+Verifying config...
+  ✅ implicit_network: present
+  ✅ rendering_network: present
+  ✅ density: present
+  ✅ ray_sampler: present
+  ✅ phase5: present
+
+✅ Config complete
+
+Starting training...
+  Command: python train.py --config confs/ghop_production_bottle_1.yaml --case ghop_bottle_1 --use_ghop --gpu_id 0 --num_epoch 20 --limit_val_batches 0
+  Log: ../ghop_production_results/production_bottle_1_20251020_084905.log
+
+
+========================================================================
+ANALYSIS
+========================================================================
+
+✅ Training Status: COMPLETED
+  Duration: 0h 0m 2s
+
+📊 Dataset:
+  ❌ Dataset NOT loaded
+
+🎯 Phase 5 - Temporal Consistency:
+  ⚠️ Phase 5 NOT activated (step < 100)
+
+📈 Training Progress:
+  ❌ No training progress found
+
+🤖 Phase 3 - GHOP SDS:
+  ⚠️ GHOP SDS not detected
+
+🤝 Phase 4 - Contact Refinement:
+  ⚠️ Phase 4 not detected
+
+⚠️ Error Analysis:
+  ⚠️ Errors/warnings found:
+    train.py: error: unrecognized arguments: --limit_val_batches 0 --num_sanity_val_steps 0
+
+💾 Checkpoints:
+  ⚠️ No checkpoints directory found
+
+========================================================================
+SUMMARY
+========================================================================
+⚠️ TRAINING COMPLETED WITH WARNINGS
+
+Issues:
+  ⚠️ Only  / 20 epochs completed
+  ⚠️ Consider rerunning with more time
+
+========================================================================
+End: Mon Oct 20 08:49:07 AM CDT 2025
+
+📁 Results:
+  Summary: ../ghop_production_results/production_summary_20251020_084905.txt
+  Log: ../ghop_production_results/production_bottle_1_20251020_084905.log
+  Checkpoints: logs/ghop_bottle_1/checkpoints/
+========================================================================

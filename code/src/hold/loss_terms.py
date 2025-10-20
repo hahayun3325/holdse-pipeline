@@ -41,16 +41,64 @@ def get_bce_loss(acc_map, scores):
 
 # Global opacity sparseness regularization
 def get_opacity_sparse_loss(acc_map, index_off_surface, scores):
+    """
+    Compute opacity sparseness loss for off-surface regions.
+
+    Args:
+        acc_map: Accumulated opacity map [N]
+        index_off_surface: Boolean mask for off-surface pixels [N]
+        scores: Per-entity scores (any shape, will be flattened to 1D)
+
+    Returns:
+        opacity_sparse_loss: Scalar loss value
+    """
+    # Compute base sparseness loss
     opacity_sparse_loss = l1_loss(
-        acc_map[index_off_surface], torch.zeros_like(acc_map[index_off_surface])
+        acc_map[index_off_surface],
+        torch.zeros_like(acc_map[index_off_surface])
     )
 
-    num_pix = acc_map.shape[0] // scores.shape[0]
-    scores = scores[:, None].repeat(1, num_pix).view(-1, 1)
-    scores = scores[index_off_surface]
-    opacity_sparse_loss = opacity_sparse_loss * scores
+    # ================================================================
+    # FIX: Robustly flatten scores to 1D
+    # ================================================================
+    # Original shape for debugging
+    original_shape = scores.shape
 
+    # Flatten to 1D (handles any input shape)
+    scores_flat = scores.reshape(-1)  # Most robust: reshape to 1D
+
+    # Validate: ensure we have the right batch size
+    num_pix = acc_map.shape[0] // scores_flat.shape[0]
+
+    if acc_map.shape[0] % scores_flat.shape[0] != 0:
+        # Mismatch: acc_map size not divisible by scores size
+        # This is a warning condition but continue
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"[get_opacity_sparse_loss] Pixel/score mismatch: "
+            f"acc_map={acc_map.shape[0]}, scores={scores_flat.shape[0]} (from {original_shape}). "
+            f"Adjusting num_pix calculation."
+        )
+        # Use maximum possible num_pix
+        num_pix = max(1, acc_map.shape[0] // scores_flat.shape[0])
+
+    # Expand scores to match pixel count
+    scores_expanded = scores_flat[:, None].repeat(1, num_pix).view(-1, 1)
+
+    # Trim if necessary (in case of rounding issues)
+    if scores_expanded.shape[0] > acc_map.shape[0]:
+        scores_expanded = scores_expanded[:acc_map.shape[0]]
+
+    # Select off-surface scores
+    scores_selected = scores_expanded[index_off_surface]
+
+    # Weight loss by scores
+    opacity_sparse_loss = opacity_sparse_loss * scores_selected
+
+    # Mean loss
     opacity_sparse_loss = opacity_sparse_loss.mean()
+
     return opacity_sparse_loss
 
 

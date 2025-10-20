@@ -1,0 +1,58 @@
+GHOP Quick Test Summary
+Start: Sun Oct 19 09:11:28 PM CDT 2025
+
+
+========================================================================
+Quick Testing: Bottle_1 (case: ghop_bottle_1)
+========================================================================
+
+✓ Dataset: /home/fredcui/Projects/ghop/data/HOI4D_clip/Bottle_1
+✓ Case name: ghop_bottle_1
+
+Creating config by copying test_checkpoint_loading.yaml...
+✓ Config: confs/ghop_quick_bottle_1.yaml
+
+Starting quick test...
+Command: python train.py --config confs/ghop_quick_bottle_1.yaml --case ghop_bottle_1 --gpu_id 0 --num_epoch 1
+Log: ../ghop_quick_test_results/quick_bottle_1_20251019_211128.log
+
+
+Test status: ✅ COMPLETED
+Duration: 23s
+
+========================================================================
+ANALYSIS
+========================================================================
+
+❌ Dataset: NOT loaded
+
+✅ Phase 5: ACTIVATED
+2025-10-19 21:11:34.965 | INFO     | __main__:create_dataset_with_ghop_support:181 -   ✅ Phase 5 will ACTIVATE
+2025-10-19 21:11:34.969 | INFO     | __main__:create_dataset_with_ghop_support:181 -   ✅ Phase 5 will ACTIVATE
+2025-10-19 21:11:38.559 | INFO     | src.hold.hold:__init__:577 - Initializing Phase 5 Training Scheduler...
+2025-10-19 21:11:38.559 | INFO     | src.hold.hold:__init__:601 - ✓ Phase 5 initialized successfully
+  - Phase 5 start iteration: 100
+
+✅ Training: Progress
+Epoch 0:  68%|██████▊   | 19/28 [00:00<00:00, 24.44it/s, ghop/stage_progress=0.170, ghop/total_loss=0.000, train/loss=1.130, ghop/sds_loss=0.000]2025-10-19 21:11:39.365 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  71%|███████▏  | 20/28 [00:00<00:00, 24.51it/s, ghop/stage_progress=0.180, ghop/total_loss=0.000, train/loss=0.497, ghop/sds_loss=0.000]2025-10-19 21:11:39.404 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  75%|███████▌  | 21/28 [00:00<00:00, 23.54it/s, ghop/stage_progress=0.180, ghop/total_loss=0.000, train/loss=0.497, ghop/sds_loss=0.000]Epoch 0:  75%|███████▌  | 21/28 [00:00<00:00, 23.54it/s, ghop/stage_progress=0.190, ghop/total_loss=0.000, train/loss=0.627, ghop/sds_loss=0.000]2025-10-19 21:11:39.480 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  79%|███████▊  | 22/28 [00:00<00:00, 22.85it/s, ghop/stage_progress=0.200, ghop/total_loss=0.000, train/loss=0.680, ghop/sds_loss=0.000]2025-10-19 21:11:39.551 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  82%|████████▏ | 23/28 [00:01<00:00, 22.21it/s, ghop/stage_progress=0.210, ghop/total_loss=0.000, train/loss=0.701, ghop/sds_loss=0.000]2025-10-19 21:11:39.623 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  86%|████████▌ | 24/28 [00:01<00:00, 21.67it/s, ghop/stage_progress=0.210, ghop/total_loss=0.000, train/loss=0.701, ghop/sds_loss=0.000]Epoch 0:  86%|████████▌ | 24/28 [00:01<00:00, 21.67it/s, ghop/stage_progress=0.220, ghop/total_loss=0.000, train/loss=0.918, ghop/sds_loss=0.000]2025-10-19 21:11:39.695 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  89%|████████▉ | 25/28 [00:01<00:00, 21.22it/s, ghop/stage_progress=0.230, ghop/total_loss=0.000, train/loss=1.210, ghop/sds_loss=0.000]2025-10-19 21:11:39.766 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  93%|█████████▎| 26/28 [00:01<00:00, 20.80it/s, ghop/stage_progress=0.240, ghop/total_loss=0.000, train/loss=0.418, ghop/sds_loss=0.000]2025-10-19 21:11:39.838 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([2, 1])
+Epoch 0:  96%|█████████▋| 27/28 [00:01<00:00, 20.38it/s, ghop/stage_progress=0.240, ghop/total_loss=0.000, train/loss=0.418, ghop/sds_loss=0.000]Epoch 0:  96%|█████████▋| 27/28 [00:01<00:00, 20.38it/s, ghop/stage_progress=0.250, ghop/total_loss=0.000, train/loss=0.482, ghop/sds_loss=0.000]2025-10-19 21:11:39.913 | DEBUG    | src.hold.hold:training_step:724 - [Batch] idx already tensor: torch.Size([1, 1])
+Epoch 0: 100%|██████████| 28/28 [00:01<00:00, 20.26it/s, ghop/stage_progress=0.260, ghop/total_loss=0.000, train/loss=0.519, ghop/sds_loss=0.000]Epoch 0: 100%|██████████| 28/28 [00:01<00:00, 20.25it/s, ghop/stage_progress=0.260, ghop/total_loss=0.000, train/loss=0.519, ghop/sds_loss=0.000]Epoch 0: 100%|██████████| 28/28 [00:01<00:00, 20.25it/s, ghop/stage_progress=0.260, ghop/total_loss=0.000, train/loss=0.519, ghop/sds_loss=0.000]
+
+⚠️ Errors found
+2025-10-19 21:11:38.256 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
+2025-10-19 21:11:38.256 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
+2025-10-19 21:11:38.607 | DEBUG    | src.hold.hold:training_step:921 - [FIX] Detaching batch tensors to prevent inplace errors...
+RuntimeError: expand(torch.cuda.LongTensor{[2, 1, 1]}, size=[-1, 262144]): the number of sizes provided (2) must be greater or equal to the number of dimensions in the tensor (3)
+2025-10-19 21:11:38.655 | DEBUG    | src.hold.hold:training_step:921 - [FIX] Detaching batch tensors to prevent inplace errors...
+
+========================================================================
+✅ QUICK TEST COMPLETE
+========================================================================
+End: Sun Oct 19 09:11:51 PM CDT 2025

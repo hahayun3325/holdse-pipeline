@@ -1,0 +1,99 @@
+========================================================================
+GHOP PRODUCTION TRAINING - Bottle_1
+========================================================================
+Start: Mon Oct 20 08:39:05 AM CDT 2025
+
+Configuration:
+  Dataset:       ghop_bottle_1 (71 frames)
+  Epochs:        20 (full training)
+  Duration:      6-8 hours
+  Expected:
+    - Phase 5 ACTIVE at step 100
+    - Temporal loss computed
+    - Object SDF converges (Phase 4 activates)
+========================================================================
+
+✓ Found working config: confs/ghop_quick_bottle_1.yaml
+
+Creating production config...
+✓ Created: confs/ghop_production_bottle_1.yaml
+
+Verifying config...
+  ✅ implicit_network: present
+  ✅ rendering_network: present
+  ✅ density: present
+  ✅ ray_sampler: present
+  ✅ phase5: present
+
+✅ Config complete
+
+Starting training...
+  Command: python train.py --config confs/ghop_production_bottle_1.yaml --case ghop_bottle_1 --use_ghop --gpu_id 0 --num_epoch 20
+  Log: ../ghop_production_results/production_bottle_1_20251020_083905.log
+
+
+========================================================================
+ANALYSIS
+========================================================================
+
+✅ Training Status: COMPLETED
+  Duration: 0h 1m 33s
+
+📊 Dataset:
+  ✅ GHOP HOI4D dataset loaded
+    2025-10-20 08:39:12.355 | INFO     | src.datasets.ghop_hoi_dataset:__init__:106 -   Total frames: 71
+    2025-10-20 08:39:12.355 | INFO     | src.datasets.ghop_hoi_dataset:__init__:108 -   Category: bottle
+    2025-10-20 08:39:12.356 | INFO     | __main__:create_dataset_with_ghop_support:173 -   Total frames: 71
+    2025-10-20 08:39:12.356 | INFO     | __main__:create_dataset_with_ghop_support:174 -   Frame pairs: 55
+    2025-10-20 08:39:12.356 | INFO     | __main__:create_dataset_with_ghop_support:175 -   Category: bottle
+
+🎯 Phase 5 - Temporal Consistency:
+  ✅ Phase 5 ACTIVATED
+  Temporal loss logged: 0
+0 times
+
+📈 Training Progress:
+  ❌ No training progress found
+
+🤖 Phase 3 - GHOP SDS:
+  ✅ GHOP SDS active
+  SDS loss logged: 269 times
+  ✅ SDS loss non-zero (VQ-VAE working)
+
+🤝 Phase 4 - Contact Refinement:
+  ✅ Phase 4 initialized
+  ⚠️ Contact loss skipped (object SDF not ready)
+
+⚠️ Error Analysis:
+  ⚠️ Errors/warnings found:
+    2025-10-20 08:39:15.637 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
+    2025-10-20 08:39:15.637 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
+    2025-10-20 08:39:16.008 | DEBUG    | src.hold.hold:training_step:989 - [FIX] Detaching batch tensors to prevent inplace errors...
+    RuntimeError: expand(torch.cuda.LongTensor{[2, 1, 1]}, size=[-1, 262144]): the number of sizes provided (2) must be greater or equal to the number of dimensions in the tensor (3)
+    2025-10-20 08:39:16.058 | DEBUG    | src.hold.hold:training_step:989 - [FIX] Detaching batch tensors to prevent inplace errors...
+    RuntimeError: expand(torch.cuda.LongTensor{[2, 1, 1]}, size=[-1, 262144]): the number of sizes provided (2) must be greater or equal to the number of dimensions in the tensor (3)
+    2025-10-20 08:39:16.098 | DEBUG    | src.hold.hold:training_step:989 - [FIX] Detaching batch tensors to prevent inplace errors...
+    RuntimeError: expand(torch.cuda.LongTensor{[2, 1, 1]}, size=[-1, 262144]): the number of sizes provided (2) must be greater or equal to the number of dimensions in the tensor (3)
+    2025-10-20 08:39:16.140 | DEBUG    | src.hold.hold:training_step:989 - [FIX] Detaching batch tensors to prevent inplace errors...
+    RuntimeError: expand(torch.cuda.LongTensor{[2, 1, 1]}, size=[-1, 262144]): the number of sizes provided (2) must be greater or equal to the number of dimensions in the tensor (3)
+
+💾 Checkpoints:
+  ⚠️ No checkpoints directory found
+
+========================================================================
+SUMMARY
+========================================================================
+⚠️ TRAINING COMPLETED WITH WARNINGS
+
+Issues:
+  ⚠️ Only  / 20 epochs completed
+  ⚠️ Consider rerunning with more time
+
+========================================================================
+End: Mon Oct 20 08:40:38 AM CDT 2025
+
+📁 Results:
+  Summary: ../ghop_production_results/production_summary_20251020_083905.txt
+  Log: ../ghop_production_results/production_bottle_1_20251020_083905.log
+  Checkpoints: logs/ghop_bottle_1/checkpoints/
+========================================================================

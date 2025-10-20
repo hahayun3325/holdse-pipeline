@@ -628,22 +628,90 @@ class HOLD(pl.LightningModule):
         logger.debug(f"  log_phase5_every: {self.log_phase5_every}")
 
     def save_misc(self):
+        """Save miscellaneous outputs (meshes, camera params, etc.)."""
         out = {}
 
-        dataset = self.trainset.dataset
-        K = dataset.intrinsics_all[0]
-        w2c = dataset.extrinsics_all[0]
+        # ================================================================
+        # FIX: Handle GHOPHOIDataset which doesn't have nested .dataset
+        # ================================================================
+        # Check if trainset has nested .dataset attribute
+        if hasattr(self.trainset, 'dataset'):
+            # Standard HOLD datasets (Subset wrapper)
+            dataset = self.trainset.dataset
+        else:
+            # GHOP HOI4D dataset (no wrapper)
+            dataset = self.trainset
 
+        # ================================================================
+        # Extract camera intrinsics
+        # ================================================================
+        if hasattr(dataset, 'intrinsics_all'):
+            # Standard HOLD format
+            K = dataset.intrinsics_all[0]
+        elif hasattr(dataset, 'intrinsics'):
+            # GHOP format: [N, 4, 4]
+            K = dataset.intrinsics[0]
+        else:
+            # Fallback: identity matrix
+            logger.warning("[save_misc] No intrinsics found, using identity")
+            K = torch.eye(4)
+
+        # ================================================================
+        # Extract camera extrinsics (world-to-camera)
+        # ================================================================
+        if hasattr(dataset, 'extrinsics_all'):
+            # Standard HOLD format
+            w2c = dataset.extrinsics_all[0]
+        elif hasattr(dataset, 'c2w'):
+            # GHOP format: camera-to-world [N, 4, 4]
+            # Need to invert to get world-to-camera
+            c2w = dataset.c2w[0]
+            w2c = torch.inverse(c2w)
+        else:
+            # Fallback: identity matrix
+            logger.warning("[save_misc] No extrinsics found, using identity")
+            w2c = torch.eye(4)
+
+        # ================================================================
+        # Extract object scale from nodes
+        # ================================================================
         for node in self.model.nodes.values():
             if "object" in node.node_id:
-                out[f"{node.node_id}.obj_scale"] = node.server.object_model.obj_scale
+                if hasattr(node.server, 'object_model') and hasattr(node.server.object_model, 'obj_scale'):
+                    out[f"{node.node_id}.obj_scale"] = node.server.object_model.obj_scale
 
-        out["img_paths"] = dataset.img_paths
+        # ================================================================
+        # Extract image paths
+        # ================================================================
+        if hasattr(dataset, 'img_paths'):
+            # Standard HOLD format
+            out["img_paths"] = dataset.img_paths
+        elif hasattr(dataset, 'image_files'):
+            # GHOP format: List of Path objects
+            out["img_paths"] = [str(p) for p in dataset.image_files]
+        else:
+            # No image paths available
+            logger.warning("[save_misc] No image paths found")
+            out["img_paths"] = []
+
+        # ================================================================
+        # Extract scale
+        # ================================================================
+        if hasattr(dataset, 'scale'):
+            out["scale"] = dataset.scale
+        else:
+            # Default scale
+            out["scale"] = 1.0
+
+        # Save camera params
         out["K"] = K
         out["w2c"] = w2c
-        out["scale"] = dataset.scale
+
+        # Generate canonical meshes
         mesh_dict = self.meshing_cano("misc")
         out.update(mesh_dict)
+
+        # Save to file
         out_p = f"{self.args.log_dir}/misc/{self.global_step:09d}.npy"
         os.makedirs(op.dirname(out_p), exist_ok=True)
         np.save(out_p, out)
@@ -1495,7 +1563,6 @@ class HOLD(pl.LightningModule):
                         sample=batch,  # Contains hA, hA_n, c2w, c2w_n from hoi.py
                         predicted_hand_pose=predicted_pose,
                         sequence_id=sequence_id,
-                        frame_idx=frame_idx  # ✓ Added frame indices
                     )
 
                     # =============================================================
@@ -2193,29 +2260,61 @@ class HOLD(pl.LightningModule):
         for node_id, node in self.model.nodes.items():
             if 'right' in node_id.lower() or 'left' in node_id.lower():
                 # Get predicted pose parameters from node
-                params = node.params(batch['idx'])  # [B, 48] or [B, 51]
+                params = node.params(batch['idx'])  # May return xdict or tensor
 
-                # Extract pose and convert to [B, 45] format
-                if params.shape[-1] >= 48:
-                    # Params are [B, 48+]: Take first 48, then strip global_orient
-                    full_pose = params[..., :48]  # [B, 48]
-                    hand_pose = full_pose[..., 3:]  # [B, 45] - strip first 3 dims
-                elif params.shape[-1] == 45:
-                    # Already 45-dim (articulation only)
-                    hand_pose = params
-                else:
-                    # Unexpected shape
-                    logger.warning(
-                        f"[Phase 5] Unexpected param shape from node '{node_id}': "
-                        f"{params.shape}. Expected [..., 45] or [..., 48+]"
+                # ================================================================
+                # FIX: Handle xdict (common.xdict.xdict object)
+                # ================================================================
+                if hasattr(params, '__class__') and 'xdict' in params.__class__.__name__.lower():
+                    # params is xdict - extract tensor from it
+                    logger.debug(f"[Phase 5] node.params returned xdict, extracting tensor")
+
+                    # Try common xdict field names
+                    if hasattr(params, 'full_pose') and params.full_pose is not None:
+                        params = params.full_pose
+                    elif hasattr(params, 'pose') and params.pose is not None:
+                        params = params.pose
+                    elif hasattr(params, 'right') and params.right is not None:
+                        # Nested structure: params.right.full_pose or params.right.pose
+                        if hasattr(params.right, 'full_pose'):
+                            params = params.right.full_pose
+                        elif hasattr(params.right, 'pose'):
+                            params = params.right.pose
+                        else:
+                            # Convert entire xdict to tensor (fallback)
+                            logger.warning(f"[Phase 5] xdict structure unknown, using batch fallback")
+                            params = None
+                    else:
+                        # Unable to extract from xdict
+                        logger.warning(
+                            f"[Phase 5] Could not extract tensor from xdict. "
+                            f"Available fields: {list(params.keys()) if hasattr(params, 'keys') else 'unknown'}"
+                        )
+                        params = None
+
+                # Now params should be a tensor (or None if extraction failed)
+                if params is not None and isinstance(params, torch.Tensor):
+                    # Extract pose and convert to [B, 45] format
+                    if params.shape[-1] >= 48:
+                        # Params are [B, 48+]: Take first 48, then strip global_orient
+                        full_pose = params[..., :48]  # [B, 48]
+                        hand_pose = full_pose[..., 3:]  # [B, 45] - strip first 3 dims
+                    elif params.shape[-1] == 45:
+                        # Already 45-dim (articulation only)
+                        hand_pose = params
+                    else:
+                        # Unexpected shape
+                        logger.warning(
+                            f"[Phase 5] Unexpected param shape from node '{node_id}': "
+                            f"{params.shape}. Expected [..., 45] or [..., 48+]"
+                        )
+                        hand_pose = params
+
+                    logger.debug(
+                        f"[Phase 5] Extracted hand pose from node '{node_id}': "
+                        f"original_shape={params.shape}, output_shape={hand_pose.shape}"
                     )
-                    hand_pose = params
-
-                logger.debug(
-                    f"[Phase 5] Extracted hand pose from node '{node_id}': "
-                    f"original_shape={params.shape}, output_shape={hand_pose.shape}"
-                )
-                break  # Use first hand node found
+                    break  # Use first hand node found
 
         # ================================================================
         # Method 2: Fallback to batch data if node extraction fails
@@ -2229,12 +2328,12 @@ class HOLD(pl.LightningModule):
                     f"shape={hand_pose.shape}"
                 )
 
-            elif 'right.fullpose' in batch:
+            elif 'right.full_pose' in batch:  # Fixed: was 'right.fullpose'
                 # MANO fullpose [B, 48]: strip global_orient
-                full_pose = batch['right.fullpose']  # [B, 48]
+                full_pose = batch['right.full_pose']  # [B, 48]
                 hand_pose = full_pose[..., 3:]  # [B, 45]
                 logger.debug(
-                    f"[Phase 5] Using batch 'right.fullpose', stripped to [B, 45]: "
+                    f"[Phase 5] Using batch 'right.full_pose', stripped to [B, 45]: "
                     f"shape={hand_pose.shape}"
                 )
 

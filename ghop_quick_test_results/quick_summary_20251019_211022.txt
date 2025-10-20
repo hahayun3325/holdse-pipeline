@@ -1,0 +1,39 @@
+GHOP Quick Test Summary
+Start: Sun Oct 19 09:10:22 PM CDT 2025
+
+
+========================================================================
+Quick Testing: Bottle_1 (case: ghop_bottle_1)
+========================================================================
+
+✓ Dataset: /home/fredcui/Projects/ghop/data/HOI4D_clip/Bottle_1
+✓ Case name: ghop_bottle_1
+
+Creating config by copying test_checkpoint_loading.yaml...
+✓ Config: confs/ghop_quick_bottle_1.yaml
+
+Starting quick test...
+Command: python train.py --config confs/ghop_quick_bottle_1.yaml --case ghop_bottle_1 --gpu_id 0 --num_epoch 1
+Log: ../ghop_quick_test_results/quick_bottle_1_20251019_211022.log
+
+
+Test status: ✅ COMPLETED
+Duration: 11s
+
+========================================================================
+ANALYSIS
+========================================================================
+
+❌ Dataset: NOT loaded
+
+❌ Phase 5: NOT activated
+
+❌ Training: No progress
+
+⚠️ Errors found
+UnboundLocalError: local variable 'frame_idx' referenced before assignment
+
+========================================================================
+✅ QUICK TEST COMPLETE
+========================================================================
+End: Sun Oct 19 09:10:33 PM CDT 2025

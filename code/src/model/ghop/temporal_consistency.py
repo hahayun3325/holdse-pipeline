@@ -233,7 +233,13 @@ class TemporalConsistencyModule(nn.Module):
             relative: [6] translation (3) + rotation axis-angle (3)
         """
         # Relative transform: T1^{-1} @ T2
-        T1_inv = torch.inverse(T1)
+        try:
+            # Try GPU inverse
+            T1_inv = torch.inverse(T1)
+        except RuntimeError as e:
+            # Fallback to CPU if GPU fails
+            logger.debug(f"[Temporal] GPU inverse failed: {e}, using CPU")
+            T1_inv = torch.inverse(T1.cpu()).to(T1.device)
         T_rel = T1_inv @ T2
 
         # Extract translation

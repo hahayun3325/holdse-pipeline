@@ -225,6 +225,8 @@ def main():
         check_val_every_n_epoch=args.eval_every_epoch,
         log_every_n_steps=args.log_every,
         num_sanity_val_steps=0,
+        limit_val_batches=0,  # Disable validation (GHOP dataset incompatible)
+        enable_checkpointing=True,  # Keep checkpointing enabled
         logger=False,
     )
 

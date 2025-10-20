@@ -23,10 +23,11 @@ class GHOPHOIDataset(Dataset):
         args: Additional arguments for compatibility
     """
     
-    def __init__(self, data_dir, split='train', downsample=1.0, args=None):
+    def __init__(self, data_dir, split='train', downsample=1.0, args=None, load_images=False):
         self.data_dir = Path(data_dir).expanduser()
         self.split = split
-        
+        self.load_images = load_images
+
         logger.info(f"[GHOPHOIDataset] Loading: {self.data_dir}")
         
         # Validate dataset structure
@@ -69,17 +70,19 @@ class GHOPHOIDataset(Dataset):
             self.hA = torch.from_numpy(hA).float()
         else:
             raise ValueError("Hand poses 'hA' not found in hands.npz")
-        
-        # Hand shape parameters (optional)
+
+        # Hand shape parameters (beta)
         if 'beta' in hands_dict:
             beta = hands_dict['beta']
             if beta.ndim == 2:
                 beta = beta.mean(axis=0)
             self.beta = torch.from_numpy(beta).float()
+            logger.info(f"  Beta: loaded from hands.npz, shape={self.beta.shape}")
         else:
+            # Only use default if beta not in file
             self.beta = torch.zeros(10)
-            logger.warning(f"  Beta: using default (zeros)")
-        
+            logger.warning(f"  Beta: not found in hands.npz, using default (zeros)")
+
         # Load object category
         text_file = self.data_dir / 'text.txt'
         if text_file.exists():
@@ -88,8 +91,10 @@ class GHOPHOIDataset(Dataset):
         else:
             self.category = self.data_dir.name.split('_')[0].lower()
         
-        # Setup frame indices
-        self.n_frames = len(self.c2w)
+        # ================================================================
+        # Setup frame indices (MUST BE BEFORE hand_trans)
+        # ================================================================
+        self.n_frames = len(self.c2w)  # ← DEFINE n_frames HERE
         split_ratio = 0.8
         split_idx = int(self.n_frames * split_ratio)
         
@@ -101,7 +106,53 @@ class GHOPHOIDataset(Dataset):
         logger.info(f"  Total frames: {self.n_frames}")
         logger.info(f"  {split} frame pairs: {len(self.frame_indices)}")
         logger.info(f"  Category: {self.category}")
-    
+
+        # ================================================================
+        # Extract hand translation (AFTER n_frames is defined)
+        # ================================================================
+        if 'hand_trans' in hands_dict or 'hand_translation' in hands_dict:
+            trans_key = 'hand_trans' if 'hand_trans' in hands_dict else 'hand_translation'
+            hand_trans = hands_dict[trans_key]
+            if hand_trans.ndim == 3:
+                hand_trans = hand_trans.squeeze(1)
+            self.hand_trans = torch.from_numpy(hand_trans).float()
+            logger.info(f"  Hand translation: loaded from {trans_key}, shape={self.hand_trans.shape}")
+        else:
+            # Default: zero translation (NOW self.n_frames exists)
+            self.hand_trans = torch.zeros(self.n_frames, 3)
+            logger.warning(f"  Hand translation: not found, using default (zeros)")
+
+        # ================================================================
+        # HOLD compatibility attributes
+        # ================================================================
+        # Image paths (for save_misc)
+        self.image_dir = self.data_dir / 'image'
+        if self.image_dir.exists():
+            self.image_files = sorted(list(self.image_dir.glob('*.png')))
+            self.img_paths = [str(p) for p in self.image_files]
+            logger.info(f"  Images found: {len(self.image_files)}")
+        else:
+            logger.warning(f"  Image directory not found: {self.image_dir}")
+            self.image_files = []
+            self.img_paths = []
+
+        # Intrinsics and extrinsics aliases (for save_misc)
+        # These allow HOLD code to access camera data uniformly
+        self.intrinsics_all = self.intrinsics  # [N, 4, 4]
+
+        # Compute extrinsics (world-to-camera) from c2w
+        self.extrinsics = torch.inverse(self.c2w)  # [N, 4, 4]
+        self.extrinsics_all = self.extrinsics
+
+        # Scene scale (for save_misc)
+        self.scale = 1.0
+
+        logger.info(f"  ✅ HOLD compatibility attributes added")
+        logger.info(f"    - img_paths: {len(self.img_paths)} images")
+        logger.info(f"    - intrinsics_all: {self.intrinsics_all.shape}")
+        logger.info(f"    - extrinsics_all: {self.extrinsics_all.shape}")
+        logger.info(f"    - scale: {self.scale}")
+
     def _validate_dataset(self):
         """Validate GHOP dataset structure."""
         required_files = ['cameras_hoi.npz', 'hands.npz']
@@ -153,7 +204,7 @@ class GHOPHOIDataset(Dataset):
     def __getitem__(self, idx):
         """
         Get frame pair (t, t+1) for temporal consistency.
-        
+
         Returns:
             sample: Dict with current and next frame data
         """
@@ -181,6 +232,12 @@ class GHOPHOIDataset(Dataset):
             'c2w_n': self.c2w[frame_idx_n],           # [4, 4]
             'intrinsics_n': self.intrinsics[frame_idx_n], # [4, 4]
             'hA_n': self.hA[frame_idx_n],             # [45] CRITICAL!
+
+            # ================================================================
+            # FIX: Add img_size and pixel_per_batch for validation/inference
+            # ================================================================
+            'img_size': [480, 640],  # [H, W] - Python list for HOLD compatibility
+            'pixel_per_batch': 8192,  # ADD THIS LINE - Standard rendering batch size
         }
         
         return sample
