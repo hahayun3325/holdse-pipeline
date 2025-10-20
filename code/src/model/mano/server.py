@@ -1,5 +1,5 @@
 import sys
-
+from loguru import logger
 import torch
 
 sys.path = ["."] + sys.path
@@ -70,6 +70,13 @@ class GenericServer(torch.nn.Module):
             self.tfs_c_inv = tfs.inverse()
 
     def forward(self, scene_scale, transl, thetas, betas, absolute=False):
+        logger.info("[MANO Server] ========== FORWARD CALL ==========")
+        logger.info(f"[MANO Server] Input shapes:")
+        logger.info(f"  scene_scale: {scene_scale.shape}")
+        logger.info(f"  transl: {transl.shape}")
+        logger.info(f"  thetas: {thetas.shape}")
+        logger.info(f"  betas: {betas.shape}")
+
         out = {}
 
         # ignore betas if v_template is provided
@@ -94,6 +101,24 @@ class GenericServer(torch.nn.Module):
         out["verts"] = verts * scene_scale + transl * scene_scale
 
         joints = outputs.joints.clone()
+
+        logger.info(f"[MANO Server] MANO layer outputs:")
+        logger.info(f"  verts: {verts.shape}")
+        logger.info(f"  joints: {joints.shape}")
+
+        # Check for mismatch
+        batch_size_from_transl = transl.shape[0]
+        batch_size_from_verts = verts.shape[0]
+
+        if batch_size_from_verts != batch_size_from_transl:
+            logger.error(f"[MANO Server] ❌ SHAPE MISMATCH DETECTED:")
+            logger.error(f"  verts batch dim: {batch_size_from_verts}")
+            logger.error(f"  transl batch dim: {batch_size_from_transl}")
+            logger.error(f"  Ratio: {batch_size_from_verts / batch_size_from_transl}")
+            logger.error(f"  This suggests tensors were expanded somewhere upstream!")
+
+        logger.info("[MANO Server] =============================================")
+
         out["jnts"] = joints * scene_scale + transl * scene_scale
         tf_mats = outputs.T.clone()
         tf_mats[:, :, :3, :] = tf_mats[:, :, :3, :] * scene_scale.view(-1, 1, 1, 1)

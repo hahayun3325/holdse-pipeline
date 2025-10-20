@@ -69,20 +69,49 @@ class MANONode(Node):
         self.canonical_mesh = None
 
     def sample_points(self, input):
+        """Sample points with correct shape handling."""
         node_id = self.node_id
         full_pose = input[f"{node_id}.full_pose"]
+
+        # ================================================================
+        # ✅ FIX: Handle 3D parameter tensors correctly
+        # ================================================================
+        # Parameters from GenericParams have shape [B, 1, D]
+        # Server expects 2D inputs: [B, D]
+        # Need to squeeze the middle dimension
+
+        params = input[f"{node_id}.params"]  # [B, 1, 48]
+        transl = input[f"{node_id}.transl"]  # [B, 1, 3]
+        betas = input[f"{node_id}.betas"]    # [B, 1, 10]
+
+        # Squeeze middle dimension if present
+        if params.dim() == 3:
+            scene_scale = params.squeeze(1)[:, 0]  # [B, 1, 48] -> [B, 48] -> [B]
+            transl = transl.squeeze(1)              # [B, 1, 3] -> [B, 3]
+            full_pose = full_pose.squeeze(1)        # [B, 1, 48] -> [B, 48]
+            betas = betas.squeeze(1)                # [B, 1, 10] -> [B, 10]
+        else:
+            # Original HOLD path (2D tensors)
+            scene_scale = params[:, 0]
+
         output = self.server(
-            input[f"{node_id}.params"][:, 0],
-            input[f"{node_id}.transl"],
-            full_pose,
-            input[f"{node_id}.betas"],
+            scene_scale,  # [B]
+            transl,       # [B, 3]
+            full_pose,    # [B, 48]
+            betas,        # [B, 10]
         )
 
         debug.debug_world2pix(self.args, output, input, self.node_id)
-        cond = {"pose": full_pose[:, 3:] / np.pi}  # pose-dependent shape
+
+        # ================================================================
+        # ✅ FIX: Ensure cond has 2D shape [B, D] not [B, 1, D]
+        # ================================================================
+        pose_cond = full_pose[:, 3:] / np.pi  # [B, 45] after squeeze above
+        cond = {"pose": pose_cond}  # Now [B, 45] - correct!
+
         if self.training:
             if input["current_epoch"] < 20:
-                cond = {"pose": full_pose[:, 3:] * 0.0}  # no pose for shape
+                cond = {"pose": pose_cond * 0.0}  # no pose for shape
 
         ray_dirs, cam_loc = get_camera_params(
             input["uv"], input["extrinsics"], input["intrinsics"]

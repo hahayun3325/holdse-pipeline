@@ -186,17 +186,27 @@ def render_fg_rgb(
         create_graph=is_training,
         retain_graph=is_training,
     )
-    # rendering takes: points, normals, viewing dirs, poses, features
-    if time_code is not None:
-        num_images = time_code.shape[0]
-        num_samples = pnts_c.shape[0] // num_images
-        time_code = (
-            time_code[:, None, :]
-            .repeat(1, num_samples, 1)
-            .reshape(-1, time_code.shape[-1])
-        )
-        feature_vectors = torch.cat([feature_vectors, time_code], dim=-1)
 
+    # ================================================================
+    # ✅ CRITICAL: ALL lines below MUST be inside this if block!
+    # ================================================================
+    if time_code is not None:
+        # Ensure time_code is at least 2D [B, D]
+        if time_code.ndim == 1:
+            time_code = time_code.unsqueeze(0)
+
+            num_images = time_code.shape[0]
+            num_samples = pnts_c.shape[0] // num_images
+
+            # ✅ MUST BE INDENTED - inside the if block!
+            time_code = (
+                time_code[:, None, :]            # ← 4 spaces indent
+                .repeat(1, num_samples, 1)       # ← 4 spaces indent
+                .reshape(-1, time_code.shape[-1])# ← 4 spaces indent
+            )                                     # ← 4 spaces indent
+            feature_vectors = torch.cat([feature_vectors, time_code], dim=-1)  # ← 4 spaces indent
+
+    # Rendering
     fg_rendering_output = rendering_network(
         pnts_c, normals, view_dirs, cond["pose"], feature_vectors
     )
@@ -205,19 +215,35 @@ def render_fg_rgb(
 
 
 def sdf_func_with_deformer(deformer, sdf_fn, training, x, deform_info):
+    """SDF function with deformer - handles optional tfs."""
     cond = deform_info["cond"]
-    tfs = deform_info["tfs"]
+
+    # ================================================================
+    # ✅ FIX: Make tfs optional (ObjectServer doesn't provide it)
+    # ================================================================
+    tfs = deform_info.get("tfs", None)  # Use .get() instead of direct access
 
     if "verts" in deform_info:
         verts = deform_info["verts"]
     else:
         verts = None
 
-    num_images = deform_info["tfs"].shape[0]
-    x = x.view(num_images, -1, 3)
-    x_c, outlier_mask = deformer.forward(
-        x, tfs, return_weights=False, inverse=True, verts=verts
-    )
+    # ================================================================
+    # ✅ FIX: Handle case when tfs is None
+    # ================================================================
+    if tfs is not None:
+        # Original path: use deformer with tfs
+        num_images = tfs.shape[0]
+        x = x.view(num_images, -1, 3)
+        x_c, outlier_mask = deformer.forward(
+            x, tfs, return_weights=False, inverse=True, verts=verts
+        )
+    else:
+        # No tfs available: skip deformation (use x directly as x_c)
+        x_c = x
+        # outlier_mask not needed
+
+    # Continue with SDF computation
     output = sdf_fn(x_c, cond)
     sdf = output[:, :, 0:1]
     feature = output[:, :, 1:]

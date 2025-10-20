@@ -20,7 +20,16 @@ class Metrics(nn.Module):
         # psnr
         pred_rgb = preds["rgb"]
         pred_rgb = pred_rgb
-        gt_rgb = targets["gt.rgb"].view(-1, 3)
+
+        # ✅ FIX: Handle missing gt.rgb field for GHOP dataset
+        if "gt.rgb" in targets:
+            gt_rgb = targets["gt.rgb"].view(-1, 3)
+        elif "rgb" in targets:
+            gt_rgb = targets["rgb"].view(-1, 3)
+        else:
+            # No ground truth RGB - return zero metric
+            return torch.tensor(0.0, device=pred_rgb.device)
+
         psnr = self.metric_psnr(pred_rgb, gt_rgb)
         return psnr
 

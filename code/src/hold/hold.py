@@ -684,9 +684,7 @@ class HOLD(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
 
-        # ============================================================
         # PHASE 5: Dynamic Loss Weight Scheduling
-        # ============================================================
         if self.phase5_enabled and hasattr(self, 'phase5_scheduler'):
             loss_weights = self.phase5_scheduler.get_loss_weights(self.global_step)
             lr_multiplier = self.phase5_scheduler.get_learning_rate_multiplier(self.global_step)
@@ -708,23 +706,283 @@ class HOLD(pl.LightningModule):
         # Existing preprocessing code continues...
         self.condition_training()
 
-        batch["idx"] = torch.stack(batch["idx"], dim=1)
+        # ================================================================
+        # ✅ CRITICAL FIX: BATCH PREPROCESSING - Handle HOLD and GHOP formats
+        # ================================================================
+        # HOLD ImageDataset: batch["idx"] is list [tensor([0]), tensor([1])]
+        # GHOP HOI4D: batch["idx"] is already Tensor [[0], [1]]
+
+        # Fix 1: Handle idx field
+        if isinstance(batch["idx"], list):
+            # HOLD format: stack list of tensors
+            batch["idx"] = torch.stack(batch["idx"], dim=1)
+            logger.debug(f"[Batch] Stacked idx from list: {batch['idx'].shape}")
+        elif isinstance(batch["idx"], torch.Tensor):
+            # GHOP format: already tensor, ensure correct shape [B, 1]
+            if batch["idx"].dim() == 1:
+                batch["idx"] = batch["idx"].unsqueeze(1)  # [B] -> [B, 1]
+            logger.debug(f"[Batch] idx already tensor: {batch['idx'].shape}")
+        else:
+            raise TypeError(
+                f"[Batch] batch['idx'] must be list or Tensor, "
+                f"got {type(batch['idx'])}"
+            )
+
+        # Fix 2: Handle other potential list fields
+        # These fields might be lists in HOLD but tensors in GHOP
+        list_fields = ['c2w', 'intrinsics', 'hA', 'right.betas']
+        for key in list_fields:
+            if key in batch and isinstance(batch[key], list):
+                # Check if list contains tensors
+                if len(batch[key]) > 0 and isinstance(batch[key][0], torch.Tensor):
+                    batch[key] = torch.stack(batch[key], dim=0)
+                    logger.debug(f"[Batch] Stacked {key} from list: {batch[key].shape}")
+
+        # ================================================================
+        # Continue with existing preprocessing (keep unchanged)
+        # ================================================================
         batch = hold_utils.wubba_lubba_dub_dub(batch)
         batch = xdict(batch)
         batch["current_epoch"] = self.current_epoch
         batch["global_step"] = self.global_step
 
+        # ================================================================
+        # CRITICAL FIX: Preserve idx shape for nn.Embedding compatibility
+        # ================================================================
+        # wubba_lubba_dub_dub squeezes idx from [B, 1] to [B]
+        # nn.Embedding behaves differently with these shapes:
+        #   Input [B, 1] -> Output [B, 1, D] (correct)
+        #   Input [B]    -> Output [B, D]    (missing dimension)
+
+        if 'idx' in batch and isinstance(batch['idx'], torch.Tensor):
+            original_idx_shape = batch['idx'].shape
+            logger.debug(f"[FIX] batch['idx'] shape after wubba: {original_idx_shape}")
+
+            # Ensure idx has shape [B, 1] for proper Embedding behavior
+            if batch['idx'].dim() == 1:
+                # Use overwrite() method for xdict (prevents assignment error)
+                reshaped_idx = batch['idx'].unsqueeze(1)  # [B] -> [B, 1]
+                batch.overwrite('idx', reshaped_idx)
+                logger.debug(f"[FIX] Reshaped idx to: {batch['idx'].shape}")
+
+        # ================================================================
+        # NODE LOOP with DIAGNOSTICS
+        # ================================================================
         for node in self.model.nodes.values():
-            params = node.params(batch["idx"])
-            batch.update(params)
+            logger.info(f"\n[training_step] Processing node: {node.node_id}")
 
-        debug.debug_params(self)
+            # ============================================================
+            # CRITICAL: Preserve GHOP-extracted params
+            # ============================================================
+            node_id = node.node_id
+            ghop_keys_to_preserve = [f"{node_id}.params"]
+            preserved_values = {}
+
+            for key in ghop_keys_to_preserve:
+                if key in batch:
+                    preserved_values[key] = batch[key]
+                    logger.debug(f"[FIX] Preserving GHOP-extracted {key}: {batch[key].shape}")
+
+            # ============================================================
+            # Call node.params() and update batch
+            # ============================================================
+            logger.info(f"[training_step] Calling node.params(batch['idx'])...")
+            params_dict = node.params(batch['idx'])
+
+            logger.info(f"[training_step] node.params() returned:")
+            for k, v in params_dict.items():
+                if isinstance(v, torch.Tensor):
+                    logger.info(f"    {k}: {v.shape}")
+
+            # Update batch with node params
+            batch.update(params_dict)
+
+            # ============================================================
+            # CRITICAL: Restore GHOP-extracted params
+            # ============================================================
+            for key, value in preserved_values.items():
+                if key not in params_dict:
+                    # node.params() didn't return this key, restore ours
+                    batch[key] = value
+                    logger.info(f"[FIX] Restored GHOP {key}: {value.shape}")
+                else:
+                    # Both exist - use GHOP version (from dataset)
+                    batch.overwrite(key, value)
+                    logger.info(f"[FIX] Kept GHOP {key}: {value.shape}")
+
+            logger.info(f"[training_step] After batch.update:")
+
+        logger.info("="*70)
+        logger.info("[training_step] NODE LOOP END - calling model(batch)")
+        logger.info("="*70)
+
+        # ================================================================
+        # BEFORE FORWARD PASS - Final shape check
+        # ================================================================
+        logger.info("[Forward] ========== FINAL SHAPES BEFORE model(batch) ==========")
+        logger.info(f"  batch['idx']: {batch['idx'].shape}")
+        for key in ['right.full_pose', 'right.betas', 'right.transl']:
+            if key in batch:
+                logger.info(f"  batch['{key}']: {batch[key].shape}")
+        logger.info("[Forward] =============================================")
+
+        # ================================================================
+        # ✅ FINAL FIX: Create params for all nodes with correct shapes
+        # ================================================================
+        for node in self.model.nodes.values():
+            node_id = node.node_id
+            params_key = f"{node_id}.params"
+
+            # For MANO nodes (right/left): create from full_pose
+            if node_id in ['right', 'left']:
+                full_pose_key = f"{node_id}.full_pose"
+                if full_pose_key in batch and params_key not in batch:
+                    batch[params_key] = batch[full_pose_key]
+                    logger.info(f"[FIX] Created {params_key} from {full_pose_key}: {batch[params_key].shape}")
+
+            # For object node: create scene_scale (scalar per sample)
+            elif node_id == 'object':
+                if params_key not in batch:
+                    # object.params should be [B, 1, 1] for scene scale
+                    # Use ones as default scene scale
+                    batch_size = batch['idx'].shape[0]
+                    object_params = torch.ones(batch_size, 1, 1, device=batch['idx'].device)
+                    batch[params_key] = object_params
+                    logger.info(f"[FIX] Created {params_key} (scene_scale=1.0): {object_params.shape}")
+
+        # ================================================================
+        # Generate UV coordinates if missing
+        # ================================================================
+        if 'uv' not in batch:
+            logger.info("[FIX] Generating UV coordinates for ray sampling...")
+            batch_size = batch['idx'].shape[0]
+            num_sample = self.args.num_sample if hasattr(self.args, 'num_sample') else 128
+            uv = torch.rand(batch_size, num_sample, 2, device=batch['idx'].device)
+            batch['uv'] = uv
+            logger.info(f"[FIX] Generated UV: {uv.shape}")
+
+        # ================================================================
+        # Generate extrinsics from c2w
+        # ================================================================
+        if 'extrinsics' not in batch and 'c2w' in batch:
+            logger.info("[FIX] Generating extrinsics from c2w...")
+            c2w = batch['c2w']
+            try:
+                extrinsics = torch.linalg.inv(c2w)
+            except:
+                logger.warning("[FIX] GPU inverse failed, using CPU...")
+                c2w_cpu = c2w.cpu()
+                extrinsics = torch.linalg.inv(c2w_cpu).to(c2w.device)
+            batch['extrinsics'] = extrinsics
+            logger.info(f"[FIX] Generated extrinsics: {extrinsics.shape}")
+
+        # Get batch size and device
+        B = batch['idx'].shape[0]
+        T = 1  # Assume single frame for now
+        device = batch['idx'].device
+        scene_scale = 1.0
+
+        # Determine image dimensions if not set
+        if not hasattr(self, 'im_h') or not hasattr(self, 'im_w'):
+            self.im_h = 480
+            self.im_w = 640
+
+        # [FIX] Create object.params (scene_scale=1.0)
+        if "object.params" not in batch:
+            batch["object.params"] = torch.full(
+                (B, T, 1), scene_scale, dtype=torch.float32, device=device
+            )
+            logger.info(f"[FIX] Created object.params (scene_scale={scene_scale}): {batch['object.params'].shape}")
+
+        # [FIX] Generate UV coordinates for ray sampling
+        if 'uv' not in batch:
+            logger.info("[FIX] Generating UV coordinates for ray sampling...")
+            uv = gen_random_sample(
+                128, batch["idx"], np.array([self.im_h, self.im_w]), self.n_samples_per_pixel
+            )
+            batch["uv"] = uv
+            logger.info(f"[FIX] Generated UV: {batch['uv'].shape}")
+
+        # [FIX] Generate extrinsics from c2w
+        if 'extrinsics' not in batch and 'c2w' in batch:
+            logger.info("[FIX] Generating extrinsics from c2w...")
+            c2w = batch["c2w"]
+            try:
+                w2c = torch.inverse(c2w)
+            except RuntimeError:
+                logger.warning("[FIX] GPU inverse failed, using CPU...")
+                w2c = torch.inverse(c2w.cpu()).to(c2w.device)
+            batch["extrinsics"] = w2c
+            logger.info(f"[FIX] Generated extrinsics: {batch['extrinsics'].shape}")
+
+        # ================================================================
+        # ✅ OPTION 1 FIX: Detach all batch tensors (CORRECTED for xdict)
+        # ================================================================
+        logger.debug("[FIX] Detaching batch tensors to prevent inplace errors...")
+
+        # List of keys that should be detached
+        keys_to_detach = [
+            'right.params',
+            'right.full_pose',
+            'right.pose',
+            'right.global_orient',
+            'right.transl',
+            'right.betas',
+            'object.params',
+            'object.global_orient',
+            'object.transl',
+            'uv',
+            'extrinsics',
+            'c2w',
+            'intrinsics',
+            'hA',
+            'th_betas',
+        ]
+
+        # Detach all tensor values in batch (xdict-compatible)
+        for key in keys_to_detach:
+            if key in batch and torch.is_tensor(batch[key]):
+                # Create a new detached tensor
+                detached_tensor = batch[key].detach()
+
+                # Use xdict's overwrite method or delete-then-set
+                if hasattr(batch, 'overwrite'):
+                    batch.overwrite(key, detached_tensor)
+                else:
+                    # Fallback: delete then re-add
+                    del batch[key]
+                    batch[key] = detached_tensor
+
+                logger.debug(f"  Detached: {key} (shape: {detached_tensor.shape})")
+
+        # Also detach any _n (next frame) versions
+        for key in list(batch.keys()):
+            if key.endswith('_n') and torch.is_tensor(batch[key]):
+                detached_tensor = batch[key].detach()
+
+                if hasattr(batch, 'overwrite'):
+                    batch.overwrite(key, detached_tensor)
+                else:
+                    del batch[key]
+                    batch[key] = detached_tensor
+
+                logger.debug(f"  Detached: {key} (shape: {detached_tensor.shape})")
+
+        logger.info("[FIX] ✓ All batch tensors detached successfully")
+
+
+        # ================================================================
+        # FORWARD PASS
+        # ================================================================
+        logger.info("[Forward] Calling self.model(batch)...")
         model_outputs = self.model(batch)
+        logger.info(f"[Forward] Model returned {len(model_outputs)} keys")
 
-        # ====================================================================
+        # ================================================================
         # COMPUTE BASE LOSSES
-        # ====================================================================
+        # ================================================================
         loss_output = self.loss(batch, model_outputs)
+
         # ================================================================
         # ADD: First-step diagnostic logging (INSERT AFTER LINE 695)
         # ================================================================
@@ -1293,6 +1551,7 @@ class HOLD(pl.LightningModule):
             )
 
         # GHOP FIX: Manual optimization to prevent double backward
+        # Get the final accumulated loss
         final_loss = loss_output['loss']
 
         # Handle NaN/Inf
@@ -1309,12 +1568,18 @@ class HOLD(pl.LightningModule):
         # Zero gradients
         opt.zero_grad()
 
-        # CRITICAL FIX: Clone the loss tensor to create a fresh computational graph
-        # This prevents the "backward through the graph a second time" error
-        loss_for_backward = final_loss.clone()
+        # ================================================================
+        # REMOVE THESE DUPLICATE LINES (lines ~1487-1505 in your code):
+        # ================================================================
+        # # At GHOP loss addition (around line 1070):
+        # if phase4_active or phase5_active:
+        #     loss_output['loss'] = torch.add(loss_output['loss'], weighted_ghop.detach())
+        #     ...
+        # # (all the duplicate torch.add lines)
+        # ================================================================
 
-        # Manual backward on the cloned tensor
-        self.manual_backward(loss_for_backward)
+        # Manual backward - NO CLONE NEEDED
+        self.manual_backward(final_loss)
 
         # Gradient clipping
         if hasattr(self.args, 'gradient_clip_val') and self.args.gradient_clip_val:
@@ -1334,7 +1599,7 @@ class HOLD(pl.LightningModule):
         # Log
         self.log('train/loss', final_loss.detach(), prog_bar=True)
 
-        # Return detached original loss for logging
+        # Return detached loss for logging
         return final_loss.detach()
 
     # ====================================================================
@@ -1603,10 +1868,18 @@ class HOLD(pl.LightningModule):
             logger.debug(f"[Phase 4] Using {fullpose_key}: {full_pose.shape}")
 
         elif global_orient_key in batch and pose_key in batch:
-            global_orient = batch[global_orient_key]  # [B, 3]
-            pose = batch[pose_key]                     # [B, 45]
-            full_pose = torch.cat([global_orient, pose], dim=-1)  # [B, 48]
+            global_orient = batch[global_orient_key]  # [B, 3] or [B, T, 3]
+            pose = batch[pose_key]                     # [B, 45] or [B, T, 45]
+            full_pose = torch.cat([global_orient, pose], dim=-1)  # [B, 48] or [B, T, 48]
             logger.debug(f"[Phase 4] Concatenated {global_orient_key} + {pose_key}: {full_pose.shape}")
+
+            # ✅ ADD THIS FIX HERE:
+            # Fix: Ensure full_pose is 2D [B, 48] for MANO
+            if full_pose.ndim == 3:
+                # Reshape from [B, T, 48] to [B*T, 48]
+                B_orig, T_orig, num_params = full_pose.shape
+                full_pose = full_pose.reshape(B_orig * T_orig, num_params)
+                logger.debug(f"[Phase 4] Reshaped full_pose from 3D to 2D: {full_pose.shape}")
 
         elif pose_key in batch:
             pose = batch[pose_key]  # [B, 45]
@@ -1637,6 +1910,13 @@ class HOLD(pl.LightningModule):
         else:
             logger.debug(f"[Phase 4] Using {shape_key}: {mano_shape.shape}")
 
+        # ✅ ADD THIS FIX HERE:
+        # Fix: Ensure mano_shape is 2D [B, 10] for MANO
+        if mano_shape.ndim == 3:
+            # Reshape from [B, T, 10] to [B*T, 10]
+            B_orig, T_orig, num_betas = mano_shape.shape
+            mano_shape = mano_shape.reshape(B_orig * T_orig, num_betas)
+            logger.debug(f"[Phase 4] Reshaped mano_shape from 3D to 2D: {mano_shape.shape}")
         # ================================================================
         # CRITICAL FIX: Extract translation (was missing!)
         # ================================================================
@@ -1650,6 +1930,13 @@ class HOLD(pl.LightningModule):
         else:
             logger.debug(f"[Phase 4] Using {trans_key}: {mano_trans.shape}")
 
+        # ✅ ADD THIS FIX HERE:
+        # Fix: Ensure mano_trans is 2D [B, 3] for MANO
+        if mano_trans.ndim == 3:
+            # Reshape from [B, T, 3] to [B*T, 3]
+            B_orig, T_orig, coord_dim = mano_trans.shape
+            mano_trans = mano_trans.reshape(B_orig * T_orig, coord_dim)
+            logger.debug(f"[Phase 4] Reshaped mano_trans from 3D to 2D: {mano_trans.shape}")
         # ================================================================
         # CRITICAL FIX: Extract scene_scale (required by MANOServer)
         # ================================================================
@@ -1810,36 +2097,72 @@ class HOLD(pl.LightningModule):
 
     def _is_video_batch(self, batch: Dict) -> bool:
         """
-        Check if batch contains video sequence data from hoi.py.
+        Check if batch contains video sequence data from GHOP HOI4D dataset.
 
-        Verifies presence of temporal fields required for consecutive frame pairs:
-        - 'hA_n': Next frame hand pose
-        - 'c2w_n': Next frame camera pose
-        - Sequence identifier: 'video_id', 'sequence_id', or 'scene_id'
+        SIMPLIFIED VERSION: Only requires hA_n and c2w_n (sufficient for Phase 5).
+        The sequence_id check is made OPTIONAL for better compatibility.
+
+        Video batches (GHOP HOI4D) contain:
+        - hA_n: Hand pose at frame t+1 (REQUIRED)
+        - c2w_n: Camera at frame t+1 (REQUIRED)
+        - sequence_id/frame_idx: Metadata (OPTIONAL but helpful)
 
         Args:
             batch: Training batch dictionary
 
         Returns:
-            bool: True if batch contains video sequences with frame pairs
+            bool: True if batch contains video data with temporal fields
         """
-        # Check for next frame fields (from hoi.py Lines 204-206)
+        # ================================================================
+        # CRITICAL CHECKS: Must have both temporal fields
+        # ================================================================
         has_next_hand = 'hA_n' in batch
         has_next_camera = 'c2w_n' in batch
 
-        # Check for sequence identifier
-        has_sequence_id = any(k in batch for k in ['video_id', 'sequence_id', 'scene_id'])
+        # ✅ SIMPLIFIED: Only require temporal fields
+        # sequence_id is nice-to-have but not required for Phase 5
+        is_video = has_next_hand and has_next_camera
 
-        # Also check for temporal index if available
-        has_temporal_idx = 'frame_idx' in batch or 'temporal_idx' in batch
+        # ================================================================
+        # ONE-TIME LOGGING: Log detection result once per training run
+        # ================================================================
+        if not hasattr(self, '_video_detection_logged'):
+            self._video_detection_logged = True
 
-        is_video = has_next_hand and has_next_camera and (has_sequence_id or has_temporal_idx)
+            if is_video:
+                # Additional metadata checks (for logging only)
+                has_sequence_id = any(k in batch for k in ['video_id', 'sequence_id', 'scene_id'])
+                has_temporal_idx = 'frame_idx' in batch or 'temporal_idx' in batch
 
-        if not is_video:
+                logger.info("=" * 70)
+                logger.info("VIDEO BATCH DETECTED (Phase 5 will activate)")
+                logger.info("=" * 70)
+                logger.info("  Required temporal fields:")
+                logger.info(f"    ✓ hA_n (next hand pose): {has_next_hand}")
+                logger.info(f"    ✓ c2w_n (next camera): {has_next_camera}")
+                logger.info("  Optional metadata:")
+                logger.info(f"    {'✓' if has_sequence_id else '✗'} sequence_id: {has_sequence_id}")
+                logger.info(f"    {'✓' if has_temporal_idx else '✗'} frame_idx: {has_temporal_idx}")
+                logger.info("  Phase 5 Temporal Consistency: ENABLED")
+                logger.info("=" * 70)
+            else:
+                logger.info("=" * 70)
+                logger.info("SINGLE-IMAGE BATCH DETECTED")
+                logger.info("=" * 70)
+                logger.info("  Required temporal fields:")
+                logger.info(f"    ✗ hA_n (next hand pose): {has_next_hand}")
+                logger.info(f"    ✗ c2w_n (next camera): {has_next_camera}")
+                logger.info("  Phase 5 Temporal Consistency: SKIPPED")
+                logger.info("  This is expected for HOLD single-image dataset")
+                logger.info("=" * 70)
+
+        # ================================================================
+        # DEBUG LOGGING: Only if still not video after checks
+        # ================================================================
+        elif not is_video:
             logger.debug(
-                f"[Phase 5] Batch is not video sequence: "
-                f"has_next_hand={has_next_hand}, has_next_camera={has_next_camera}, "
-                f"has_sequence_id={has_sequence_id}, has_temporal_idx={has_temporal_idx}"
+                f"[Phase 5] Non-video batch: "
+                f"has_next_hand={has_next_hand}, has_next_camera={has_next_camera}"
             )
 
         return is_video

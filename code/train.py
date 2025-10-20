@@ -12,7 +12,7 @@ from src.utils.parser import parser_args
 from common.torch_utils import reset_all_seeds
 import torch
 from src.hold.loss import HOLDLoss
-
+from src.datasets.ghop_hoi_dataset import GHOPHOIDataset  # NEW IMPORT
 
 def validate_phase4_config(opt, model):
     """
@@ -94,6 +94,114 @@ def validate_phase4_config(opt, model):
         traceback.print_exc()
         return False
 
+def create_dataset_with_ghop_support(dataset_config, args):
+    """
+    Create dataset with GHOP HOI4D support.
+
+    This function replaces the hardcoded ImageDataset creation
+    to support both HOLD (single images) and GHOP HOI4D (video sequences).
+
+    Args:
+        dataset_config: Dataset configuration from YAML
+        args: Command-line arguments
+
+    Returns:
+        Dataset instance (ImageDataset or GHOPHOIDataset)
+    """
+    from src.datasets.utils import create_dataset as create_image_dataset
+
+    # ================================================================
+    # STEP 1: Check dataset type from config
+    # ================================================================
+    dataset_type = dataset_config.get('type', 'train')
+
+    # Check for GHOP-specific markers in config
+    use_ghop = (
+            hasattr(args, 'use_ghop') and args.use_ghop or
+            dataset_config.get('dataset_type', '') == 'ghop_hoi' or
+            dataset_config.get('is_video', False) or
+            'ghop' in args.case.lower()  # Case name contains 'ghop'
+    )
+
+    # ================================================================
+    # STEP 2: Create appropriate dataset
+    # ================================================================
+    if use_ghop:
+        logger.info("=" * 70)
+        logger.info("CREATING GHOP HOI4D VIDEO DATASET")
+        logger.info("=" * 70)
+
+        # Extract GHOP data directory from args.case
+        # Expected: args.case = 'ghop_bottle_1'
+        # Maps to: ~/Projects/ghop/data/HOI4D_clip/Bottle_1
+        case_name = args.case.lower()
+
+        # Parse object name from case (e.g., 'ghop_bottle_1' -> 'Bottle_1')
+        if 'ghop_' in case_name:
+            obj_name = case_name.replace('ghop_', '')
+            # Convert back to title case (bottle_1 -> Bottle_1)
+            obj_name = '_'.join(word.capitalize() for word in obj_name.split('_'))
+        else:
+            obj_name = 'Bottle_1'  # Default fallback
+
+        # Build GHOP data path
+        ghop_root = os.path.expanduser('~/Projects/ghop/data/HOI4D_clip')
+        data_dir = os.path.join(ghop_root, obj_name)
+
+        logger.info(f"GHOP Configuration:")
+        logger.info(f"  Case name: {args.case}")
+        logger.info(f"  Object name: {obj_name}")
+        logger.info(f"  Data directory: {data_dir}")
+        logger.info(f"  Split: {dataset_type}")
+
+        # Verify directory exists
+        if not os.path.exists(data_dir):
+            raise FileNotFoundError(
+                f"GHOP data directory not found: {data_dir}\n"
+                f"Expected structure: ~/Projects/ghop/data/HOI4D_clip/{obj_name}/\n"
+                f"Please ensure GHOP HOI4D dataset is extracted correctly."
+            )
+
+        # Create GHOP HOI4D dataset
+        dataset = GHOPHOIDataset(
+            data_dir=data_dir,
+            split=dataset_type,  # 'train' or 'val'
+            args=args
+        )
+
+        logger.info(f"✓ GHOP dataset created:")
+        logger.info(f"  Total frames: {dataset.n_frames}")
+        logger.info(f"  Frame pairs: {len(dataset)}")
+        logger.info(f"  Category: {dataset.category}")
+
+        # ✅ CRITICAL: Verify temporal fields present
+        sample = dataset[0]
+        if 'hA_n' in sample and 'c2w_n' in sample:
+            logger.info(f"  ✅ Temporal fields: hA_n, c2w_n present")
+            logger.info(f"  ✅ Phase 5 will ACTIVATE")
+        else:
+            logger.warning(f"  ⚠️  Temporal fields missing!")
+            logger.warning(f"  ⚠️  Phase 5 will SKIP")
+
+        logger.info("=" * 70)
+
+    else:
+        # ================================================================
+        # HOLD Single-Image Dataset (Original)
+        # ================================================================
+        logger.info("=" * 70)
+        logger.info("CREATING HOLD SINGLE-IMAGE DATASET")
+        logger.info("=" * 70)
+
+        dataset = create_image_dataset(dataset_config, args)
+
+        logger.info(f"✓ HOLD dataset created:")
+        logger.info(f"  Images: {len(dataset)}")
+        logger.info(f"  Type: Single-image")
+        logger.info(f"  ⚠️  Phase 5 temporal will SKIP (no video data)")
+        logger.info("=" * 70)
+
+    return dataset
 
 def main():
     args, opt = parser_args()
@@ -122,8 +230,8 @@ def main():
 
     pprint(args)
 
-    trainset = create_dataset(opt.dataset.train, args)
-    validset = create_dataset(opt.dataset.valid, args)
+    trainset = create_dataset_with_ghop_support(opt.dataset.train, args)
+    validset = create_dataset_with_ghop_support(opt.dataset.valid, args)
 
     # ========================================================================
     # Model Initialization
@@ -298,14 +406,78 @@ def main():
     # ========================================================================
 
     # ========================================================================
-    # Dataset and Training Setup
+    # Dataset Summary Logging (FIXED VERSION)
     # ========================================================================
-    print("img_paths: ")
-    img_paths = np.array(trainset.dataset.img_paths)
-    print(img_paths[:3])
-    print("...")
-    print(img_paths[-3:])
+    print("\n" + "="*70)
+    print("DATASET SUMMARY")
+    print("="*70)
 
+    # Detect dataset type
+    is_ghop_dataset = isinstance(trainset, GHOPHOIDataset)
+
+    if is_ghop_dataset:
+        # ================================================================
+        # GHOP HOI4D Video Dataset
+        # ================================================================
+        print(f"Dataset type: GHOP HOI4D Video")
+        print(f"  Sequence: {trainset.data_dir.name}")
+        print(f"  Total frames: {trainset.n_frames}")
+        print(f"  Training frame pairs: {len(trainset)}")
+        print(f"  Validation frame pairs: {len(validset)}")
+        print(f"  Category: {trainset.category}")
+        print(f"  Split ratio: 80% train / 20% val")
+
+        # Show frame pair indices
+        if len(trainset.frame_indices) > 0:
+            print(f"\n  Training frame pairs:")
+            print(f"    First 3: {trainset.frame_indices[:3]}")
+            if len(trainset.frame_indices) > 6:
+                print(f"    ...")
+            print(f"    Last 3: {trainset.frame_indices[-3:]}")
+
+        # Check temporal fields in first sample
+        sample = trainset[0]
+        has_temporal = 'hA_n' in sample and 'c2w_n' in sample
+        print(f"\n  Temporal fields present: {has_temporal}")
+        if has_temporal:
+            print(f"    ✅ Phase 5 will activate")
+        else:
+            print(f"    ⚠️  Phase 5 will skip")
+
+    else:
+        # ================================================================
+        # HOLD Single-Image Dataset
+        # ================================================================
+        print(f"Dataset type: HOLD Single-Image")
+        print(f"  Training images: {len(trainset)}")
+        print(f"  Validation images: {len(validset)}")
+
+        # Try to access img_paths if available
+        if hasattr(trainset, 'dataset') and hasattr(trainset.dataset, 'img_paths'):
+            img_paths = np.array(trainset.dataset.img_paths)
+            print(f"\n  Image paths:")
+            print(f"    First 3: {img_paths[:3]}")
+            if len(img_paths) > 6:
+                print(f"    ...")
+            print(f"    Last 3: {img_paths[-3:]}")
+        elif hasattr(trainset, 'img_paths'):
+            # Direct access
+            img_paths = np.array(trainset.img_paths)
+            print(f"\n  Image paths:")
+            print(f"    First 3: {img_paths[:3]}")
+            if len(img_paths) > 6:
+                print(f"    ...")
+            print(f"    Last 3: {img_paths[-3:]}")
+        else:
+            print(f"  (Image path details not available)")
+
+        print(f"\n  ⚠️  Phase 5 temporal will skip (single images)")
+
+    print("="*70 + "\n")
+
+    # ========================================================================
+    # Continue with training setup
+    # ========================================================================
     reset_all_seeds(1)
 
     # Checkpoint loading
@@ -329,8 +501,82 @@ def main():
         model.load_state_dict(mysd, strict=True)
         ckpt_path = None
 
-    # Start training
-    trainer.fit(model, trainset, validset, ckpt_path=ckpt_path)
+    # ================================================================
+    # CRITICAL FIX: Create DataLoaders for PyTorch Lightning
+    # ================================================================
+    # PyTorch Lightning trainer.fit() requires DataLoader objects,
+    # not raw Dataset objects. This is especially important for
+    # GHOPHOIDataset which doesn't have a built-in DataLoader wrapper.
+
+    print("\n" + "="*70)
+    print("DATALOADER CREATION")
+    print("="*70)
+
+    from torch.utils.data import DataLoader
+
+    # Get batch size from config or args
+    if hasattr(opt.dataset, 'train') and 'batch_size' in opt.dataset.train:
+        train_batch_size = opt.dataset.train.batch_size
+    else:
+        train_batch_size = 2  # Default
+
+    if hasattr(opt.dataset, 'valid') and 'batch_size' in opt.dataset.valid:
+        val_batch_size = opt.dataset.valid.batch_size
+    else:
+        val_batch_size = 1  # Default
+
+    # Get other DataLoader parameters
+    num_workers = opt.dataset.train.get('num_workers', 0)
+    shuffle_train = opt.dataset.train.get('shuffle', True)
+
+    # Create training DataLoader
+    train_loader = DataLoader(
+        trainset,
+        batch_size=train_batch_size,
+        shuffle=shuffle_train,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=opt.dataset.train.get('drop_last', False)
+    )
+
+    print(f"Training DataLoader:")
+    print(f"  Dataset type: {type(trainset).__name__}")
+    print(f"  Dataset size: {len(trainset)}")
+    print(f"  Batch size: {train_batch_size}")
+    print(f"  Num workers: {num_workers}")
+    print(f"  Shuffle: {shuffle_train}")
+    print(f"  Total batches: {len(train_loader)}")
+
+    # Create validation DataLoader
+    val_loader = DataLoader(
+        validset,
+        batch_size=val_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False
+    )
+
+    print(f"\nValidation DataLoader:")
+    print(f"  Dataset type: {type(validset).__name__}")
+    print(f"  Dataset size: {len(validset)}")
+    print(f"  Batch size: {val_batch_size}")
+    print(f"  Total batches: {len(val_loader)}")
+
+    print("="*70 + "\n")
+
+    # ================================================================
+    # Start training with DataLoaders (not raw datasets)
+    # ================================================================
+    print("Starting training...")
+    print(f"  Max epochs: {args.num_epoch}")
+    print(f"  Checkpoint: {ckpt_path if ckpt_path else 'Training from scratch'}")
+    print("")
+
+    # ✅ FIX: Pass DataLoaders instead of raw datasets
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+
+    print("\n✅ Training complete!")
 
 
 if __name__ == "__main__":

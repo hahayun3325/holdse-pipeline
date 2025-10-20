@@ -55,19 +55,31 @@ class ObjectNode(Node):
         return super().forward(input)
 
     def sample_points(self, input):
+        """Sample points with correct shape handling."""
         node_id = self.node_id
-        scene_scale = input[f"{node_id}.params"][:, 0]
-        obj_pose = input[f"{node_id}.global_orient"]
-        obj_trans = input[f"{node_id}.transl"]
-        obj_output = self.server(scene_scale, obj_trans, obj_pose)
 
-        if self.args.debug:
-            out = {}
-            out["verts"] = obj_output["verts"]
-            out["idx"] = input["idx"]
-            debug.debug_world2pix(self.args, out, input, self.node_id)
+        # ================================================================
+        # ✅ Handle 3D parameter tensors - squeeze to 2D
+        # ================================================================
+        params = input[f"{node_id}.params"]          # [B, 1, 1]
+        transl = input[f"{node_id}.transl"]          # [B, 1, 3]
+        global_orient = input[f"{node_id}.global_orient"]  # [B, 1, 3]
 
-        obj_cond = {"pose": obj_pose[:, 3:] / np.pi}
+        # Squeeze middle dimension if 3D
+        if params.dim() == 3:
+            scene_scale = params.squeeze(1).squeeze(1)  # [B, 1, 1] -> [B]
+            transl = transl.squeeze(1)                   # [B, 1, 3] -> [B, 3]
+            global_orient = global_orient.squeeze(1)     # [B, 1, 3] -> [B, 3]
+        else:
+            scene_scale = params[:, 0]
+
+        # ✅ Call server (returns output dict)
+        output = self.server(scene_scale, transl, global_orient)
+
+        # ✅ Create cond dictionary (2D after squeezing)
+        cond = {"pose": global_orient / np.pi}  # [B, 3]
+
+        # Get camera parameters
         ray_dirs, cam_loc = get_camera_params(
             input["uv"], input["extrinsics"], input["intrinsics"]
         )
@@ -75,13 +87,23 @@ class ObjectNode(Node):
         cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)
         ray_dirs = ray_dirs.reshape(-1, 3)
 
+        # ================================================================
+        # ✅ FIX: Create deform_info with correct variable names
+        # ================================================================
         deform_info = {
-            "cond": obj_cond,
-            "tfs": obj_output["obj_tfs"][:, 0],
+            "cond": cond,
+            "verts": output.get("verts", None),  # Use 'output' not 'obj_output'
         }
-        if self.is_test:
-            deform_info["verts"] = obj_output["obj_verts"]
 
+        # Add tfs only if server provides it
+        if "tfs" in output:
+            deform_info["tfs"] = output["tfs"]
+
+        # Handle test mode
+        if self.is_test and "obj_verts" in output:
+            deform_info["verts"] = output["obj_verts"]
+
+        # Ray sampling
         z_vals = self.ray_sampler.get_z_vals(
             volsdf_utils.sdf_func_with_deformer,
             self.deformer,
@@ -93,20 +115,42 @@ class ObjectNode(Node):
             deform_info,
         )
 
-        # fg samples to points
+        # Compute sample points
         points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
+
+        # ✅ ADD THIS: Expand cond to match ray batch
+        if batch_size > 1:
+            # Repeat cond for each pixel in the batch
+            # cond: [B, 3] -> [B, num_pixels, 3] -> [B*num_pixels, 3]
+            cond_expanded = cond["pose"].unsqueeze(1).repeat(1, num_pixels, 1)
+            cond_expanded = cond_expanded.reshape(-1, 3)
+            cond = {"pose": cond_expanded}
+
+        # ================================================================
+        # ✅ FIX: Build output dict with correct variable names
+        # ================================================================
         out = {}
         out["idx"] = input["idx"]
-        out["obj_output"] = obj_output
-        out["cond"] = obj_cond
+        out["output"] = output              # ✅ Changed from obj_output to output
+        out["cond"] = cond                  # ✅ Changed from obj_cond to cond
         out["ray_dirs"] = ray_dirs
         out["cam_loc"] = cam_loc
         out["deform_info"] = deform_info
         out["z_vals"] = z_vals
         out["points"] = points
-        out["tfs"] = obj_output["obj_tfs"]
+
+        # ✅ FIX: Handle tfs - use output dict, handle missing key
+        if "tfs" in output:
+            out["tfs"] = output["tfs"]
+        elif "obj_tfs" in output:
+            out["tfs"] = output["obj_tfs"]
+        else:
+            # No tfs available, set to None or skip
+            out["tfs"] = None
+
         out["batch_size"] = batch_size
         out["num_pixels"] = num_pixels
+
         return out
 
     def meshing_cano(self):

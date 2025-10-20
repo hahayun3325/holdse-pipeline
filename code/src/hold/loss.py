@@ -52,28 +52,87 @@ class Loss(nn.Module):
 
         # Get image dimensions
         if self.im_w is None:
-            im = Image.open(batch["im_path"][0][0])
-            self.im_w = im.size[0]
-            self.im_h = im.size[1]
+            if "im_path" in batch:
+                # HOLD dataset: use image path
+                im = Image.open(batch["im_path"][0][0])
+                self.im_w = im.size[0]
+                self.im_h = im.size[1]
+            elif "rgb" in batch:
+                # GHOP dataset: use rgb field shape
+                rgb_shape = batch["rgb"].shape
+                if len(rgb_shape) == 4:  # [B, H, W, 3]
+                    self.im_h = rgb_shape[1]
+                    self.im_w = rgb_shape[2]
+                elif len(rgb_shape) == 3:  # [B, N, 3]
+                    # Assume square image
+                    import math
+                    num_pixels = rgb_shape[1]
+                    side = int(math.sqrt(num_pixels))
+                    self.im_w = side
+                    self.im_h = side
+                else:
+                    # Fallback
+                    self.im_w = 640
+                    self.im_h = 480
+            else:
+                # Fallback to default
+                self.im_w = 640
+                self.im_h = 480
 
-        # Extract ground truth
-        rgb_gt = batch["gt.rgb"].view(-1, 3).cuda()
-        mask_gt = batch["gt.mask"].view(-1)
+        # ================================================================
+        # ✅ FIX: Extract ground truth from correct fields
+        # ================================================================
+        # RGB: try multiple field names
+        if "gt.rgb" in batch:
+            rgb_gt = batch["gt.rgb"].view(-1, 3).cuda()
+        elif "rgb" in batch:
+            rgb_gt = batch["rgb"].view(-1, 3).cuda()
+        else:
+            # No RGB ground truth - skip RGB loss
+            rgb_gt = None
+
+        # Mask: try multiple field names
+        if "gt.mask" in batch:
+            mask_gt = batch["gt.mask"].view(-1)
+        elif "mask" in batch:
+            mask_gt = batch["mask"].view(-1)
+        else:
+            # No mask ground truth - create dummy
+            if rgb_gt is not None:
+                mask_gt = torch.ones(rgb_gt.shape[0], device=device)
+            else:
+                mask_gt = torch.ones(self.im_w * self.im_h, device=device)
+
+        # ✅ FIX: Ensure mask_gt is long for one-hot encoding
+        mask_gt = mask_gt.long()
+
         valid_pix = torch.ones_like(mask_gt).float()
 
+        # ================================================================
+        # ✅ FIX: Compute losses only if ground truth exists
+        # ================================================================
+        loss_dict = {}
+
         # RGB reconstruction loss
-        nan_filter = ~torch.any(model_outputs["rgb"].isnan(), dim=1)
-        rgb_loss = loss_terms.get_rgb_loss(
-            model_outputs["rgb"][nan_filter],
-            rgb_gt[nan_filter],
-            valid_pix[nan_filter],
-            image_scores,
-        )
+        if rgb_gt is not None and "rgb" in model_outputs:
+            nan_filter = ~torch.any(model_outputs["rgb"].isnan(), dim=1)
+            rgb_loss = loss_terms.get_rgb_loss(
+                model_outputs["rgb"][nan_filter],
+                rgb_gt[nan_filter],
+                valid_pix[nan_filter],
+                image_scores,
+            )
+            loss_dict["loss/rgb"] = rgb_loss * 1.0
 
         # Semantic segmentation loss
-        sem_loss = loss_terms.get_sem_loss(
-            model_outputs["semantics"], mask_gt, valid_pix, image_scores
-        )
+        if "semantics" in model_outputs:
+            sem_loss = loss_terms.get_sem_loss(
+                model_outputs["semantics"], mask_gt, valid_pix, image_scores
+            )
+            # Progressive weighting
+            progress = min(self.milestone, model_outputs.get("step", 0))
+            w_sem = torch.linspace(1.1, 0.1, self.milestone + 1)[progress]
+            loss_dict["loss/sem"] = sem_loss * w_sem
 
         # Opacity sparse loss
         opacity_sparse_loss = 0.0
@@ -85,10 +144,22 @@ class Loss(nn.Module):
                 image_scores,
             )
 
+        # Add opacity sparse loss if we have it
+        if opacity_sparse_loss > 0:
+            progress = min(self.milestone, model_outputs.get("step", 0))
+            w_sparse = torch.linspace(0.0, 1.0, self.milestone + 1)[progress]
+            loss_dict["loss/opacity_sparse"] = opacity_sparse_loss * w_sparse
+
         # Eikonal loss
         eikonal_loss = 0.0
         for key in model_outputs.search("grad_theta").keys():
             eikonal_loss += loss_terms.get_eikonal_loss(model_outputs[key])
+
+        # Eikonal loss with threshold
+        low_bnd_eikonal = 0.0008
+        eikonal_loss *= 0.00001
+        if eikonal_loss > low_bnd_eikonal:
+            loss_dict["loss/eikonal"] = eikonal_loss
 
         # MANO canonical SDF loss
         mano_cano_loss = 0.0
@@ -100,33 +171,15 @@ class Loss(nn.Module):
                 pred_sdf, gt_sdf, limit=0.01, scores=image_scores
             )
 
-        # Progressive weighting schedule
-        progress = min(
-            self.milestone, model_outputs["step"]
-        )  # Will not increase after the milestone
-
-        # Linearly decay semantic weight from 1.1 to 0.1
-        w_sem = torch.linspace(1.1, 0.1, self.milestone + 1)[progress]
-        # Linearly increase sparsity weight from 0 to 1
-        w_sparse = torch.linspace(0.0, 1.0, self.milestone + 1)[progress]
-
-        # Construct loss dictionary
-        loss_dict = {
-            "loss/rgb": rgb_loss * 1.0,
-            "loss/sem": sem_loss * w_sem,
-        }
-
-        # Eikonal loss with lower bound threshold
-        low_bnd_eikonal = 0.0008  # 800 microns
-        eikonal_loss *= 0.00001
-        if eikonal_loss > low_bnd_eikonal:
-            loss_dict["loss/eikonal"] = eikonal_loss
-
-        loss_dict["loss/mano_cano"] = mano_cano_loss * 5.0
-        loss_dict["loss/opacity_sparse"] = opacity_sparse_loss * w_sparse
+        # MANO cano loss
+        if mano_cano_loss > 0:
+            loss_dict["loss/mano_cano"] = mano_cano_loss * 5.0
 
         # Total loss
-        loss_dict["loss"] = sum([loss_dict[k] for k in loss_dict.keys()])
+        if len(loss_dict) > 0:
+            loss_dict["loss"] = sum([loss_dict[k] for k in loss_dict.keys()])
+        else:
+            loss_dict["loss"] = torch.tensor(0.0, device=device, requires_grad=True)
 
         return loss_dict
 

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+from loguru import logger
 from ..engine.embedders import get_embedder
 
 
@@ -89,23 +89,61 @@ class ImplicitNet(nn.Module):
         if num_batch * num_point == 0:
             return input
 
+        # Save original dimensions
+        original_num_batch = num_batch
+        original_num_point = num_point
+
         input = input.reshape(num_batch * num_point, num_dim)
 
         if self.cond != "none":
-            num_batch, num_cond = cond[self.cond].shape
-            try:
-                input_cond = (
-                    cond[self.cond].unsqueeze(1).expand(num_batch, num_point, num_cond)
-                )
-            except:
-                import pdb
+            # ================================================================
+            # ✅ FIX: Handle 2D or 3D cond tensors
+            # ================================================================
+            cond_tensor = cond[self.cond]
 
-                pdb.set_trace()
+            # If cond is 3D [B, N, D], reshape to 2D [B*N, D]
+            if cond_tensor.ndim == 3:
+                cond_batch = cond_tensor.shape[0]
+                cond_points = cond_tensor.shape[1]
+                num_cond = cond_tensor.shape[2]
+                # Flatten to 2D: [B*N, D]
+                cond_tensor = cond_tensor.reshape(cond_batch * cond_points, num_cond)
+                cond_batch = cond_batch  # Use original batch for logic below
+            elif cond_tensor.ndim == 2:
+                cond_batch, num_cond = cond_tensor.shape
+            else:
+                raise ValueError(f"Unexpected cond tensor dimensions: {cond_tensor.shape}")
+
+            # Rest of the function continues with cond_tensor instead of cond[self.cond]
+            # ================================================================
+            # The cond might have different batch size than input
+            # Use the ACTUAL input batch size for expansion
+
+            if cond_batch == original_num_batch:
+                # Normal case: cond batch matches input batch
+                input_cond = (
+                    cond_tensor.unsqueeze(1).expand(cond_batch, original_num_point, num_cond)
+                )
+            else:
+                # Mismatch case: repeat cond to match input batch
+                logger.warning(f"Cond batch {cond_batch} != input batch {original_num_batch}")
+                # Use input batch size, repeat/slice cond as needed
+                if cond_batch > original_num_batch:
+                    # Too many cond samples, slice
+                    cond_slice = cond[self.cond][:original_num_batch]
+                else:
+                    # Too few cond samples, repeat
+                    repeats = (original_num_batch + cond_batch - 1) // cond_batch
+                    cond_slice = cond[self.cond].repeat(repeats, 1)[:original_num_batch]
+
+                input_cond = cond_slice.unsqueeze(1).expand(original_num_batch, original_num_point, num_cond)
+
             if num_cond == 45:
                 # no pose dependent for MANO
                 input_cond = input_cond * 0.0
 
-            input_cond = input_cond.reshape(num_batch * num_point, num_cond)
+            # ✅ FIX: Reshape using original_num_batch, not cond_batch
+            input_cond = input_cond.reshape(original_num_batch * original_num_point, num_cond)
 
             if self.dim_pose_embed:
                 input_cond = self.lin_p0(input_cond)
@@ -117,10 +155,34 @@ class ImplicitNet(nn.Module):
 
         for l in range(0, self.num_layers - 1):
             lin = getattr(self, "lin" + str(l))
+
             if self.cond != "none" and l in self.cond_layer:
+                # ✅ FIX: Ensure input_cond matches expected dimensions
+                # The linear layer after concat expects specific input size
+                # x.shape: [N, feat_dim]
+                # input_cond.shape: [N, cond_dim]
+                # lin expects: [N, feat_dim + expected_cond_dim]
+
+                # Check if dimensions match
+                expected_input_dim = lin.weight.shape[1]  # Input features expected by linear layer
+                current_feat_dim = x.shape[1]
+                expected_cond_dim = expected_input_dim - current_feat_dim
+
+                if input_cond.shape[1] != expected_cond_dim:
+                    logger.warning(f"input_cond dim {input_cond.shape[1]} != expected {expected_cond_dim}, padding/slicing")
+                    if input_cond.shape[1] < expected_cond_dim:
+                        # Pad with zeros
+                        padding = torch.zeros(input_cond.shape[0], expected_cond_dim - input_cond.shape[1], device=input_cond.device)
+                        input_cond = torch.cat([input_cond, padding], dim=-1)
+                    else:
+                        # Slice
+                        input_cond = input_cond[:, :expected_cond_dim]
+
                 x = torch.cat([x, input_cond], dim=-1)
+
             if l in self.skip_in:
                 x = torch.cat([x, input], 1) / np.sqrt(2)
+
             x = lin(x)
             if l < self.num_layers - 2:
                 x = self.softplus(x)

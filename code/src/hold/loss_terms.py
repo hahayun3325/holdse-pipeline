@@ -73,26 +73,62 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores):
     bnd_r = torch.logical_and(100 <= semantic_gt, semantic_gt < 200)
     bnd_l = 200 <= semantic_gt
 
-    # bandaid fix for aliasinng
+    # bandaid fix for aliasing
     semantic_gt[bnd_bg] = SEGM_IDS["bg"]
     semantic_gt[bnd_o] = SEGM_IDS["object"]
     semantic_gt[bnd_r] = SEGM_IDS["right"]
     semantic_gt[bnd_l] = SEGM_IDS["left"]
 
-    # remap to 0,1,2
+    # remap to 0,1,2,3
     semantic_gt[semantic_gt == SEGM_IDS["bg"]] = 0
     semantic_gt[semantic_gt == SEGM_IDS["object"]] = 1
     semantic_gt[semantic_gt == SEGM_IDS["right"]] = 2
     semantic_gt[semantic_gt == SEGM_IDS["left"]] = 3
 
+    # ================================================================
+    # ✅ FIX: Match dimensions BEFORE creating one-hot encoding
+    # ================================================================
+    # If sem_pred has fewer points than mask_gt, we need to sample GT to match
+    if sem_pred.shape[0] != mask_gt.shape[0]:
+        num_pred_points = sem_pred.shape[0]
+
+        if mask_gt.shape[0] > num_pred_points:
+            # Downsample GT to match predictions
+            semantic_gt = semantic_gt[:num_pred_points]
+            valid_pix = valid_pix[:num_pred_points]
+        else:
+            # Upsample GT (less common case)
+            repeats = (num_pred_points + mask_gt.shape[0] - 1) // mask_gt.shape[0]
+            semantic_gt = semantic_gt.repeat(repeats)[:num_pred_points]
+            valid_pix = valid_pix.repeat(repeats)[:num_pred_points]
+
+    # NOW create one-hot encoding after dimension matching
     semantic_gt_onehot = torch_utils.one_hot_embedding(semantic_gt, len(SEGM_IDS)).to(
         mask_gt.device
     )
+
     sem_loss = l2_loss(sem_pred, semantic_gt_onehot) * valid_pix[:, None]
 
+    # ================================================================
+    # ✅ FIX: Handle scores dimensionality
+    # ================================================================
+    # Flatten scores if it has extra dimensions
+    if scores.ndim > 2:
+        scores = scores.squeeze()
+    if scores.ndim == 1:
+        scores = scores.unsqueeze(1)  # Make it [B, 1]
+
+    # Now scores is [B, 1] or [B]
     num_pix = sem_loss.shape[0] // scores.shape[0]
-    scores = scores[:, None].repeat(1, num_pix).view(-1, 1)
-    sem_loss = sem_loss * scores
+
+    if scores.ndim == 2:
+        # scores is [B, 1], already has the right shape
+        scores_expanded = scores.repeat(1, num_pix).view(-1, 1)
+    else:
+        # scores is [B], need to add dimension
+        scores_expanded = scores[:, None].repeat(1, num_pix).view(-1, 1)
+
+    sem_loss = sem_loss * scores_expanded
 
     sem_loss = sem_loss.sum() / valid_pix.sum()
     return sem_loss
