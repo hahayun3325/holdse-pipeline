@@ -1,0 +1,243 @@
+=========================================================================
+PHASE 4 & 5 COMMONALITY ANALYSIS
+=========================================================================
+
+Step 1: Locating implementation files...
+
+Phase 4 (Contact Refinement) files:
+./src/model/ghop/adaptive_contact_zones.py
+./src/model/ghop/contact_refinement.py
+./src/model/ghop/mesh_extraction.py
+./src/utils/meshing.py
+
+Phase 5 (Temporal Consistency) files:
+./src/model/ghop/temporal_consistency.py
+./src/training/phase5_scheduler.py
+
+=========================================================================
+Step 2: Import Analysis
+=========================================================================
+
+Phase 4 imports:
+
+Phase 5 imports:
+
+=========================================================================
+Step 3: Shared Dependencies
+=========================================================================
+
+Checking for PyTorch3D usage:
+src/model/ghop/adaptive_contact_zones.py:    from pytorch3d.ops import knn_points
+src/model/ghop/adaptive_contact_zones.py:        "Install with: pip install pytorch3d"
+src/model/ghop/contact_refinement.py:- pytorch3d: For efficient KNN operations (optional but recommended)
+src/model/ghop/contact_refinement.py:    from pytorch3d.ops import knn_points
+src/model/ghop/contact_refinement.py:        "[contact_refinement] pytorch3d not available. "
+src/model/ghop/contact_refinement.py:        "Install with: pip install pytorch3d"
+src/model/mano/deformer.py:from pytorch3d import ops
+src/model/obj/deformer.py:from pytorch3d import ops
+src/arctic/processing.py:# import pytorch3d.transforms as tf
+src/fitting/utils.py:from pytorch3d.renderer import (
+
+Checking for mesh extraction:
+src/model/ghop/mesh_extraction.py:                verts, faces, normals, values = measure.marching_cubes(
+src/hold/hold.py:                verts, faces, normals, values = measure.marching_cubes(
+src/hold/hold_net.py:                verts, faces, _, _ = measure.marching_cubes(
+src/utils/meshing.py:    verts, faces, normals, values = measure.marching_cubes_lewiner(
+
+Checking for SDF operations:
+src/model/ghop/interaction_grid.py:from src.utils.meshing import create_sdf_grid
+src/model/ghop/interaction_grid.py:        xyz_grid = create_sdf_grid(1, resolution, self.spatial_lim, device=device)
+src/model/ghop/diffusion_prior.py:        Verified from generate.py Line 63 and jutils.mesh_utils.create_sdf_grid.
+src/model/ghop/mesh_extraction.py:    def extract_object_mesh(self, sdf_grid, coordinate_range=(-1.5, 1.5)):
+src/model/ghop/mesh_extraction.py:            sdf_grid (torch.Tensor): [B, H, W, D] or [B, 1, H, W, D] SDF values
+src/model/ghop/mesh_extraction.py:            >>> sdf_grid = torch.randn(2, 128, 128, 128)  # Batch of 2
+src/model/ghop/mesh_extraction.py:            >>> meshes = extractor.extract_object_mesh(sdf_grid)
+src/model/ghop/mesh_extraction.py:        if sdf_grid.dim() == 5:  # [B, 1, H, W, D]
+src/model/ghop/mesh_extraction.py:            sdf_grid = sdf_grid.squeeze(1)
+src/model/ghop/mesh_extraction.py:        batch_size = sdf_grid.shape[0]
+
+=========================================================================
+Step 4: Initialization Patterns
+=========================================================================
+
+Phase 4 initialization:
+                    f"  ✓ Adaptive contacts initialized (threshold={phase5_cfg.get('proximity_threshold', 0.015)}m)")
+
+                # ============================================================
+                # Component 4: Phase 5 Training Scheduler
+                # ============================================================
+                logger.info("Initializing Phase 5 Training Scheduler...")
+
+                # ================================================================
+                # FIX 3: Extract phase3_start from config
+                # ================================================================
+                phase3_start = opt.phase3.get('phase3_start_iter', 0)
+                phase4_start = self.contact_start_iter if hasattr(self, 'contact_start_iter') else 500
+
+                self.phase5_scheduler = Phase5TrainingScheduler(
+                    total_iterations=phase5_cfg.get('total_iterations', 1000),
+                    warmup_iters=phase5_cfg.get('warmup_iters', 0),      # Will be 0 after fix
+                    phase3_start=phase3_start,                            # ✅ From config, not hardcoded
+                    phase4_start=phase4_start,                            # = 20
+                    phase5_start=phase5_cfg.get('phase5_start_iter', 100),  # = 100
+                    finetune_start=phase5_cfg.get('finetune_start_iter', 800)  # = 800
+                )
+
+Phase 5 initialization:
+
+=========================================================================
+Step 5: Large Memory Allocations
+=========================================================================
+
+Looking for torch.zeros/ones/randn with large sizes:
+src/model/ghop/adaptive_contact_zones.py:347:        colors = torch.zeros(778, 3, device=device)
+src/model/ghop/adaptive_contact_zones.py:351:            contact_mask = torch.zeros(778, dtype=torch.bool, device=device)
+src/model/ghop/ghop_loss.py:141:                z_t, t, torch.zeros_like(text_emb)
+src/model/ghop/ghop_loss.py:271:        return torch.zeros(batch_size, 77, 768, device=device)
+src/model/ghop/ghop_loss.py:386:                'shape': hand_shape if hand_shape is not None else torch.zeros(B, 10, device=obj_sdf.device),
+src/model/ghop/ghop_loss.py:387:                'trans': hand_trans if hand_trans is not None else torch.zeros(B, 3, device=obj_sdf.device)
+src/model/ghop/ghop_loss.py:447:            self.dummy = nn.Parameter(torch.zeros(1))
+src/model/ghop/diffusion_prior.py:95:            torch.zeros(1, 18, 1, 1, 1)
+src/model/ghop/hand_field.py:72:            global_orient = torch.zeros(B, 3, device=device)
+src/model/ghop/hand_field.py:81:            hand_shape = torch.zeros(B, 10, device=device)
+src/model/ghop/diffusion_prior.py:430:            alpha_bar_t_prev = self._get_alpha_bar(t - 1) if i > 0 else torch.ones_like(alpha_bar_t)
+src/model/renderables/background.py:58:            bg_rgb_values = torch.ones_like(cam_loc, device=cam_loc.device)
+src/model/obj/object_model.py:34:            scene_scale = torch.ones(batch_size).to(device)
+src/model/obj/object_model.py:49:            [self.v3d_cano, torch.ones(self.v3d_cano.shape[0], 1, device=device)],
+src/model/obj/deformer.py:92:        x_pad = torch.cat([x, torch.ones_like(x[:, :, :1])], dim=-1).permute(
+src/engine/ray_sampler.py:57:                self.near * torch.ones(ray_dirs.shape[0], 1).cuda(),
+src/engine/ray_sampler.py:58:                self.far * torch.ones(ray_dirs.shape[0], 1).cuda(),
+src/engine/ray_sampler.py:64:            near = self.near * torch.ones(ray_dirs.shape[0], 1).cuda()
+src/engine/ray_sampler.py:297:            above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
+src/engine/ray_sampler.py:305:            denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+src/model/ghop/ghop_loss.py:120:        noise = torch.randn_like(z_0)
+src/model/ghop/ghop_loss.py:463:    object_sdf = torch.randn(B, 1, 64, 64, 64, device=device)
+src/model/ghop/ghop_loss.py:465:        'pose': torch.randn(B, 48, device=device),
+src/model/ghop/ghop_loss.py:466:        'shape': torch.randn(B, 10, device=device),
+src/model/ghop/ghop_loss.py:467:        'trans': torch.randn(B, 3, device=device)
+src/model/ghop/diffusion_prior.py:179:        noise = torch.randn_like(latent)
+src/model/ghop/hand_field.py:299:        >>> hand_pose = torch.randn(4, 48).cuda()  # Batch of 4
+src/model/ghop/hand_field.py:448:        'pose': torch.randn(2, 48).cuda(),
+src/model/ghop/hand_field.py:449:        'shape': torch.randn(2, 10).cuda(),
+src/model/ghop/hand_field.py:450:        'trans': torch.randn(2, 3).cuda()
+
+Looking for .cuda() or .to(device) calls:
+Total .cuda() calls found: 119 (potential leak points)
+
+=========================================================================
+Step 6: Cache/History Structures
+=========================================================================
+
+Checking for history buffers:
+src/model/ghop/diffusion.py:338:        self.output_blocks = nn.ModuleList([])
+src/model/mano/server.py:32:        self.bone_ids = []
+src/datasets/image_dataset.py:333:        self.scale_mats, self.world_mats = [], []
+src/datasets/image_dataset.py:334:        self.intrinsics_all, self.extrinsics_all = [], []
+src/datasets/ghop_hoi_dataset.py:136:            self.image_files = []
+src/datasets/ghop_hoi_dataset.py:137:            self.img_paths = []
+
+src/model/ghop/temporal_consistency.py:117:            self.pose_history[sequence_id] = deque(maxlen=self.window_size)
+src/model/ghop/temporal_consistency.py:118:            self.camera_history[sequence_id] = deque(maxlen=self.window_size)
+src/model/ghop/temporal_consistency.py:119:            self.velocity_history[sequence_id] = deque(maxlen=self.window_size)
+
+
+=========================================================================
+Step 7: Configuration Analysis
+=========================================================================
+
+Phase 4 configuration:
+phase4:
+  # Master switch
+  enabled: true
+
+  # ======================================================================
+  # FAST TEST SCHEDULE: Total 30 iterations (20 SDS + 10 Contact)
+  # ======================================================================
+  contact_start_iter: 20          # Start RIGHT after Phase 3 ends
+  contact_duration: 10            # Only 10 iterations for testing
+  contact_warmup_iters: 5         # Fast warmup (5 iterations)
+
+  # ======================================================================
+  # Contact Refinement Module (NESTED - matches code expectations)
+  # ======================================================================
+  contact_refinement:
+    enabled: true
+
+    # Thresholds (keep reasonable values)
+    contact_thresh: 0.01            # 10mm contact zone
+    collision_thresh: 0.005         # 5mm penetration threshold
+
+    # Loss weights (moderate values for testing)
+    w_penetration: 50.0             # REDUCED from 100.0 for stability
+    w_attraction: 5.0               # REDUCED from 10.0 for stability
+    w_damping: 0.0                  # Disabled for speed
+
+    # Contact zones
+    contact_zones: "zones"          # Fixed fingertips (fastest)
+
+  # ======================================================================
+  # Mesh Extraction (NESTED - matches code expectations)
+
+Phase 5 configuration:
+phase5:
+  enabled: true
+  phase5_start_iter: 100
+  total_iterations: 1000
+
+  # ================================================================
+  # FIX 2: Change warmup_iters to 0
+  # ================================================================
+  warmup_iters: 0                 # ← CHANGE: from 50 to 0
+  finetune_start_iter: 800
+
+  # Temporal consistency settings
+  temporal_window: 5
+  w_velocity: 0.5
+  w_acceleration: 0.1
+  w_camera_motion: 0.3
+  w_temporal: 1.0
+  adaptive_weight: true
+
+  # Diffusion prior
+  guidance_scale: 4.0
+  min_step: 0.02
+  max_step: 0.98
+  prediction_respacing: 100
+  w_schedule: "dream"
+
+  # Adaptive contact zones
+  proximity_threshold: 0.015
+  min_contact_verts: 5
+  max_contact_verts: 50
+  contact_update_freq: 10
+
+=========================================================================
+Step 8: Known Memory-Hungry Operations
+=========================================================================
+
+Checking for model.eval() without torch.no_grad():
+src/model/ghop/autoencoder.py:271:    vqvae.eval()
+src/model/ghop/autoencoder.py:328:        self.eval()
+src/model/ghop/diffusion.py:467:        self.unet.eval()
+src/model/ghop/ghop_prior.py:37:        self.ghop_model.eval()
+src/engine/ray_sampler.py:169:            implicit_network.eval()
+src/hold/hold.py:2802:        self.model.eval()
+
+Checking for model loading:
+src/model/ghop/autoencoder.py:269:    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+src/model/ghop/autoencoder.py:270:    vqvae.load_state_dict(checkpoint['state_dict'], strict=False)
+src/model/ghop/autoencoder.py:343:        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+src/model/ghop/autoencoder.py:416:            missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
+src/model/ghop/diffusion.py:486:            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+src/model/ghop/diffusion.py:547:            missing_keys, unexpected_keys = self.load_state_dict(unet_state_dict, strict=False)
+src/hold/hold.py:203:                    unified_checkpoint = torch.load(model_checkpoint, map_location='cpu')
+src/hold/hold_net.py:172:            model_state = torch.load(
+src/hold/hold_net.py:186:            self.load_state_dict(sd, strict=False)
+src/utils/debug.py:126:    data = torch.load(op.join(args.log_dir, "dataset_info.pth"))
+
+Checking for DataLoader with pin_memory:
+src/datasets/utils.py:90:        pin_memory=True,
+
+=========================================================================
+Analysis complete!
+=========================================================================

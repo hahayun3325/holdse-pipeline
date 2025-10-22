@@ -60,12 +60,65 @@ def log_exp_meta(args):
 
 
 def init_experiment(args, api_key, workspace):
+    # ================================================================
+    # Check if Comet is disabled
+    # ================================================================
+    if os.environ.get('COMET_MODE', 'online') == 'disabled':
+        print("[comet_utils] Comet ML disabled via COMET_MODE environment variable")
+
+        # ================================================================
+        # FIX: Must still set up paths and directories!
+        # ================================================================
+
+        # 1. Generate experiment key (needed for directory naming)
+        if args.fast_dev_run:
+            args.exp_key = DUMMY_EXP
+        elif args.exp_key == "":
+            args.exp_key = generate_exp_key()
+
+        # 2. CRITICAL: Call add_paths to set args.log_dir, args.args_p, etc.
+        args = add_paths(args)
+
+        # 3. Create necessary directories
+        create_files(args)
+
+        # 4. Set dummy Comet metadata
+        args.comet_key = 'disabled'
+        args.git_commit = sys_utils.get_commit_hash()
+        args.git_branch = sys_utils.get_branch()
+        args.hostname = sys_utils.get_host_name()
+
+        # 5. Set up GPU info
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            args.gpu = torch.cuda.get_device_properties(device).name
+            logger.info(torch.cuda.get_device_properties(device))
+        else:
+            args.gpu = "cpu"
+
+        # 6. Set up logger (still useful without Comet)
+        logger.add(
+            os.path.join(args.log_dir, "train.log"),
+            level="INFO",
+            colorize=True,
+        )
+        logger.info(f"[No Comet Mode] Training in: {args.log_dir}")
+
+        # 7. Store experiment reference (None)
+        args.experiment = None
+
+        return None, args
+
+    # ================================================================
+    # Normal Comet flow (existing code)
+    # ================================================================
     if args.fast_dev_run:
         args.exp_key = DUMMY_EXP
     if args.exp_key == "":
         args.exp_key = generate_exp_key()
 
     args = add_paths(args)
+
     if op.exists(args.args_p) and args.exp_key not in [DUMMY_EXP]:
         with open(args.args_p, "r") as f:
             args_disk = json.load(f)

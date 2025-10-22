@@ -99,71 +99,76 @@ class GHOPMeshExtractor(nn.Module):
         if not SKIMAGE_AVAILABLE:
             raise RuntimeError("scikit-image not available for Marching Cubes")
 
-        # Handle channel dimension
-        if sdf_grid.dim() == 5:  # [B, 1, H, W, D]
-            sdf_grid = sdf_grid.squeeze(1)
+        # ================================================================
+        # FIX 3: Wrap entire mesh extraction in torch.no_grad()
+        # ================================================================
+        with torch.no_grad():
+            # Handle channel dimension
+            if sdf_grid.dim() == 5:  # [B, 1, H, W, D]
+                sdf_grid = sdf_grid.squeeze(1)
 
-        batch_size = sdf_grid.shape[0]
-        resolution = sdf_grid.shape[1]  # Assume cubic grid
-        meshes = []
+            batch_size = sdf_grid.shape[0]
+            resolution = sdf_grid.shape[1]  # Assume cubic grid
+            meshes = []
 
-        # Compute spacing for coordinate transformation
-        coord_min, coord_max = coordinate_range
-        coord_span = coord_max - coord_min
-        spacing = (coord_span / resolution,) * 3
+            # Compute spacing for coordinate transformation
+            coord_min, coord_max = coordinate_range
+            coord_span = coord_max - coord_min
+            spacing = (coord_span / resolution,) * 3
 
-        for b in range(batch_size):
-            sdf = sdf_grid[b].cpu().numpy()
+            for b in range(batch_size):
+                # FIX: Detach before numpy conversion
+                sdf = sdf_grid[b].detach().cpu().numpy()
 
-            try:
-                # Apply Marching Cubes algorithm
-                verts, faces, normals, values = measure.marching_cubes(
-                    sdf,
-                    level=0.0,  # Zero-level set (object surface)
-                    spacing=spacing,
-                    gradient_direction='descent'
-                )
+                try:
+                    # Apply Marching Cubes algorithm
+                    verts, faces, normals, values = measure.marching_cubes(
+                        sdf,
+                        level=0.0,  # Zero-level set (object surface)
+                        spacing=spacing,
+                        gradient_direction='descent'
+                    )
 
-                # Transform vertices from grid coordinates to world coordinates
-                # Grid coords: [0, resolution] -> World coords: [coord_min, coord_max]
-                verts = verts + coord_min
+                    # Transform vertices from grid coordinates to world coordinates
+                    # Grid coords: [0, resolution] -> World coords: [coord_min, coord_max]
+                    verts = verts + coord_min
 
-                # Convert to tensors and move to original device
-                verts_tensor = torch.from_numpy(verts).float().to(sdf_grid.device)
-                faces_tensor = torch.from_numpy(faces).long().to(sdf_grid.device)
+                    # FIX: Create tensors and explicitly detach
+                    verts_tensor = torch.from_numpy(verts).float().to(sdf_grid.device).detach()
+                    faces_tensor = torch.from_numpy(faces).long().to(sdf_grid.device).detach()
 
-                meshes.append((verts_tensor, faces_tensor))
+                    meshes.append((verts_tensor, faces_tensor))
 
-                logger.debug(
-                    f"[GHOPMeshExtractor] Batch {b}: extracted {verts.shape[0]} verts, "
-                    f"{faces.shape[0]} faces"
-                )
+                    logger.debug(
+                        f"[GHOPMeshExtractor] Batch {b}: extracted {verts.shape[0]} verts, "
+                        f"{faces.shape[0]} faces (no gradient graph)"
+                    )
 
-            except Exception as e:
-                # Marching Cubes can fail for various reasons:
-                # - No zero-crossing in SDF grid
-                # - Degenerate geometry
-                # - Numerical issues
-                logger.warning(
-                    f"[GHOPMeshExtractor] Marching Cubes failed for batch {b}: {e}. "
-                    f"Returning empty mesh."
-                )
+                except Exception as e:
+                    # Marching Cubes can fail for various reasons:
+                    # - No zero-crossing in SDF grid
+                    # - Degenerate geometry
+                    # - Numerical issues
+                    logger.warning(
+                        f"[GHOPMeshExtractor] Marching Cubes failed for batch {b}: {e}. "
+                        f"Returning empty mesh."
+                    )
 
-                # Empty mesh fallback
-                meshes.append((
-                    torch.zeros((0, 3), device=sdf_grid.device, dtype=torch.float32),
-                    torch.zeros((0, 3), device=sdf_grid.device, dtype=torch.long)
-                ))
+                    # Empty mesh fallback
+                    meshes.append((
+                        torch.zeros((0, 3), device=sdf_grid.device, dtype=torch.float32, requires_grad=False),
+                        torch.zeros((0, 3), device=sdf_grid.device, dtype=torch.long, requires_grad=False)
+                    ))
 
-        # Log statistics
-        num_verts = [m[0].shape[0] for m in meshes]
-        avg_verts = np.mean(num_verts) if num_verts else 0
-        logger.debug(
-            f"[GHOPMeshExtractor] Extracted {len(meshes)} meshes, "
-            f"avg {avg_verts:.0f} vertices"
-        )
+            # Log statistics
+            num_verts = [m[0].shape[0] for m in meshes]
+            avg_verts = np.mean(num_verts) if num_verts else 0
+            logger.debug(
+                f"[GHOPMeshExtractor] Extracted {len(meshes)} meshes, "
+                f"avg {avg_verts:.0f} vertices (memory-safe)"
+            )
 
-        return meshes
+            return meshes
 
     def forward(self, sdf_grid):
         """Alias for extract_object_mesh() to support nn.Module interface.

@@ -60,6 +60,16 @@ reform_dict = {"right": reform_mano, "left": reform_mano, "object": reform_obj}
 
 
 def create_dataset(split, args):
+    """
+    Create dataset with configurable pin_memory setting.
+
+    Args:
+        split: Split configuration (train/val/test)
+        args: Training arguments with optional pin_memory setting
+
+    Returns:
+        DataLoader with proper memory settings
+    """
     from torch.utils.data import DataLoader
 
     if split.type == "train":
@@ -80,16 +90,77 @@ def create_dataset(split, args):
     else:
         raise ValueError(f"Fail to find dataset {split.type}")
 
+    # ================================================================
+    # FIX 2: Configurable pin_memory with smart defaults
+    # ================================================================
+
+    # Method 1: Check if pin_memory is explicitly set in args
+    if hasattr(args, 'pin_memory'):
+        use_pin_memory = args.pin_memory
+        logger.debug(f"[DataLoader] Using args.pin_memory={use_pin_memory}")
+
+    # Method 2: Check if it's set in split config
+    elif hasattr(split, 'pin_memory'):
+        use_pin_memory = split.pin_memory
+        logger.debug(f"[DataLoader] Using split.pin_memory={use_pin_memory}")
+
+    # Method 3: Smart default based on PyTorch version and workers
+    else:
+        import torch
+
+        # Get PyTorch version
+        pytorch_version = tuple(int(x) for x in torch.__version__.split('.')[:2])
+
+        # ================================================================
+        # Smart logic:
+        # - PyTorch >= 2.0 + single worker (workers=0): Safe to use
+        # - PyTorch < 2.0 or multiple workers: Memory leak risk
+        # ================================================================
+        if pytorch_version >= (2, 0) and workers == 0:
+            use_pin_memory = True
+            logger.info(
+                f"[DataLoader {split.type}] Using pin_memory=True "
+                f"(PyTorch {torch.__version__}, num_workers={workers})"
+            )
+        else:
+            use_pin_memory = False
+            logger.warning(
+                f"[DataLoader {split.type}] Disabling pin_memory to prevent memory leak "
+                f"(PyTorch {torch.__version__}, num_workers={workers})"
+            )
+
+    # ================================================================
+    # Additional memory safety check
+    # ================================================================
+    if use_pin_memory and workers > 0:
+        logger.warning(
+            f"[DataLoader {split.type}] pin_memory=True with num_workers={workers} "
+            f"may cause memory leaks. Consider setting --no-pin-memory flag."
+        )
+
     dataset = DATASET_CLS(args)
+
+    # ================================================================
+    # Create DataLoader with configured pin_memory
+    # ================================================================
     return DataLoader(
         dataset,
         batch_size=split.batch_size,
         drop_last=split.drop_last,
         shuffle=split.shuffle,
         num_workers=workers,
-        pin_memory=True,
-    )
+        pin_memory=use_pin_memory,  # ← CHANGED: Was True, now configurable
 
+        # ================================================================
+        # Optional: Add prefetch_factor for better performance
+        # ================================================================
+        prefetch_factor=2 if workers > 0 else None,
+
+        # ================================================================
+        # Optional: Add persistent_workers to prevent respawning
+        # ================================================================
+        persistent_workers=True if workers > 0 else False,
+    )
 
 def bilinear_interpolation(xs, ys, dist_map):
     x1 = np.floor(xs).astype(np.int32)

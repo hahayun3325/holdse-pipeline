@@ -1,0 +1,133 @@
+========================================================================
+GHOP PRODUCTION TRAINING V2 - Bottle_1 (WITH AUTOMATIC FIXES)
+========================================================================
+Start: Mon Oct 20 08:45:26 PM CDT 2025
+
+Strategy:
+  ✅ Use tested config structure (ghop_production_bottle_1.yaml)
+  ✅ Apply targeted fixes automatically
+  ✅ Preserve all working components
+
+Checking for existing config...
+✓ Found existing config: confs/ghop_production_bottle_1.yaml
+
+Creating backup...
+✓ Backup created: confs/ghop_production_bottle_1.yaml.backup_20251020_204526
+
+Applying targeted fixes...
+
+  Fix 1: Network dimensions (32 → 256)
+    ✓ Implicit network: [256, 256, 256, 256]
+    ✓ Rendering network: [256, 256, 256]
+    ✓ BG networks: [256, 256]
+
+  Fix 2: Loss weights
+    ✓ Loss weights already present
+
+  Fix 3: Ray sampling (8 → 64)
+    ✓ N_samples: 64
+    ✓ N_samples_eval: 128
+
+  Fix 4: Phase 5 timing conflict
+    ✓ Phase timing already correct
+
+  Fix 5: Training duration (20 → 100 epochs)
+    ✓ Extended to 100 epochs (~10 hours)
+
+✅ All fixes applied successfully!
+
+Verifying fixes...
+
+  ✅ Network dimensions: 256-dim
+  ✅ RGB loss weight: 10.0
+  ✅ Ray samples: 64
+  ✅ Training epochs: 100
+
+✅ All fixes verified!
+
+========================================================================
+CONFIGURATION SUMMARY
+========================================================================
+
+Dataset:       ghop_bottle_1 (71 frames)
+Epochs:        100 (full training)
+Duration:      ~10 hours
+
+Network Architecture:
+  Implicit:    [256, 256, 256, 256]
+  Rendering:   [256, 256, 256]
+  BG Implicit: [256, 256]
+  BG Render:   [256, 256]
+
+Loss Weights:
+  w_rgb:       10.0 (high priority)
+  w_mask:      5.0
+  w_mano_cano: 0.5 (reduced to prevent dominance)
+
+Ray Sampling:
+  N_samples:   64 (improved quality)
+========================================================================
+
+Starting training...
+  Config: confs/ghop_production_bottle_1.yaml (with fixes)
+  Log: ../ghop_production_results/production_bottle_1_v2_20251020_204526.log
+
+⏰ Expected duration: ~10 hours
+
+
+========================================================================
+ANALYSIS
+========================================================================
+
+✅ Training Status: COMPLETED
+  Duration: 0h 0m 15s
+
+📈 Training Progress:
+  ❌ No training progress found
+
+🤖 Phase 3 - GHOP SDS:
+  ❌ GHOP SDS not detected in logs
+
+🎨 RGB Loss:
+  ❌ RGB loss not found - Network may not be learning colors!
+
+🤝 Phase 4 - Contact Refinement:
+  ✅ Phase 4 initialized
+  ⚠️  Contact loss skipped (object SDF not ready yet)
+
+🎯 Phase 5 - Temporal Consistency:
+  ✅ Phase 5 activated
+  Temporal loss logged: 0
+0 times
+
+⚠️  Error Analysis:
+  ⚠️  Errors/warnings found: 4 occurrences
+
+  First 10 errors:
+    2025-10-20 20:45:37.664 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
+    2025-10-20 20:45:37.664 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
+    2025-10-20 20:45:38.015 | DEBUG    | src.hold.hold:training_step:1053 - [FIX] Detaching batch tensors to prevent inplace errors...
+    RuntimeError: mat1 and mat2 shapes cannot be multiplied (25088x270 and 294x256)
+
+💾 Checkpoints:
+  ⚠️  No checkpoints directory found
+
+========================================================================
+FINAL SUMMARY
+========================================================================
+⚠️  TRAINING COMPLETED WITH WARNINGS
+
+Issues:
+  ⚠️  Only  / 100 epochs completed
+  ⚠️  Consider extending training time
+
+========================================================================
+End: Mon Oct 20 08:45:41 PM CDT 2025
+
+📁 Files:
+  Summary: ../ghop_production_results/production_summary_20251020_204526.txt
+  Log: ../ghop_production_results/production_bottle_1_v2_20251020_204526.log
+  Config: confs/ghop_production_bottle_1.yaml
+  Config Backup: confs/ghop_production_bottle_1.yaml.backup_20251020_204526
+  Checkpoints: /checkpoints
+========================================================================

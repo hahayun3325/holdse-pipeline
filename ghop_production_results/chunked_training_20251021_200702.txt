@@ -1,0 +1,95 @@
+========================================================================
+CHUNKED TRAINING: 5 chunks of 20 epochs each
+========================================================================
+Start: Tue Oct 21 08:07:02 PM CDT 2025
+
+✓ Created config: confs/ghop_production_chunked_20251021_200702.yaml
+
+========================================================================
+CHUNK 1/5: Epochs 0 → 20
+========================================================================
+Start time: Tue Oct 21 08:07:02 PM CDT 2025
+
+Resuming from: logs/45db8a594/checkpoints/last.ckpt
+
+Chunk 0 exit code: 0
+End time: Tue Oct 21 08:08:07 PM CDT 2025
+✅ Chunk 0 complete
+
+Performing hard memory reset...
+✓ CUDA cache cleared
+Ready for next chunk
+
+========================================================================
+CHUNK 2/5: Epochs 20 → 40
+========================================================================
+Start time: Tue Oct 21 08:08:13 PM CDT 2025
+
+Resuming from: logs/45db8a594/checkpoints/last.ckpt
+
+Chunk 1 exit code: 0
+End time: Tue Oct 21 08:09:19 PM CDT 2025
+✅ Chunk 1 complete
+
+Performing hard memory reset...
+✓ CUDA cache cleared
+Ready for next chunk
+
+========================================================================
+CHUNK 3/5: Epochs 40 → 60
+========================================================================
+Start time: Tue Oct 21 08:09:24 PM CDT 2025
+
+Resuming from: logs/45db8a594/checkpoints/last.ckpt
+
+Chunk 2 exit code: 0
+End time: Tue Oct 21 08:10:31 PM CDT 2025
+✅ Chunk 2 complete
+
+Performing hard memory reset...
+✓ CUDA cache cleared
+Ready for next chunk
+
+========================================================================
+CHUNK 4/5: Epochs 60 → 80
+========================================================================
+Start time: Tue Oct 21 08:10:36 PM CDT 2025
+
+Resuming from: logs/45db8a594/checkpoints/last.ckpt
+
+Chunk 3 exit code: 0
+End time: Tue Oct 21 08:11:43 PM CDT 2025
+✅ Chunk 3 complete
+
+Performing hard memory reset...
+✓ CUDA cache cleared
+Ready for next chunk
+
+========================================================================
+CHUNK 5/5: Epochs 80 → 100
+========================================================================
+Start time: Tue Oct 21 08:11:49 PM CDT 2025
+
+Resuming from: logs/45db8a594/checkpoints/last.ckpt
+
+Chunk 4 exit code: 0
+End time: Tue Oct 21 08:12:55 PM CDT 2025
+✅ Chunk 4 complete
+
+========================================================================
+CHUNKED TRAINING COMPLETE
+========================================================================
+End: Tue Oct 21 08:12:55 PM CDT 2025
+
+Summary:
+  Total chunks: 5
+  Successful: 0
+  Failed: 5
+
+⚠️  Some chunks failed
+   Completed: 0 epochs
+   Can resume from last checkpoint
+
+📁 Master log: ../ghop_production_results/chunked_training_20251021_200702.txt
+📁 Chunk logs: ../ghop_production_results/chunk_*.log
+========================================================================

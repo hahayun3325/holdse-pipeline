@@ -149,7 +149,7 @@ phase5:
 # ULTRA-FAST TRAINING SETTINGS
 # ========================================================================
 training:
-  num_epochs: 20
+  num_epochs: 100
   max_steps: -1
   eval_every_epoch: 999  # Disable evaluation
   log_every: 1           # Log immediately
@@ -191,48 +191,48 @@ dataset:
 model:
   # Implicit network (SDF network)
   implicit_network:
-    feature_vector_size: 32
+    feature_vector_size: 256
     d_in: 3
     d_out: 1
-    dims: [32, 32]
+    dims: [256, 256, 256, 256]
     init: geometry
     bias: 0.6
     skip_in: []
     weight_norm: true
-    multires: 1
+    multires: 6
     cond: pose
 
   rendering_network:
-    feature_vector_size: 32
+    feature_vector_size: 256
     mode: pose
     d_in: 14
     d_out: 3
-    dims: [32]
+    dims: [256, 256, 256]
     weight_norm: true
-    multires_view: -1
+    multires_view: 4
 
   bg_implicit_network:
-    feature_vector_size: 32
+    feature_vector_size: 256
     d_in: 4
     d_out: 1
-    dims: [32, 32]
+    dims: [256, 256, 256, 256]
     init: none
     bias: 0.0
     skip_in: []
     weight_norm: false
-    multires: 2
+    multires: 6
     cond: frame
-    dim_frame_encoding: 8
+    dim_frame_encoding: 32
 
   bg_rendering_network:
-    feature_vector_size: 32
+    feature_vector_size: 256
     mode: nerf_frame_encoding
     d_in: 3
     d_out: 3
-    dims: [32]
+    dims: [256, 256, 256]
     weight_norm: false
-    multires_view: 1
-    dim_frame_encoding: 8
+    multires_view: 4
+    dim_frame_encoding: 32
 
   density:
     params_init:
@@ -241,13 +241,13 @@ model:
 
   ray_sampler:
     near: 0.0
-    N_samples: 8          # Reduced for speed
-    N_samples_eval: 8
-    N_samples_extra: 4
+    N_samples: 64          # Reduced for speed
+    N_samples_eval: 128
+    N_samples_extra: 32
     eps: 0.1
-    beta_iters: 1
-    max_total_iters: 1
-    N_samples_inverse_sphere: 4
+    beta_iters: 1000
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
     add_tiny: 1.0e-06
 
   # SDF bounding sphere
@@ -283,3 +283,15 @@ trainer:
   limit_val_batches: 0
   num_sanity_val_steps: 0
 
+
+# ================================================================
+# LOSS WEIGHTS (AUTOMATICALLY ADDED)
+# ================================================================
+loss:
+  w_rgb: 10.0              # RGB loss weight (was missing!)
+  w_mask: 5.0              # Mask loss
+  w_mano_cano: 0.5         # REDUCED from default to prevent 99.61% dominance
+  w_eikonal: 0.1
+  w_smooth: 0.01
+  w_semantic: 1.0
+  w_opacity_sparse: 0.1

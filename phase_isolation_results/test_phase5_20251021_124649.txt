@@ -1,0 +1,116 @@
+========================================================================
+INCREMENTAL PHASE ISOLATION TEST (FIXED)
+========================================================================
+Start: Tue Oct 21 12:46:49 PM CDT 2025
+
+Test Mode: phase5
+
+Strategy:
+  🎯 Test BASELINE + PHASE 5
+  ❌ Phase 3 (GHOP): DISABLED
+  ❌ Phase 4 (Contact): DISABLED
+  ✅ Phase 5 (Temporal): ENABLED
+
+Checking for base config...
+✓ Found base config: confs/ghop_quick_bottle_1.yaml
+
+Creating test config...
+  ✓ Copied base config
+
+Applying phase-specific modifications...
+
+  🔧 Setting phase3.enabled = false...
+    ✓ phase3.enabled: false
+  🔧 Setting phase4.enabled = false...
+    ✓ phase4.enabled: false
+  🔧 Setting phase5.enabled = true...
+    ✓ phase5.enabled: true
+
+  Fix 1: Training duration
+    ✓ num_epochs: 1 → 100
+    ✓ max_steps: 20 → unlimited
+
+  Fix 2: Loss weights
+    ✓ Added loss weights section
+
+  Fix 3: Memory optimization
+    ✓ batch_size: 2 → 1
+    ✓ pixel_per_batch → 1024
+
+✅ All modifications applied
+
+========================================================================
+FINAL VERIFICATION
+========================================================================
+
+1. Phase 3 (GHOP): ✅ false (expected: false)
+2. Phase 4 (Contact): ✅ false (expected: false)
+3. Phase 5 (Temporal): ✅ true (expected: true)
+4. Architecture: ✅ 32-dim
+5. Batch size: ✅ 1 (optimized)
+
+✅ ALL VERIFICATIONS PASSED
+
+========================================================================
+CONFIGURATION SUMMARY
+========================================================================
+
+Test Mode:     phase5
+Base config:   confs/ghop_quick_bottle_1.yaml
+Target config: confs/phase_test_phase5_20251021_124649.yaml
+
+Phase Configuration:
+  Phase 3 (GHOP):     ❌ DISABLED
+  Phase 4 (Contact):  ❌ DISABLED
+  Phase 5 (Temporal): ✅ ENABLED
+
+Training Settings:
+  Architecture:  32-dim
+  Batch size:    1
+  Epochs:        100
+
+========================================================================
+
+Starting training...
+  Config: confs/phase_test_phase5_20251021_124649.yaml
+  Log: ../phase_isolation_results/test_phase5_20251021_124649.log
+  Memory Log: ../phase_isolation_results/memory_phase5_20251021_124649.csv
+
+  Memory monitor PID: 51173
+
+
+========================================================================
+TEST RESULTS
+========================================================================
+
+✅ Training Status: COMPLETED
+   Duration: 0h 15m 47s
+
+📊 MEMORY ANALYSIS:
+========================================================================
+  Total samples: 32
+  Final memory: 24109 MB
+  Total growth: 24094 MB
+
+  ❌ VERDICT: Memory excessive (> 20 GB)
+  ❌ CONCLUSION: Severe memory leak detected
+========================================================================
+
+📋 TEST-SPECIFIC CONCLUSION:
+========================================================================
+
+❌ PHASE 5 (TEMPORAL) CAUSES LEAK
+   Investigate: History buffers, temporal window
+========================================================================
+
+========================================================================
+TEST COMPLETE
+========================================================================
+End: Tue Oct 21 01:02:36 PM CDT 2025
+
+📁 Files:
+   Config:      confs/phase_test_phase5_20251021_124649.yaml
+   Log:         ../phase_isolation_results/test_phase5_20251021_124649.log
+   Memory Log:  ../phase_isolation_results/memory_phase5_20251021_124649.csv
+   Summary:     ../phase_isolation_results/test_phase5_20251021_124649.txt
+========================================================================

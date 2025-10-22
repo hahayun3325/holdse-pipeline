@@ -1,0 +1,116 @@
+========================================================================
+INCREMENTAL PHASE ISOLATION TEST (FIXED)
+========================================================================
+Start: Tue Oct 21 12:31:22 PM CDT 2025
+
+Test Mode: phase4
+
+Strategy:
+  🎯 Test BASELINE + PHASE 4
+  ❌ Phase 3 (GHOP): DISABLED
+  ✅ Phase 4 (Contact): ENABLED
+  ❌ Phase 5 (Temporal): DISABLED
+
+Checking for base config...
+✓ Found base config: confs/ghop_quick_bottle_1.yaml
+
+Creating test config...
+  ✓ Copied base config
+
+Applying phase-specific modifications...
+
+  🔧 Setting phase3.enabled = false...
+    ✓ phase3.enabled: false
+  🔧 Setting phase4.enabled = true...
+    ✓ phase4.enabled: true
+  🔧 Setting phase5.enabled = false...
+    ✓ phase5.enabled: false
+
+  Fix 1: Training duration
+    ✓ num_epochs: 1 → 100
+    ✓ max_steps: 20 → unlimited
+
+  Fix 2: Loss weights
+    ✓ Added loss weights section
+
+  Fix 3: Memory optimization
+    ✓ batch_size: 2 → 1
+    ✓ pixel_per_batch → 1024
+
+✅ All modifications applied
+
+========================================================================
+FINAL VERIFICATION
+========================================================================
+
+1. Phase 3 (GHOP): ✅ false (expected: false)
+2. Phase 4 (Contact): ✅ true (expected: true)
+3. Phase 5 (Temporal): ✅ false (expected: false)
+4. Architecture: ✅ 32-dim
+5. Batch size: ✅ 1 (optimized)
+
+✅ ALL VERIFICATIONS PASSED
+
+========================================================================
+CONFIGURATION SUMMARY
+========================================================================
+
+Test Mode:     phase4
+Base config:   confs/ghop_quick_bottle_1.yaml
+Target config: confs/phase_test_phase4_20251021_123122.yaml
+
+Phase Configuration:
+  Phase 3 (GHOP):     ❌ DISABLED
+  Phase 4 (Contact):  ✅ ENABLED
+  Phase 5 (Temporal): ❌ DISABLED
+
+Training Settings:
+  Architecture:  32-dim
+  Batch size:    1
+  Epochs:        100
+
+========================================================================
+
+Starting training...
+  Config: confs/phase_test_phase4_20251021_123122.yaml
+  Log: ../phase_isolation_results/test_phase4_20251021_123122.log
+  Memory Log: ../phase_isolation_results/memory_phase4_20251021_123122.csv
+
+  Memory monitor PID: 48910
+
+
+========================================================================
+TEST RESULTS
+========================================================================
+
+✅ Training Status: COMPLETED
+   Duration: 0h 14m 42s
+
+📊 MEMORY ANALYSIS:
+========================================================================
+  Total samples: 30
+  Final memory: 24109 MB
+  Total growth: 24094 MB
+
+  ❌ VERDICT: Memory excessive (> 20 GB)
+  ❌ CONCLUSION: Severe memory leak detected
+========================================================================
+
+📋 TEST-SPECIFIC CONCLUSION:
+========================================================================
+
+❌ PHASE 4 (CONTACT) CAUSES LEAK
+   Investigate: Mesh extraction, PyTorch3D caching
+========================================================================
+
+========================================================================
+TEST COMPLETE
+========================================================================
+End: Tue Oct 21 12:46:04 PM CDT 2025
+
+📁 Files:
+   Config:      confs/phase_test_phase4_20251021_123122.yaml
+   Log:         ../phase_isolation_results/test_phase4_20251021_123122.log
+   Memory Log:  ../phase_isolation_results/memory_phase4_20251021_123122.csv
+   Summary:     ../phase_isolation_results/test_phase4_20251021_123122.txt
+========================================================================

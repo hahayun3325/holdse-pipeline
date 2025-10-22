@@ -154,15 +154,42 @@ class ObjectNode(Node):
         return out
 
     def meshing_cano(self):
-        cond = {"pose": torch.zeros(1, self.specs.pose_dim).float().cuda()}
-        mesh_canonical = generate_mesh(
-            lambda x: hold_utils.query_oc(self.implicit_network, x, cond),
-            self.v_min_max,
-            point_batch=10000,
-            res_up=2,
-        )
-        self.update_cano(mesh_canonical)
-        return mesh_canonical
+        """Extract canonical object mesh without gradient tracking.
+
+        Returns:
+            trimesh.Trimesh: Canonical object mesh
+        """
+        # ================================================================
+        # FIX 3: Wrap entire operation in torch.no_grad()
+        # ================================================================
+        # This prevents gradient graph accumulation during:
+        # 1. Condition tensor creation
+        # 2. SDF network queries (thousands of them)
+        # 3. Marching Cubes algorithm
+        # 4. Canonical mesh update
+        # ================================================================
+        with torch.no_grad():
+            cond = {"pose": torch.zeros(1, self.specs.pose_dim).float().cuda()}
+
+            # Ensure condition tensor doesn't have gradients
+            cond["pose"] = cond["pose"].detach()
+
+            # ================================================================
+            # FIX 3: query_oc is called within no_grad context
+            # ================================================================
+            # The lambda function captures the no_grad context, so all
+            # implicit_network evaluations are gradient-free
+            mesh_canonical = generate_mesh(
+                lambda x: hold_utils.query_oc(self.implicit_network, x, cond),
+                self.v_min_max,
+                point_batch=10000,
+                res_up=2,
+            )
+
+            # Update canonical mesh (also gradient-free)
+            self.update_cano(mesh_canonical)
+
+            return mesh_canonical
 
     def update_cano(self, mesh_canonical):
         self.mesh_vo_cano = torch.tensor(

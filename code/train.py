@@ -1,7 +1,7 @@
 from pprint import pprint
 import os
 import os.path as op
-
+import sys
 import numpy as np
 import pytorch_lightning as pl
 from loguru import logger
@@ -204,6 +204,23 @@ def create_dataset_with_ghop_support(dataset_config, args):
     return dataset
 
 def main():
+    # ================================================================
+    # CRITICAL: Disable Comet BEFORE parser_args() is called
+    # ================================================================
+    # Check for --no-comet flag in sys.argv BEFORE parsing
+    if '--no-comet' in sys.argv:
+        print("\n" + "=" * 70)
+        print("⚠️  COMET LOGGING DISABLED")
+        print("=" * 70)
+        print("Running in debug mode without Comet ML metric uploads.")
+        print("Training will be MUCH faster but metrics won't be logged.")
+        print("To re-enable: Remove --no-comet flag")
+        print("=" * 70 + "\n")
+
+        # Set environment variable BEFORE any comet_ml imports
+        os.environ['COMET_MODE'] = 'disabled'
+
+    # Now parse arguments (comet_ml will see COMET_MODE=disabled)
     args, opt = parser_args()
     print("Working dir:", os.getcwd())
 
@@ -229,6 +246,14 @@ def main():
         enable_checkpointing=True,  # Keep checkpointing enabled
         logger=False,
     )
+
+    # ================================================================
+    # Additional Comet suppression for --no-comet mode
+    # ================================================================
+    if args.no_comet:
+        # Suppress any remaining Comet warnings
+        import warnings
+        warnings.filterwarnings('ignore', category=UserWarning, module='comet_ml')
 
     pprint(args)
 

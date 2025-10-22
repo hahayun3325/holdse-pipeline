@@ -1,0 +1,26 @@
+========================================================================
+GHOP PRODUCTION TRAINING - 32-dim (WORKING ARCHITECTURE)
+========================================================================
+Start: Mon Oct 20 09:41:36 PM CDT 2025
+
+Strategy:
+  ✅ Use WORKING 32-dim architecture from 20-epoch run
+  ✅ ONLY add loss weights (critical fix)
+  ✅ KEEP all other tested settings
+
+Finding working 32-dim config...
+✓ Found backup: confs/ghop_production_bottle_1.yaml.backup_20251020_204526
+
+Creating clean 32-dim config...
+
+  Adding loss weights...
+    ✓ Added loss weights
+
+  Fixing Phase 5 timing...
+    ✓ phase5_start_iter: 100 → 600
+
+  Updating training duration...
+    ✓ num_epochs → 100
+
+Verifying config...
+  ❌ Network architecture: NOT 32-dim!

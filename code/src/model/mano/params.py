@@ -24,15 +24,12 @@ class MANOParams(GenericParams):
         logger.info("="*70)
         logger.info(f"[MANOParams.forward] node_id: {self.node_id}")
         logger.info(f"[MANOParams.forward] Input frame_ids shape: {frame_ids.shape}")
-        logger.info(f"[MANOParams.forward] Input frame_ids dtype: {frame_ids.dtype}")
-        logger.info(f"[MANOParams.forward] Input frame_ids values: {frame_ids.flatten()[:10]}")
 
         # Check internal parameter storage
         logger.info(f"[MANOParams.forward] Internal parameter storage:")
         for param_name in self.param_names:
             if hasattr(self, param_name):
                 embedding_layer = getattr(self, param_name)
-                # nn.Embedding has .weight attribute, not .shape
                 logger.info(f"  {param_name}: {embedding_layer.weight.shape}")
 
         # Call parent forward
@@ -45,18 +42,28 @@ class MANOParams(GenericParams):
             if isinstance(v, torch.Tensor):
                 logger.info(f"  {k}: {v.shape}")
 
-        # Concatenate global_orient and pose
+        # ================================================================
+        # FIXED: Concatenate global_orient and pose
+        # ================================================================
         logger.info(f"[MANOParams.forward] Concatenating global_orient + pose...")
-        logger.info(f"  {node_id}.global_orient: {params[f'{node_id}.global_orient'].shape}")
-        logger.info(f"  {node_id}.pose: {params[f'{node_id}.pose'].shape}")
 
-        # Shapes: global_orient [B, 3], pose [B, 45]
-        # Result: full_pose [B, 48]
-        full_pose = torch.cat(
-            (params[f"{node_id}.global_orient"],
-             params[f"{node_id}.pose"]),
-            dim=1  # Concatenate along feature dimension
-        )
+        global_orient = params[f"{node_id}.global_orient"]
+        pose = params[f"{node_id}.pose"]
+
+        logger.info(f"  {node_id}.global_orient BEFORE squeeze: {global_orient.shape}")
+        logger.info(f"  {node_id}.pose BEFORE squeeze: {pose.shape}")
+
+        # Squeeze middle dimension if present: [B, 1, D] -> [B, D]
+        if global_orient.dim() == 3 and global_orient.shape[1] == 1:
+            global_orient = global_orient.squeeze(1)
+            logger.info(f"  Squeezed global_orient: {global_orient.shape}")
+
+        if pose.dim() == 3 and pose.shape[1] == 1:
+            pose = pose.squeeze(1)
+            logger.info(f"  Squeezed pose: {pose.shape}")
+
+        # Concatenate on last dimension
+        full_pose = torch.cat((global_orient, pose), dim=-1)
         params[f"{node_id}.full_pose"] = full_pose
 
         logger.info(f"  Created {node_id}.full_pose: {full_pose.shape}")
@@ -67,7 +74,6 @@ class MANOParams(GenericParams):
                 logger.info(f"  {k}: {v.shape}")
 
         logger.info("="*70)
-
         return params
 
     def load_params(self, case):

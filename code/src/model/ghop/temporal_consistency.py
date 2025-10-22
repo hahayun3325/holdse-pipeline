@@ -55,7 +55,8 @@ class TemporalConsistencyModule(nn.Module):
             w_velocity: float = 0.5,
             w_acceleration: float = 0.1,
             w_camera_motion: float = 0.3,
-            adaptive_weight: bool = True
+            adaptive_weight: bool = True,
+            max_sequences: int = 100  # ← ADD THIS PARAMETER
     ):
         super().__init__()
 
@@ -64,6 +65,12 @@ class TemporalConsistencyModule(nn.Module):
         self.w_acceleration = w_acceleration
         self.w_camera_motion = w_camera_motion
         self.adaptive_weight = adaptive_weight
+
+        # ================================================================
+        # FIX 1: Add max_sequences to prevent unbounded dictionary growth
+        # ================================================================
+        self.max_sequences = max_sequences  # ← ADD THIS LINE
+        self._sequence_access_order = []    # ← ADD THIS LINE (track LRU)
 
         # History buffers (per-sequence tracking)
         # Dict[seq_id, deque of [45]] for hand poses
@@ -79,7 +86,8 @@ class TemporalConsistencyModule(nn.Module):
             f"  - Velocity weight: {w_velocity}\n"
             f"  - Acceleration weight: {w_acceleration}\n"
             f"  - Camera motion weight: {w_camera_motion}\n"
-            f"  - Adaptive weighting: {adaptive_weight}"
+            f"  - Adaptive weighting: {adaptive_weight}\n"
+            f"  - Max sequences: {max_sequences}"  # ← ADD THIS LINE
         )
 
     def forward(
@@ -112,11 +120,37 @@ class TemporalConsistencyModule(nn.Module):
         if sequence_id is None:
             sequence_id = "default"
 
-        # Initialize history if needed
+        # ================================================================
+        # FIX 2: Initialize history with LRU eviction
+        # ================================================================
         if sequence_id not in self.pose_history:
+            # Check if we need to evict old sequences (LRU policy)
+            if len(self.pose_history) >= self.max_sequences:
+                # Remove oldest sequence
+                oldest_id = self._sequence_access_order.pop(0)
+
+                # Delete from all history dictionaries
+                if oldest_id in self.pose_history:
+                    del self.pose_history[oldest_id]
+                if oldest_id in self.camera_history:
+                    del self.camera_history[oldest_id]
+                if oldest_id in self.velocity_history:
+                    del self.velocity_history[oldest_id]
+
+                logger.warning(
+                    f"[Phase 5 Temporal] Evicted sequence '{oldest_id}' "
+                    f"(reached max_sequences={self.max_sequences})"
+                )
+
+            # Create new deques for this sequence
             self.pose_history[sequence_id] = deque(maxlen=self.window_size)
             self.camera_history[sequence_id] = deque(maxlen=self.window_size)
             self.velocity_history[sequence_id] = deque(maxlen=self.window_size)
+
+        # Update access order (move to end = most recently used)
+        if sequence_id in self._sequence_access_order:
+            self._sequence_access_order.remove(sequence_id)
+        self._sequence_access_order.append(sequence_id)
 
         total_loss = torch.tensor(0.0, device=device)
         metrics = {
@@ -140,6 +174,14 @@ class TemporalConsistencyModule(nn.Module):
             # =================================================================
             if len(self.pose_history[sequence_id]) > 0:
                 hA_prev = self.pose_history[sequence_id][-1]  # [45]
+
+                # ================================================================
+                # FIX: Move tensor back to CUDA device for computation
+                # ================================================================
+                # History tensors are stored on CPU to save GPU memory.
+                # Before computation, move them back to the same device as current tensor.
+                if isinstance(hA_prev, torch.Tensor):
+                    hA_prev = hA_prev.to(hA_pred.device)
 
                 # Current velocity: v_t = pose_t - pose_{t-1}
                 velocity_current = hA_pred - hA_prev
@@ -170,6 +212,14 @@ class TemporalConsistencyModule(nn.Module):
                 hA_prev = self.pose_history[sequence_id][-1]  # pose_{t-1}
                 hA_prev_prev = self.pose_history[sequence_id][-2]  # pose_{t-2}
 
+                # ================================================================
+                # FIX: Move tensors back to CUDA device for computation
+                # ================================================================
+                if isinstance(hA_prev, torch.Tensor):
+                    hA_prev = hA_prev.to(hA_pred.device)
+                if isinstance(hA_prev_prev, torch.Tensor):
+                    hA_prev_prev = hA_prev_prev.to(hA_pred.device)
+
                 # Compute acceleration (second derivative)
                 # a_t = pose_t - 2*pose_{t-1} + pose_{t-2}
                 acceleration = hA_pred - 2 * hA_prev + hA_prev_prev
@@ -188,6 +238,12 @@ class TemporalConsistencyModule(nn.Module):
                     len(self.camera_history[sequence_id]) > 0):
                 c2w_prev = self.camera_history[sequence_id][-1]  # [4, 4]
 
+                # ================================================================
+                # FIX: Move camera tensor back to CUDA device
+                # ================================================================
+                if isinstance(c2w_prev, torch.Tensor):
+                    c2w_prev = c2w_prev.to(c2w_current.device)
+
                 # Compute relative camera motion between consecutive frames
                 # Relative motion from t-1 to t
                 relative_motion_current = self._compute_relative_transform(
@@ -205,10 +261,25 @@ class TemporalConsistencyModule(nn.Module):
                 total_loss = total_loss + self.w_camera_motion * camera_loss
                 metrics['camera_motion'] += camera_loss.item()
 
-            # Update history for this batch element
-            self.pose_history[sequence_id].append(hA_pred.detach().clone())
+            # ================================================================
+            # FIX 3: Detach AND move to CPU to free GPU memory (CRITICAL!)
+            # ================================================================
+            # Move tensors to CPU to prevent GPU memory accumulation
+            self.pose_history[sequence_id].append(
+                hA_pred.detach().cpu().clone()  # ← ADD .cpu()
+            )
+
             if c2w_current is not None:
-                self.camera_history[sequence_id].append(c2w_current[b].detach().clone())
+                self.camera_history[sequence_id].append(
+                    c2w_current[b].detach().cpu().clone()  # ← ADD .cpu()
+                )
+
+            # Store velocity magnitude (scalar, not tensor)
+            if len(self.pose_history[sequence_id]) > 1:
+                velocity_mag = torch.norm(
+                    hA_pred - self.pose_history[sequence_id][-2].to(hA_pred.device)
+                ).item()  # ← Convert to Python float
+                self.velocity_history[sequence_id].append(velocity_mag)
 
         # Average over batch
         if batch_size > 0:
@@ -295,13 +366,76 @@ class TemporalConsistencyModule(nn.Module):
             self.pose_history.clear()
             self.camera_history.clear()
             self.velocity_history.clear()
-            logger.info("[Phase 5] Temporal: All history cleared")
+            self._sequence_access_order.clear()  # ← ADD THIS LINE
+
+            # ================================================================
+            # FIX 4: Force garbage collection and CUDA cache clear
+            # ================================================================
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            logger.info("[Phase 5] Temporal: All history cleared + GC forced")
         else:
             if sequence_id in self.pose_history:
                 del self.pose_history[sequence_id]
                 del self.camera_history[sequence_id]
                 del self.velocity_history[sequence_id]
+
+                # Remove from access order
+                if sequence_id in self._sequence_access_order:
+                    self._sequence_access_order.remove(sequence_id)
+
                 logger.info(f"[Phase 5] Temporal: History cleared for sequence '{sequence_id}'")
+
+    def clear_epoch_history(self):
+        """
+        Clear all history at epoch boundaries to prevent memory accumulation.
+
+        This method should be called at the end of each training epoch
+        from the training loop (e.g., hold.py's on_epoch_end).
+
+        Differences from reset_history:
+        - More aggressive cleanup
+        - Explicit CUDA cache clearing
+        - Memory usage logging
+        """
+        # ================================================================
+        # NEW METHOD: Epoch boundary cleanup
+        # ================================================================
+
+        # Log memory before cleanup
+        if torch.cuda.is_available():
+            mem_before = torch.cuda.memory_allocated() / 1024 ** 2
+
+        # Clear all histories
+        num_sequences = len(self.pose_history)
+        self.pose_history.clear()
+        self.camera_history.clear()
+        self.velocity_history.clear()
+        self._sequence_access_order.clear()
+
+        # Force Python garbage collection
+        import gc
+        gc.collect()
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            mem_after = torch.cuda.memory_allocated() / 1024 ** 2
+            mem_freed = mem_before - mem_after
+
+            logger.info(
+                f"[Phase 5 Temporal] Epoch cleanup:\n"
+                f"  - Cleared {num_sequences} sequences\n"
+                f"  - Memory freed: {mem_freed:.2f} MB\n"
+                f"  - Current memory: {mem_after:.2f} MB"
+            )
+        else:
+            logger.info(
+                f"[Phase 5 Temporal] Epoch cleanup: "
+                f"Cleared {num_sequences} sequences"
+            )
 
     def get_smoothed_prediction(
             self,

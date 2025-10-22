@@ -1,0 +1,145 @@
+========================================================================
+GHOP VERIFICATION TEST - PHASE 3 DISABLED
+========================================================================
+Start: Tue Oct 21 08:32:52 AM CDT 2025
+
+Purpose:
+  🎯 Verify GHOP is the memory leak source
+  🔬 Train WITHOUT Phase 3 (GHOP disabled)
+  📊 Compare memory behavior with baseline
+
+Expected Results:
+  ✅ Memory stable at ~8-10 GB
+  ✅ Completes 100 epochs without OOM
+  ✅ Confirms GHOP is leak source
+
+Checking for base config...
+✓ Found base config: confs/ghop_quick_bottle_1.yaml
+
+Creating verification config...
+  ✓ Copied base config
+
+Applying modifications...
+
+  🚨 CRITICAL: Disabling Phase 3 (GHOP)
+    ✓ phase3.enabled: true → false
+
+  Fix 1: Training duration
+    ✓ num_epochs: 1 → 100
+    ✓ max_steps: 20 → unlimited
+
+  Fix 2: Phase 5 timing
+    ✓ Phase timing already correct
+
+  Fix 3: Loss weights
+    ✓ Added loss weights section
+
+  Fix 4: Memory optimization
+    Current batch_size: 2
+    ✓ batch_size: 2 → 1
+
+✅ All modifications applied
+
+========================================================================
+VERIFICATION
+========================================================================
+
+1. Phase 3 (GHOP) status: ✅ DISABLED
+2. Network architecture: ✅ 32-dim
+3. Loss weights: ✅ Present (w_rgb=10.0)
+4. Training epochs: ✅ 100
+5. Batch size: ✅ 1 (optimized)
+
+✅ ALL CHECKS PASSED
+
+========================================================================
+CONFIGURATION SUMMARY
+========================================================================
+
+Test Type:     VERIFICATION (NO GHOP)
+Base config:   confs/ghop_quick_bottle_1.yaml
+Target config: confs/ghop_disabled_verification_20251021_083252.yaml
+
+Configuration:
+  Phase 3 (GHOP):  ❌ DISABLED
+  Phase 4 (Contact): ✅ ENABLED
+  Phase 5 (Temporal): ✅ ENABLED
+  Architecture:    32-dim
+  Batch size:      1
+  Epochs:          100
+
+Expected Memory Behavior:
+  Baseline (with GHOP): 17 MB/step → OOM at epoch 17
+  This test (no GHOP):  <1 MB/step → stable at ~10 GB
+
+========================================================================
+
+Starting verification training...
+  Config: confs/ghop_disabled_verification_20251021_083252.yaml
+  Log: ../ghop_verification_results/no_ghop_verification_20251021_083252.log
+  Memory Log: ../ghop_verification_results/memory_profile_no_ghop_20251021_083252.csv
+
+⏰ Expected duration: ~12 hours for 100 epochs
+
+Starting memory monitoring...
+  Memory monitor PID: 26332
+
+
+========================================================================
+VERIFICATION RESULTS
+========================================================================
+
+✅ Training Status: COMPLETED
+   Duration: 0h 14m 34s
+
+📊 MEMORY ANALYSIS:
+========================================================================
+  Total samples: 30
+  Final memory: 24109 MB
+  Total growth: 24094 MB
+
+  Memory progression:
+    At 10% : N/A MB
+    At 50% : N/A MB
+    At 90% : N/A MB
+
+  ❌ VERDICT: Memory still growing excessively
+  ❌ CONCLUSION: GHOP is NOT the only leak source
+========================================================================
+
+📈 COMPARISON WITH BASELINE:
+========================================================================
+
+Baseline (WITH GHOP):
+  Memory growth:  17-20 MB/step (linear)
+  OOM at:         Epoch 17 (1,257 steps)
+  Final memory:   24,105 MB (crashed)
+
+This Test (WITHOUT GHOP):
+  Status:         See analysis above
+
+  ⚠️  Results inconclusive - further investigation needed
+========================================================================
+
+📋 NEXT STEPS:
+========================================================================
+
+⚠️  Verification test inconclusive - additional steps:
+
+  1. Review memory log: ../ghop_verification_results/memory_profile_no_ghop_20251021_083252.csv
+  2. Check training log for errors: ../ghop_verification_results/no_ghop_verification_20251021_083252.log
+  3. Consider profiling with torch.profiler
+  4. Test with reduced batch size or epochs
+========================================================================
+
+========================================================================
+VERIFICATION TEST COMPLETE
+========================================================================
+End: Tue Oct 21 08:47:26 AM CDT 2025
+
+📁 Files:
+   Config:      confs/ghop_disabled_verification_20251021_083252.yaml
+   Log:         ../ghop_verification_results/no_ghop_verification_20251021_083252.log
+   Memory Log:  ../ghop_verification_results/memory_profile_no_ghop_20251021_083252.csv
+   Summary:     ../ghop_verification_results/no_ghop_verification_20251021_083252.txt
+========================================================================

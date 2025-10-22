@@ -70,6 +70,25 @@ class GenericServer(torch.nn.Module):
             self.tfs_c_inv = tfs.inverse()
 
     def forward(self, scene_scale, transl, thetas, betas, absolute=False):
+        # ================================================================
+        # FIX: Periodic CUDA cache clearing to prevent memory fragmentation
+        # ================================================================
+        # Initialize counter on first call
+        if not hasattr(self, '_forward_count'):
+            self._forward_count = 0
+
+        self._forward_count += 1
+
+        # Clear cache every 50 forward passes (aggressive cleanup)
+        if self._forward_count % 50 == 0:
+            torch.cuda.empty_cache()
+            logger.info(f"[MANO Server] 🧹 Cleared CUDA cache at forward #{self._forward_count}")
+
+            # Also log current memory usage
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            logger.info(f"[MANO Server] 📊 Memory: {allocated:.1f}MB allocated, {reserved:.1f}MB reserved")
+
         logger.info("[MANO Server] ========== FORWARD CALL ==========")
         logger.info(f"[MANO Server] Input shapes:")
         logger.info(f"  scene_scale: {scene_scale.shape}")
@@ -79,14 +98,39 @@ class GenericServer(torch.nn.Module):
 
         out = {}
 
+        # ================================================================
+        # FIX: Squeeze middle dimensions for MANO layer compatibility
+        # ================================================================
+        # transl: [B, 1, 3] -> [B, 3]
+        if transl.dim() == 3 and transl.shape[1] == 1:
+            transl = transl.squeeze(1)
+            logger.info(f"[MANO Server] Squeezed transl: {transl.shape}")
+
+        # betas: [B, 1, 10] -> [B, 10]
+        if betas.dim() == 3 and betas.shape[1] == 1:
+            betas = betas.squeeze(1)
+            logger.info(f"[MANO Server] Squeezed betas: {betas.shape}")
+
         # ignore betas if v_template is provided
         if self.v_template is not None:
             betas = torch.zeros_like(betas)
 
+        # ================================================================
+        # MANO layer forward pass
+        # FIX: Explicit allocation instead of zeros_like
+        # Avoids potential stale tensor references and allocation issues
+        # ================================================================
+        transl_zeros = torch.zeros(
+            transl.shape,
+            dtype=transl.dtype,
+            device=transl.device,
+            requires_grad=False  # Explicit: no gradients needed
+        )
+
         outputs = body_models.forward_layer(
             self.human_layer,
             betas=betas,
-            transl=torch.zeros_like(transl),
+            transl=transl_zeros,
             pose=thetas[:, 3:],
             global_orient=thetas[:, :3],
             return_verts=True,
@@ -95,8 +139,19 @@ class GenericServer(torch.nn.Module):
         )
         verts = outputs.vertices.clone()
 
+        # ================================================================
+        # FIX: Reshape for broadcasting
+        # ================================================================
         scene_scale = scene_scale.view(-1, 1, 1)
-        transl = transl.view(-1, 1, 3)
+
+        # Ensure transl is [B, 1, 3] for broadcasting with verts [B, V, 3]
+        if transl.dim() == 2:  # [B, 3]
+            transl = transl.unsqueeze(1)  # [B, 1, 3]
+
+        logger.info(f"[MANO Server] After reshaping for broadcasting:")
+        logger.info(f"  scene_scale: {scene_scale.shape}")
+        logger.info(f"  transl: {transl.shape}")
+        logger.info(f"  verts: {verts.shape}")
 
         out["verts"] = verts * scene_scale + transl * scene_scale
 
@@ -131,6 +186,17 @@ class GenericServer(torch.nn.Module):
         out["tfs"] = tf_mats
         out["skin_weights"] = outputs.weights
         out["v_posed"] = outputs.v_posed
+
+        # ================================================================
+        # FIX: Explicit cleanup after forward pass
+        # ================================================================
+        # Detach intermediate tensors that might retain computation graphs
+        for key in out:
+            if isinstance(out[key], torch.Tensor) and out[key].requires_grad:
+                # Only detach if not needed for backward pass
+                # (these are usually just outputs, not used for gradients)
+                pass  # Keep as-is for now, may need gradients
+
         return out
 
     def forward_param(self, param_dict):

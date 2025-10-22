@@ -1,0 +1,208 @@
+defaults:
+- sanity_check_fast
+phase3:
+  enabled: true
+  use_modular_init: true
+  ghop:
+    unified_checkpoint: checkpoints/ghop/last.ckpt
+    vqvae_checkpoint: checkpoints/ghop/last.ckpt
+    unet_checkpoint: checkpoints/ghop/last.ckpt
+    config_path: checkpoints/ghop/config.yaml
+    vqvae_use_pretrained: true
+    unet_use_pretrained: true
+    device: cuda
+    text_lib: null
+  phase3_start_iter: 0
+  warmup_iters: 0
+  w_sds: 5000.0
+  sds_iters: 1
+  grid_resolution: 32
+  spatial_lim: 1.5
+  sds:
+    diffusion_steps: 1000
+    prediction_respacing: 10
+    noise_schedule: linear
+    min_step_ratio: 0.02
+    max_step_ratio: 0.98
+    guidance_scale: 4.0
+phase4:
+  enabled: true
+  contact_start_iter: 20
+  contact_duration: 10
+  contact_warmup_iters: 5
+  contact_refinement:
+    enabled: true
+    contact_thresh: 0.01
+    collision_thresh: 0.005
+    w_penetration: 50.0
+    w_attraction: 5.0
+    w_damping: 0.0
+    contact_zones: zones
+  mesh_extraction:
+    enabled: true
+    resolution: 64
+    threshold: 0.0
+    extract_every: 1
+  w_contact: 10.0
+  log_contact_every: 5
+  enable_tb_logging: true
+  visualize_contact: false
+  visualize_every: 100
+  visualize_output_dir: phase4_visualizations
+  use_mesh_cache: true
+  cache_max_age: 5
+  contact_grad_clip: 5.0
+  fallback_on_error: true
+  use_pytorch3d: true
+phase5:
+  enabled: true
+  phase5_start_iter: 600
+  total_iterations: 1000
+  warmup_iters: 0
+  finetune_start_iter: 800
+  temporal_window: 5
+  w_velocity: 0.5
+  w_acceleration: 0.1
+  w_camera_motion: 0.3
+  w_temporal: 1.0
+  adaptive_weight: true
+  guidance_scale: 4.0
+  min_step: 0.02
+  max_step: 0.98
+  prediction_respacing: 100
+  w_schedule: dream
+  proximity_threshold: 0.015
+  min_contact_verts: 5
+  max_contact_verts: 50
+  contact_update_freq: 10
+  penalize_palm: true
+  log_phase5_every: 10
+  enable_geometry_sampling: false
+training:
+  num_epochs: 10000
+  max_steps: -1
+  eval_every_epoch: 999
+  log_every: 1
+  gradient_clip: 0.5
+dataset:
+  train:
+    type: train
+    batch_size: 2
+    drop_last: false
+    shuffle: true
+    num_workers: 0
+    prefetch_factor: 2
+  valid:
+    type: val
+    enabled: false
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    num_workers: 0
+    pixel_per_batch: 256
+  test:
+    type: test
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    num_workers: 0
+    pixel_per_batch: 8192
+model:
+  implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims:
+    - 256
+    - 256
+    - 256
+    - 256
+    init: geometry
+    bias: 0.6
+    skip_in: []
+    weight_norm: true
+    multires: 6
+    cond: pose
+  rendering_network:
+    feature_vector_size: 256
+    mode: pose
+    d_in: 14
+    d_out: 3
+    dims:
+    - 256
+    - 256
+    - 256
+    weight_norm: true
+    multires_view: 4
+  bg_implicit_network:
+    feature_vector_size: 256
+    d_in: 4
+    d_out: 1
+    dims:
+    - 256
+    - 256
+    - 256
+    - 256
+    init: none
+    bias: 0.0
+    skip_in: []
+    weight_norm: false
+    multires: 6
+    cond: frame
+    dim_frame_encoding: 32
+  bg_rendering_network:
+    feature_vector_size: 256
+    mode: nerf_frame_encoding
+    d_in: 3
+    d_out: 3
+    dims:
+    - 256
+    - 256
+    - 256
+    weight_norm: false
+    multires_view: 4
+    dim_frame_encoding: 32
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+  ray_sampler:
+    near: 0.0
+    N_samples: 64
+    N_samples_eval: 128
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 100
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+    add_tiny: 1.0e-06
+  sdf_bounding_sphere: 1.0
+logging:
+  log_images_every: 999999
+  log_mesh_every: 999999
+  log_to_file: true
+  verbose: true
+validation:
+  enabled: false
+optimizer:
+  lr: 0.0001
+  type: adam
+  weight_decay: 0.0
+experiment:
+  name: ghop_quick_bottle_1
+  description: Quick test for Bottle_1
+trainer:
+  limit_val_batches: 0
+  num_sanity_val_steps: 0
+
+# ================================================================
+# LOSS WEIGHTS (CRITICAL FIX - ADDED)
+# ================================================================
+loss:
+  w_rgb: 10.0              # RGB loss weight (was missing!)
+  w_mask: 5.0              # Mask loss
+  w_mano_cano: 0.5         # REDUCED to prevent 99.61% dominance
+  w_eikonal: 0.1
+  w_smooth: 0.01
+  w_semantic: 1.0
+  w_opacity_sparse: 0.1

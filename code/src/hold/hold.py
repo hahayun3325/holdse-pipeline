@@ -30,6 +30,7 @@ from src.model.ghop.diffusion_prior import GHOPDiffusionPrior
 from src.model.ghop.temporal_consistency import TemporalConsistencyModule
 from src.model.ghop.adaptive_contact_zones import AdaptiveContactZones
 from src.training.phase5_scheduler import Phase5TrainingScheduler
+import gc
 
 
 # ========================================================================
@@ -316,6 +317,35 @@ class HOLD(pl.LightningModule):
                 )
                 logger.info("✓ Two-Stage Training Manager initialized")
 
+                # ================================================================
+                # CRITICAL: Verify GHOP Manager Initialization
+                # ================================================================
+                logger.info("\n" + "="*70)
+                logger.info("GHOP MANAGER VERIFICATION")
+                logger.info("="*70)
+
+                if hasattr(self, 'ghop_manager') and self.ghop_manager is not None:
+                    logger.info("✅ GHOP Manager: INITIALIZED")
+                    logger.info(f"   Manager type: {type(self.ghop_manager).__name__}")
+                    logger.info(f"   Has SDS loss module: {hasattr(self.ghop_manager, 'sds_loss_module')}")
+
+                    # Verify sub-components
+                    if hasattr(self, 'vqvae'):
+                        logger.info(f"   VQ-VAE: {'✅ Present' if self.vqvae is not None else '❌ None'}")
+                    if hasattr(self, 'unet'):
+                        logger.info(f"   U-Net: {'✅ Present' if self.unet is not None else '❌ None'}")
+                    if hasattr(self, 'hand_field_builder'):
+                        logger.info(f"   Hand Field Builder: {'✅ Present' if self.hand_field_builder is not None else '❌ None'}")
+                    if hasattr(self, 'sds_loss'):
+                        logger.info(f"   SDS Loss: {'✅ Present' if self.sds_loss is not None else '❌ None'}")
+
+                    logger.info("\n✅ GHOP READY FOR TRAINING")
+                else:
+                    logger.error("❌ GHOP Manager: NOT INITIALIZED!")
+                    logger.error("   phase3_enabled = True but ghop_manager is None")
+                    logger.error("   GHOP WILL NOT WORK DURING TRAINING!")
+
+                logger.info("="*70 + "\n")
                 # Not using HOLDLoss wrapper in modular mode
                 self.hold_loss_module = None
 
@@ -371,9 +401,35 @@ class HOLD(pl.LightningModule):
                     f"   - Max Contact weight: {phase3_cfg.get('w_contact', 10.0)}"
                 )
 
+            # ================================================================
+            # Store Phase 3 Hyperparameters for Training Step
+            # ================================================================
+            self.phase3_start_iter = phase3_cfg.get('phase3_start_iter', 0)
+            self.warmup_iters = phase3_cfg.get('warmup_iters', 0)
+            self.sds_iters = phase3_cfg.get('sds_iters', 500)
+            self.w_sds = phase3_cfg.get('w_sds', 5000.0)
+
             self.phase3_enabled = True
             self.ghop_enabled = True
-            logger.info("=" * 70 + "\n")
+
+            # ================================================================
+            # CRITICAL: Log Phase 3 Training Parameters
+            # ================================================================
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 3 TRAINING PARAMETERS")
+            logger.info("="*70)
+            logger.info(f"  phase3_start_iter: {self.phase3_start_iter}")
+            logger.info(f"  warmup_iters: {self.warmup_iters}")
+            logger.info(f"  sds_iters: {self.sds_iters}")
+            logger.info(f"  w_sds: {self.w_sds}")
+            logger.info(f"  grid_resolution: {phase3_cfg.get('grid_resolution', 64)}")
+            logger.info(f"  spatial_lim: {phase3_cfg.get('spatial_lim', 1.5)}")
+            logger.info(f"  guidance_scale: {phase3_cfg.sds.get('guidance_scale', 4.0)}")
+            logger.info("\n  🔍 GHOP will activate when:")
+            logger.info(f"     global_step >= {self.phase3_start_iter}")
+            logger.info(f"     AND global_step >= {self.warmup_iters}")
+            logger.info(f"     AND global_step % {self.sds_iters} == 0")
+            logger.info("="*70 + "\n")
 
         else:
             # No Phase 3 - initialize to None
@@ -383,6 +439,15 @@ class HOLD(pl.LightningModule):
             self.unet = None
             self.hand_field_builder = None
             self.sds_loss = None
+
+            # ================================================================
+            # ADDED: Initialize parameters even when Phase 3 disabled
+            # ================================================================
+            self.phase3_start_iter = 0
+            self.warmup_iters = 0
+            self.sds_iters = 1
+            self.w_sds = 0.0
+            # ================================================================
 
         # ====================================================================
         # PHASE 2: Backward Compatibility
@@ -751,6 +816,11 @@ class HOLD(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
+        # ================================================================
+        # FIX: Aggressive memory management every step
+        # ================================================================
+        if self.global_step % 10 == 0:
+            torch.cuda.empty_cache()
 
         # PHASE 5: Dynamic Loss Weight Scheduling
         if self.phase5_enabled and hasattr(self, 'phase5_scheduler'):
@@ -1086,19 +1156,39 @@ class HOLD(pl.LightningModule):
                 logger.warning("  ✗ No MANO parameter candidates found!")
 
             logger.info("=" * 70)
-        # PHASE 3 & PHASE 5: UNIFIED SDS COMPUTATION
+        # PHASE 3 & PHASE 5 UNIFIED SDS COMPUTATION WITH EXPLICIT LOGGING
         if self.phase3_enabled and self.ghop_enabled:
-            # ============================================================
-            # INITIALIZE: Default values in case of early exception
-            # ============================================================
+            # Log activation status at first step
+            if self.global_step == 0:
+                logger.info("="*70)
+                logger.info("[GHOP] Phase 3 Configuration:")
+                logger.info(f"  phase3_enabled: {self.phase3_enabled}")
+                logger.info(f"  ghop_enabled: {self.ghop_enabled}")
+                logger.info(f"  phase3_start_iter: {getattr(self, 'phase3_start_iter', 'NOT SET')}")
+                logger.info(f"  warmup_iters: {getattr(self, 'warmup_iters', 'NOT SET')}")
+                logger.info(f"  w_sds: {getattr(self, 'w_sds', 'NOT SET')}")
+                logger.info(f"  sds_iters: {getattr(self, 'sds_iters', 'NOT SET')}")
+                logger.info(f"  Has ghop_manager: {hasattr(self, 'ghop_manager')}")
+                logger.info("="*70)
+
+            # CRITICAL: Check if GHOP should activate at this step
+            should_compute_ghop = (
+                self.global_step >= getattr(self, 'phase3_start_iter', 0) and
+                self.global_step >= getattr(self, 'warmup_iters', 0) and
+                (self.global_step % getattr(self, 'sds_iters', 1)) == 0
+            )
+
+            # Log every 50 steps
+            if self.global_step % 50 == 0:
+                logger.info(f"[GHOP] Step {self.global_step}: should_compute={should_compute_ghop}")
+
+            # INITIALIZE: Default values
             ghop_losses = {}
-            ghop_info = {
-                'stage': 'unknown',
-                'stage_progress': 0.0,
-                'error': None
-            }
-            # GHOP FIX: Initialize weighted_ghop to prevent NameError
-            weighted_ghop = torch.tensor(0.0, device=loss_output['loss'].device, requires_grad=True)
+            ghop_info = {"stage": "unknown", "stage_progress": 0.0, "error": None}
+            weighted_ghop = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+
+            if should_compute_ghop:
+                logger.debug(f"[GHOP] ✅ Computing SDS loss at step {self.global_step}")
             try:
                 # ============================================================
                 # STEP 1: Extract hand parameters with validation
@@ -1243,24 +1333,31 @@ class HOLD(pl.LightningModule):
                 logger.debug(f"[Phase 3] ✓ GHOP losses added to total loss")
 
             except ValueError as e:
-                # Expected extraction failures - log at debug level
-                logger.debug(f"[Phase 3] Skipping GHOP due to extraction issue: {e}")
-                ghop_info['error'] = str(e)
-
-                # ✓ ADD: Ensure zero loss is added
-                zero_loss = torch.tensor(0.0, device=loss_output['loss'].device, requires_grad=True)
-                loss_output['ghop_loss'] = zero_loss
+                # Expected extraction failures
+                logger.warning(f"[GHOP] ❌ Extraction failed at step {self.global_step}: {e}")
+                ghop_info["error"] = str(e)
+                zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+                loss_output["ghop_loss"] = zero_loss
 
             except Exception as e:
-                # Unexpected errors - log with traceback
-                logger.error(f"[Phase 3] Unexpected error in GHOP computation: {e}")
+                # Unexpected errors
+                logger.error(f"[GHOP] ❌ CRITICAL ERROR at step {self.global_step}: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                ghop_info['error'] = str(e)
+                ghop_info["error"] = str(e)
+                zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+                loss_output["ghop_loss"] = zero_loss
 
-                # ✓ ADD: Ensure zero loss is added
-                zero_loss = torch.tensor(0.0, device=loss_output['loss'].device, requires_grad=True)
-                loss_output['ghop_loss'] = zero_loss
+        else:
+            # Log why GHOP was skipped
+            if self.global_step % 50 == 0:
+                logger.info(f"[GHOP] ⏭️  Skipped at step {self.global_step}:")
+                logger.info(f"    global_step ({self.global_step}) >= phase3_start_iter ({getattr(self, 'phase3_start_iter', 0)}): {self.global_step >= getattr(self, 'phase3_start_iter', 0)}")
+                logger.info(f"    global_step ({self.global_step}) >= warmup_iters ({getattr(self, 'warmup_iters', 0)}): {self.global_step >= getattr(self, 'warmup_iters', 0)}")
+                logger.info(f"    global_step % sds_iters == 0: {(self.global_step % getattr(self, 'sds_iters', 1)) == 0}")
+
+            zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+            loss_output["ghop_loss"] = zero_loss
 
         # ====================================================================
         # PHASE 4: Contact Refinement (Enhanced with Phase 5 Adaptive Zones)
@@ -1298,10 +1395,10 @@ class HOLD(pl.LightningModule):
                             if self.global_step % self.log_phase5_every == 0:
                                 contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
 
-                                self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
-                                self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
-                                self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
-                                self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
+                                self.log('phase5/contact_mean', contact_stats['mean'].detach(), prog_bar=False)
+                                self.log('phase5/contact_min', contact_stats['min'].detach(), prog_bar=False)
+                                self.log('phase5/contact_max', contact_stats['max'].detach(), prog_bar=False)
+                                self.log('phase5/contact_std', contact_stats['std'].detach(), prog_bar=False)
 
                                 logger.info(
                                     f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
@@ -1408,12 +1505,12 @@ class HOLD(pl.LightningModule):
                     loss_output['contact_loss'] = weighted_contact_loss
 
                     # Log metrics
-                    self.log('phase4/contact_loss', weighted_contact_loss, prog_bar=True)
+                    self.log('phase4/contact_loss', weighted_contact_loss.detach(), prog_bar=True)
                     self.log('phase4/contact_weight',
-                            base_weight * loss_weights['contact'] if self.phase5_enabled else self.w_contact * contact_progress)
-                    self.log('phase4/penetration', contact_metrics_accum['penetration'])
-                    self.log('phase4/attraction', contact_metrics_accum['attraction'])
-                    self.log('phase4/dist_mean', contact_metrics_accum['dist_mean'])
+                            base_weight * loss_weights['contact'].detach() if self.phase5_enabled else self.w_contact * contact_progress)
+                    self.log('phase4/penetration', contact_metrics_accum['penetration'].detach())
+                    self.log('phase4/attraction', contact_metrics_accum['attraction'].detach())
+                    self.log('phase4/dist_mean', contact_metrics_accum['dist_mean'].detach())
                     self.log('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
                     self.log('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
 
@@ -1492,7 +1589,7 @@ class HOLD(pl.LightningModule):
                     loss_output["sds_loss"] = loss_sds
 
                     if loss_sds.item() > 0:
-                        self.log('train/sds_loss', loss_sds, prog_bar=True)
+                        self.log('train/sds_loss', loss_sds.detach(), prog_bar=True)
 
             except Exception as e:
                 logger.error(f"[Phase 2] SDS loss failed: {e}")
@@ -1545,16 +1642,49 @@ class HOLD(pl.LightningModule):
                         )
                         raise ValueError(f"Missing temporal fields: {missing_fields}")
 
-                    # =============================================================
-                    # Step 4: Get sequence ID for history tracking
-                    # =============================================================
-                    sequence_id = batch.get('video_id', batch.get('sequence_id', batch.get('scene_id', 'default')))
+                    # ================================================================
+                    # Step 4 Get sequence ID for history tracking (IMPROVED)
+                    # ================================================================
+                    # Try multiple potential sequence identifier fields
+                    sequence_id = None
 
-                    # Convert to string if tensor
-                    if isinstance(sequence_id, torch.Tensor):
-                        sequence_id = str(sequence_id.item())
-                    elif isinstance(sequence_id, (list, tuple)):
-                        sequence_id = str(sequence_id[0])
+                    # Priority order: video_id > sequence_id > scene_id > idx
+                    for key in ['video_id', 'sequence_id', 'scene_id', 'idx']:
+                        if key in batch:
+                            seq_val = batch[key]
+
+                            # Handle tensor
+                            if isinstance(seq_val, torch.Tensor):
+                                if seq_val.numel() == 1:
+                                    sequence_id = f"{key}_{seq_val.item()}"
+                                else:
+                                    sequence_id = f"{key}_{seq_val[0].item()}"
+                                break
+
+                            # Handle list/tuple
+                            elif isinstance(seq_val, (list, tuple)):
+                                if len(seq_val) > 0:
+                                    sequence_id = f"{key}_{seq_val[0]}"
+                                break
+
+                            # Handle string/int
+                            elif isinstance(seq_val, (str, int, float)):
+                                sequence_id = f"{key}_{seq_val}"
+                                break
+
+                    # Fallback to global step-based ID if nothing found
+                    if sequence_id is None:
+                        # Use global_step // batch_size as a proxy for video frame number
+                        batch_size = batch['hA'].shape[0] if 'hA' in batch else 1
+                        approx_frame_id = self.global_step // max(batch_size, 1)
+                        sequence_id = f"default_frame_{approx_frame_id}"
+
+                        logger.debug(
+                            f"[Phase 5] No sequence ID found in batch. "
+                            f"Using fallback: {sequence_id}"
+                        )
+
+                    logger.debug(f"[Phase 5] Temporal tracking with sequence_id: {sequence_id}")
 
                     # =============================================================
                     # Step 5: Compute temporal consistency losses
@@ -1580,10 +1710,17 @@ class HOLD(pl.LightningModule):
                     # Step 8: Log temporal metrics
                     # =============================================================
                     self.log('phase5/temporal_loss', weighted_temporal.item(), prog_bar=True)
-                    self.log('phase5/velocity_loss', temporal_metrics.get('velocity', 0.0), prog_bar=False)
-                    self.log('phase5/acceleration_loss', temporal_metrics.get('acceleration', 0.0), prog_bar=False)
-                    self.log('phase5/camera_motion_loss', temporal_metrics.get('camera_motion', 0.0), prog_bar=False)
-                    self.log('phase5/temporal_adaptive_weight', temporal_metrics.get('adaptive_weight', 1.0), prog_bar=False)
+                    v = temporal_metrics.get('velocity', 0.0)
+                    self.log('phase5/velocity_loss', v.detach() if isinstance(v, torch.Tensor) else v, prog_bar=False)
+                    a = temporal_metrics.get('acceleration', 0.0)
+                    self.log('phase5/acceleration_loss', a.detach() if isinstance(a, torch.Tensor) else a,
+                             prog_bar=False)
+                    c = temporal_metrics.get('camera_motion', 0.0)
+                    self.log('phase5/camera_motion_loss', c.detach() if isinstance(c, torch.Tensor) else c,
+                             prog_bar=False)
+                    w = temporal_metrics.get('adaptive_weight', 1.0)
+                    self.log('phase5/temporal_adaptive_weight', w.detach() if isinstance(w, torch.Tensor) else w,
+                             prog_bar=False)
 
                     # Console logging at reduced frequency
                     if self.global_step % self.log_phase5_every == 0:
@@ -1665,6 +1802,35 @@ class HOLD(pl.LightningModule):
 
         # Log
         self.log('train/loss', final_loss.detach(), prog_bar=True)
+
+        # ================================================================
+        # AGGRESSIVE CLEANUP: Final memory cleanup at end of training_step
+        # ================================================================
+        # Clean every 50 steps for maximum memory efficiency
+        if self.global_step % 50 == 0:
+
+            # Force Python garbage collection
+            gc.collect()
+
+            # Clear CUDA cache
+            torch.cuda.empty_cache()
+
+            # Detailed memory report every 200 steps
+            if self.global_step % 200 == 0 and torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**2
+                reserved = torch.cuda.memory_reserved() / 1024**2
+                peak = torch.cuda.max_memory_allocated() / 1024**2
+
+                msg = (
+                    f"\n{'='*70}\n"
+                    f"[Training Step {self.global_step}] Memory Status\n"
+                    f"  Allocated: {allocated:.2f} MB\n"
+                    f"  Reserved:  {reserved:.2f} MB\n"
+                    f"  Peak:      {peak:.2f} MB\n"
+                    f"{'='*70}\n"
+                )
+                print(msg)
+                logger.info(msg)
 
         # Return detached loss for logging
         return final_loss.detach()
@@ -1763,27 +1929,45 @@ class HOLD(pl.LightningModule):
                     logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
 
             # ============================================================
-            # METHOD 4: Query via model's render_core (CORRECTED - FINAL)
+            # METHOD 4: Query via model's render_core (FIXED)
             # ============================================================
             if sdf_values is None and hasattr(object_node, "implicit_network"):
                 try:
                     logger.debug("[Helper] Attempting METHOD 4: model render_core query")
 
-                    # HOLD's model has a unified way to query SDF values
-                    # We'll use the model's forward method properly
-
                     # Get batch indices
                     idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
 
-                    # Query SDF for all grid points using model's interface
-                    # The model internally handles implicit network calling
+                    # ================================================================
+                    # FIX: Ensure idx is 1D [B] before expand
+                    # ================================================================
+                    # idx might be [B], [B, 1], or [B, 1, 1] depending on upstream
+                    # We need it to be exactly [B] for expand to work
+
+                    if idx.ndim > 1:
+                        # Squeeze all trailing dimensions
+                        idx = idx.squeeze()  # [B, 1, 1] → [B]
+
+                        # Handle edge case: if B=1, squeeze() returns scalar
+                        if idx.ndim == 0:
+                            idx = idx.unsqueeze(0)  # scalar → [1]
+
+                    logger.debug(f"[Helper] idx shape after squeeze: {idx.shape}")
+
+                    # ================================================================
+                    # Now safe to expand
+                    # ================================================================
                     num_points = grid_flat.shape[1]  # H³
 
-                    # Call model's implicit network through proper interface
-                    # HOLD expects: (points, indices, ...)
+                    # Expand idx to match all grid points
+                    # idx: [B] → [B, H³]
+                    idx_expanded = idx.unsqueeze(1).expand(-1, num_points)  # ✅ Works now!
+
+                    logger.debug(f"[Helper] idx_expanded shape: {idx_expanded.shape}")
+
                     model_input = {
                         'points': grid_flat,  # [B, H³, 3]
-                        'indices': idx.unsqueeze(1).expand(-1, num_points),  # [B, H³]
+                        'indices': idx_expanded,  # [B, H³]
                     }
 
                     # Forward through model
@@ -2640,32 +2824,177 @@ class HOLD(pl.LightningModule):
         current_step = self.global_step
         current_epoch = self.current_epoch
 
+        # ================================================================
+        # FIX 1: Clear Phase 5 temporal history at epoch boundaries
+        # ================================================================
+        if self.phase5_enabled and hasattr(self, 'temporal_module') and self.temporal_module is not None:
+            logger.info(f"[Epoch {current_epoch}] Clearing temporal history...")
+
+            # Call the new clear_epoch_history method
+            self.temporal_module.clear_epoch_history()
+
+            # Log memory after cleanup
+            if torch.cuda.is_available():
+                mem_mb = torch.cuda.memory_allocated() / 1024**2
+                logger.info(f"[Epoch {current_epoch}] GPU memory after cleanup: {mem_mb:.2f} MB")
+
+        # ================================================================
+        # FIX 2: Clear Phase 4 contact caches if they exist
+        # ================================================================
+        if self.phase4_enabled and hasattr(self, 'contact_refiner') and self.contact_refiner is not None:
+            if hasattr(self.contact_refiner, 'clear_cache'):
+                logger.info(f"[Epoch {current_epoch}] Clearing contact refiner cache...")
+                self.contact_refiner.clear_cache()
+
+        # ================================================================
+        # FIX 3: AGGRESSIVE full memory cleanup at epoch end
+        # ================================================================
+        if torch.cuda.is_available():
+            # Python garbage collection
+            gc.collect()
+
+            # Clear CUDA cache
+            torch.cuda.empty_cache()
+
+            # Reset peak memory stats for next epoch
+            torch.cuda.reset_peak_memory_stats()
+
+            # Report current memory state
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+
+            # Use print() for visibility AND logger
+            msg = (
+                f"\n{'='*70}\n"
+                f"[Epoch {current_epoch} END] Aggressive Memory Cleanup\n"
+                f"  Allocated: {allocated:.2f} MB\n"
+                f"  Reserved: {reserved:.2f} MB\n"
+                f"{'='*70}\n"
+            )
+            print(msg)
+            logger.info(msg)
+
         # Canonical mesh update every 3 epochs
-        if (
-            current_epoch > 0 and current_epoch % 3 == 0 and not self.args.no_meshing
-        ) or (current_step > 0 and self.args.fast_dev_run and not self.args.no_meshing):
+        if (current_epoch > 0 and current_epoch % 3 == 0 and not self.args.no_meshing) or \
+                (current_step > 0 and self.args.fast_dev_run and not self.args.no_meshing):
             self.meshing_cano(current_step)
             self.save_misc()
 
         return super().training_epoch_end(outputs)
 
+    def on_train_end(self):
+        """
+        Called when training ends.
+
+        Performs final cleanup of temporal history and caches.
+        """
+        logger.info("[Training End] Final memory cleanup...")
+
+        # ================================================================
+        # Clear Phase 5 temporal history completely
+        # ================================================================
+        if self.phase5_enabled and hasattr(self, 'temporal_module') and self.temporal_module is not None:
+            logger.info("[Training End] Clearing all temporal history...")
+            self.temporal_module.reset_history(sequence_id=None)  # Clear all sequences
+
+            # Report statistics
+            logger.info(
+                f"[Training End] Temporal module statistics:\n"
+                f"  - Window size: {self.temporal_module.window_size}\n"
+                f"  - Max sequences: {self.temporal_module.max_sequences}\n"
+                f"  - Final sequences: {len(self.temporal_module.pose_history)}"
+            )
+
+        # ================================================================
+        # Clear Phase 4 contact caches
+        # ================================================================
+        if self.phase4_enabled and hasattr(self, 'contact_refiner') and self.contact_refiner is not None:
+            if hasattr(self.contact_refiner, 'clear_cache'):
+                logger.info("[Training End] Clearing contact refiner cache...")
+                self.contact_refiner.clear_cache()
+
+        # ================================================================
+        # Final CUDA memory report
+        # ================================================================
+        if torch.cuda.is_available():
+            mem_allocated = torch.cuda.memory_allocated() / 1024 ** 2
+            mem_reserved = torch.cuda.memory_reserved() / 1024 ** 2
+
+            logger.info(
+                f"[Training End] Final GPU memory:\n"
+                f"  - Allocated: {mem_allocated:.2f} MB\n"
+                f"  - Reserved: {mem_reserved:.2f} MB"
+            )
+
+            # Clear cache one final time
+            torch.cuda.empty_cache()
+
+        logger.info("[Training End] Cleanup complete")
+
     def meshing_cano(self, current_step):
-        mesh_dict = {}
-        for node in self.model.nodes.values():
-            try:
-                mesh_c = node.meshing_cano()
-                out_p = op.join(
-                    self.args.log_dir,
-                    "mesh_cano",
-                    f"mesh_cano_{node.node_id}_step_{current_step}.obj",
-                )
-                os.makedirs(op.dirname(out_p), exist_ok=True)
-                mesh_c.export(out_p)
-                print(f"Exported canonical to {out_p}")
-                mesh_dict[f"{node.node_id}_cano"] = mesh_c
-            except:
-                logger.error(f"Failed to mesh out {node.node_id}")
-        return mesh_dict
+        """Extract canonical meshes for all nodes without gradient tracking.
+
+        This is a visualization/evaluation operation that should not build
+        computation graphs. All mesh extraction is wrapped in torch.no_grad()
+        to prevent memory leaks from accumulated gradient graphs.
+
+        Args:
+            current_step (int): Current training step for logging
+
+        Returns:
+            dict: Mesh dictionary {node_id: trimesh object}
+        """
+        # ================================================================
+        # FIX 3: Wrap entire meshing operation in torch.no_grad()
+        # ================================================================
+        # CRITICAL: Meshing is an evaluation operation that:
+        # 1. Queries SDF network thousands of times
+        # 2. Runs Marching Cubes algorithm
+        # 3. Should NEVER build gradient graphs
+        #
+        # Without no_grad(), each mesh extraction accumulates ~10-50 MB of
+        # gradient graphs that are never freed, leading to OOM.
+        # ================================================================
+        with torch.no_grad():
+            # Set model to eval mode (important for BatchNorm, Dropout)
+            self.model.eval()
+
+            mesh_dict = {}
+
+            for node in self.model.nodes.values():
+                try:
+                    # Call node's meshing method (also wrapped in no_grad internally)
+                    mesh_c = node.meshing_cano()
+
+                    # ================================================================
+                    # FIX 3: Verify mesh has no gradient tracking
+                    # ================================================================
+                    # If mesh vertices are torch tensors, ensure they're detached
+                    if hasattr(mesh_c, 'vertices') and isinstance(mesh_c.vertices, torch.Tensor):
+                        if mesh_c.vertices.requires_grad:
+                            logger.warning(
+                                f"[meshing_cano] {node.node_id} mesh has requires_grad=True. "
+                                f"Detaching to prevent memory leak."
+                            )
+                            # Note: trimesh vertices are usually numpy arrays, but be safe
+                            mesh_c.vertices = mesh_c.vertices.detach().cpu().numpy()
+
+                    # Export mesh
+                    out_p = op.join(
+                        self.args.log_dir,
+                        "mesh_cano",
+                        f"mesh_cano_{node.node_id}_step_{current_step}.obj",
+                    )
+                    os.makedirs(op.dirname(out_p), exist_ok=True)
+                    mesh_c.export(out_p)
+                    print(f"Exported canonical to {out_p}")
+
+                    mesh_dict[f"{node.node_id}_cano"] = mesh_c
+
+                except Exception as e:
+                    logger.error(f"Failed to mesh out {node.node_id}: {e}")
+
+            return mesh_dict
 
     def inference_step(self, batch, *args, **kwargs):
         batch = xdict(batch).to("cuda")

@@ -12,7 +12,6 @@ import os
 
 def parser_args():
     import argparse
-
     from easydict import EasyDict as edict
 
     parser = argparse.ArgumentParser()
@@ -28,6 +27,13 @@ def parser_args():
     parser.add_argument("--exp_key", type=str, default="")
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--num_epoch", type=int, default=200)
+    # Disable Comet logging for debugging
+    parser.add_argument(
+        '--no-comet',
+        action='store_true',
+        default=False,
+        help='Disable Comet ML logging for faster debugging (skips metric uploads)'
+    )
     parser.add_argument("--freeze_pose", action="store_true", help="no optimize pose")
     parser.add_argument("--barf_s", type=int, default=1000)
     parser.add_argument("--barf_e", type=int, default=10000)
@@ -73,8 +79,8 @@ def parser_args():
     # These arguments provide command-line control over GHOP integration
     # Priority: CLI args > config file (confs/general.yaml)
     # ========================================================================
-
-    # Master toggle for GHOP integration
+    # MEMORY OPTIMIZATION: DataLoader pin_memory Control
+    # ========================================================================
     parser.add_argument(
         '--use_ghop',
         action='store_true',
@@ -174,9 +180,58 @@ def parser_args():
     # ========================================================================
     # END PHASE 3 ARGUMENTS
     # ========================================================================
+
+    # ========================================================================
+    # MEMORY OPTIMIZATION: DataLoader pin_memory Control
+    # ========================================================================
+    parser.add_argument(
+        '--no-pin-memory',
+        dest='no_pin_memory',
+        action='store_true',
+        default=False,
+        help='Disable pin_memory in DataLoader to prevent memory leaks.'
+    )
+
+    parser.add_argument(
+        '--pin-memory',
+        dest='force_pin_memory',
+        action='store_true',
+        default=False,
+        help='Force enable pin_memory in DataLoader (use with caution).'
+    )
+    # ========================================================================
+
     args = parser.parse_args()
     args = edict(vars(args))
     opt = edict(OmegaConf.load(args.config))
+
+    # ========================================================================
+    # PROCESS MEMORY OPTIMIZATION FLAGS
+    # ========================================================================
+    if args.no_pin_memory and args.force_pin_memory:
+        raise ValueError(
+            "Cannot specify both --no-pin-memory and --pin-memory."
+        )
+
+    if args.no_pin_memory:
+        args.pin_memory = False
+        import logging
+        logging.getLogger(__name__).warning(
+            "[Memory] pin_memory DISABLED via --no-pin-memory"
+        )
+    elif args.force_pin_memory:
+        args.pin_memory = True
+        import logging
+        logging.getLogger(__name__).warning(
+            "[Memory] pin_memory FORCE ENABLED (may leak memory!)"
+        )
+    else:
+        import logging
+        logging.getLogger(__name__).info(
+            "[Memory] pin_memory will be AUTO-DETECTED"
+        )
+    # ========================================================================
+
     cmd = " ".join(sys.argv)
     args.cmd = cmd
     args.project = "blaze"
@@ -194,16 +249,32 @@ def parser_args():
     args.total_step = int(
         args.num_epoch * args.tempo_len / opt.dataset.train.batch_size
     )
-    api_key = os.environ["COMET_API_KEY"]
-    workspace = os.environ["COMET_WORKSPACE"]
 
-    experiment, args = comet_utils.init_experiment(
-        args, api_key=api_key, workspace=workspace
-    )
-    comet_utils.save_args(args, save_keys=["comet_key", "git_commit", "git_branch"])
+    # ================================================================
+    # Comet experiment initialization
+    # ================================================================
+    # ALWAYS call init_experiment - it handles disabled mode internally
+    if os.environ.get('COMET_MODE', 'online') == 'disabled':
+        # Comet disabled - pass dummy credentials
+        # init_experiment will check COMET_MODE and skip Comet setup
+        experiment, args = comet_utils.init_experiment(
+            args, api_key='disabled', workspace='disabled'
+        )
+    else:
+        # Normal Comet flow
+        api_key = os.environ["COMET_API_KEY"]
+        workspace = os.environ["COMET_WORKSPACE"]
 
+        experiment, args = comet_utils.init_experiment(
+            args, api_key=api_key, workspace=workspace
+        )
+
+    # Only call save_args and log_exp_meta if experiment exists
     if experiment is not None:
+        comet_utils.save_args(args, save_keys=["comet_key", "git_commit", "git_branch"])
         comet_utils.log_exp_meta(args)
+    else:
+        print("[Parser] Training without Comet logging - paths set up successfully")
 
     img_paths = sorted(glob(f"./data/{args.case}/build/image/*.png"))
     assert len(img_paths) > 0, "No images found"

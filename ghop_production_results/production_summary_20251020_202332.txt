@@ -1,0 +1,69 @@
+========================================================================
+GHOP PRODUCTION TRAINING - Bottle_1 (FIXED VERSION)
+========================================================================
+Start: Mon Oct 20 08:23:32 PM CDT 2025
+
+Configuration:
+  Dataset:       ghop_bottle_1 (71 frames)
+  Epochs:        100
+  Architecture:  256-dim networks (PROPER)
+  Loss weights:  Balanced (w_rgb=10.0, w_mano_cano=0.5)
+  Duration:      ~10 hours
+========================================================================
+
+✓ Found proper base config: confs/ghop_base_proper.yaml
+
+Verifying network architecture...
+  ✅ Rendering network: 256-dim (PROPER)
+  ✅ RGB loss weight: 10.0
+
+✅ Config verified - ready for production training
+
+Creating production config...
+✓ Created: confs/ghop_production_bottle_1_v2.yaml
+  - Network: 256-dim (proper)
+  - Epochs: 100
+  - Loss weights: Balanced
+
+Starting training...
+  Config: confs/ghop_production_bottle_1_v2.yaml
+  Log: ../ghop_production_results/production_bottle_1_v2_20251020_202332.log
+
+⏰ This will take approximately 10 hours
+
+
+========================================================================
+ANALYSIS
+========================================================================
+
+✅ Training Status: COMPLETED
+  Duration: 0h 0m 14s
+
+🤖 Phase 3 - GHOP SDS:
+  ❌ GHOP SDS not detected
+
+🎨 RGB Loss:
+  ❌ RGB loss not found
+
+💾 Checkpoints:
+  ⚠️ No checkpoints found
+
+========================================================================
+SUMMARY
+========================================================================
+✅ PRODUCTION TRAINING COMPLETED
+
+Next Steps:
+  1. Check RGB loss convergence above
+  2. Run rendering: python render_full_frames.py --agent_id -1
+  3. Evaluate quality of rendered images
+
+========================================================================
+End: Mon Oct 20 08:23:46 PM CDT 2025
+
+📁 Files:
+  Summary: ../ghop_production_results/production_summary_20251020_202332.txt
+  Log: ../ghop_production_results/production_bottle_1_v2_20251020_202332.log
+  Config: confs/ghop_production_bottle_1_v2.yaml
+  Checkpoints: /checkpoints
+========================================================================

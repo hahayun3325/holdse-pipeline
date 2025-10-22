@@ -1,0 +1,96 @@
+========================================================================
+GHOP PRODUCTION TRAINING V2 - 32-dim (WORKING ARCHITECTURE)
+========================================================================
+Start: Tue Oct 21 03:59:17 PM CDT 2025
+
+Strategy:
+  ✅ Use ORIGINAL working 32-dim config (ghop_quick_bottle_1.yaml)
+  ✅ ONLY add loss weights + timing fixes
+  ✅ NO architecture changes
+
+Checking for original 32-dim config...
+✓ Found working 32-dim config: confs/ghop_quick_bottle_1.yaml
+
+Creating production config...
+  ✓ Copied base config
+
+Applying fixes...
+
+  Fix 1: Training duration
+    ✓ num_epochs: 1 → 100
+    ✓ max_steps: 20 → unlimited
+
+  Fix 2: Phase 5 timing
+    ✓ Phase timing already correct (100 >= 20)
+
+  Fix 3: Loss weights
+    ✓ Added loss weights section
+      w_rgb: 10.0 (CRITICAL)
+      w_mano_cano: 0.5 (prevent dominance)
+
+  Fix 4: Memory optimization (batch size)
+    Current batch_size: 2
+    ✓ batch_size: 2 → 1 (prevent OOM at epoch 22)
+      Note: Training ~20% slower but completes all 100 epochs
+
+✅ All fixes applied
+
+========================================================================
+VERIFICATION
+========================================================================
+
+1. Network architecture: ✅ 32-dim (WORKING)
+2. Loss weights: ✅ Present (w_rgb=10.0)
+3. Training epochs: ✅ 100
+4. Phase 5 timing: ✅ Valid (100 >= 20)
+5. YAML validity: ✅ No duplicates
+
+✅ ALL CHECKS PASSED
+
+========================================================================
+CONFIGURATION SUMMARY
+========================================================================
+
+Base config:   confs/ghop_quick_bottle_1.yaml
+Target config: confs/ghop_production_32dim_20251021_155917.yaml
+
+Architecture:  32-dim (TESTED & WORKING)
+Batch size:    1 (memory optimized)
+Epochs:        100
+Duration:      ~12 hours (with batch_size=1)
+
+Applied fixes:
+  1. Loss weights: w_rgb=10.0, w_mano_cano=0.5
+  2. Phase 5 timing: Fixed to avoid conflicts
+  3. Training duration: Extended to 100 epochs
+  4. Batch size: Reduced to 1 (prevents OOM at epoch 22)
+  5. pin_memory: Disabled (prevents 24GB DataLoader leak)
+
+Everything else: UNCHANGED from working quick test
+========================================================================
+
+========================================================================
+MEMORY OPTIMIZATION
+========================================================================
+
+Memory safety measures:
+  ✅ batch_size = 1 (prevents OOM at epoch 22)
+  ✅ pixel_per_batch = 1024 (reduced from default)
+  ✅ pin_memory = False (prevents 24GB DataLoader leak)
+
+Expected memory usage:
+  - Baseline: ~6-8 GB
+  - Phase 4/5: ~8-10 GB (vs 24 GB without fix)
+
+Trade-offs:
+  - Training speed: ~5-10% slower (acceptable)
+  - Memory safety: CRITICAL improvement
+========================================================================
+
+Starting training...
+  Config: confs/ghop_production_32dim_20251021_155917.yaml
+  Log: ../ghop_production_results/production_32dim_20251021_155917.log
+  Memory mode: pin_memory DISABLED
+
+⏰ Expected duration: ~12 hours for 100 epochs
+

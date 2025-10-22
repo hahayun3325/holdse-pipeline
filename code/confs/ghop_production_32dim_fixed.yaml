@@ -1,0 +1,22 @@
+# Copy everything from backup EXCEPT change these:
+
+# (Keep all existing 32-dim architecture)
+
+# ADD loss weights section:
+loss:
+  w_rgb: 10.0
+  w_mask: 5.0
+  w_mano_cano: 0.5
+  w_eikonal: 0.1
+  w_smooth: 0.01
+  w_semantic: 1.0
+  w_opacity_sparse: 0.1
+
+# FIX phase 5 timing:
+phase5:
+  # ... (existing phase5 config)
+  phase5_start_iter: 600  # Changed from 100
+
+# Increase epochs:
+training:
+  num_epochs: 100  # Changed from 20
