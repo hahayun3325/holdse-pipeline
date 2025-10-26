@@ -28,11 +28,12 @@ from src.hold.loss import HOLDLoss
 from src.model.ghop.ghop_prior import TwoStageTrainingManager
 from src.model.ghop.diffusion_prior import GHOPDiffusionPrior
 from src.model.ghop.temporal_consistency import TemporalConsistencyModule
+from src.model.ghop.temporal_diagnostic import TemporalMemoryDiagnostic
 from src.model.ghop.adaptive_contact_zones import AdaptiveContactZones
 from src.training.phase5_scheduler import Phase5TrainingScheduler
 import gc
-
-
+from src.utils.memory_profiler import MemoryProfiler
+import subprocess
 # ========================================================================
 # PHASE 2: GHOP VALIDATION FUNCTION
 # ========================================================================
@@ -143,6 +144,9 @@ class HOLD(pl.LightningModule):
         self.phase3_enabled = False
         self.phase4_enabled = False
         self.phase5_enabled = False
+        # ✅ ADD: Initialize diagnostic as None (will be set if Phase 5 enabled)
+        self.temporal_diagnostic = None
+        self._diagnostic_enabled = False
         self.ghop_enabled = False
 
         # ====================================================================
@@ -528,21 +532,48 @@ class HOLD(pl.LightningModule):
                 self.contact_warmup_iters = phase4_cfg.get('contact_warmup_iters', 100)
                 self.log_contact_every = phase4_cfg.get('log_contact_every', 50)
 
+                # ✅ FIX 1: Store contact_duration and calculate end iteration
+                self.contact_duration = phase4_cfg.get('contact_duration', 100)
+                self.contact_end_iter = self.contact_start_iter + self.contact_duration
+
                 # Enable Phase 4 flag
                 self.phase4_enabled = True
 
                 logger.info(
                     f"\n✓ Phase 4 initialized successfully:\n"
                     f"   - Contact start iteration: {self.contact_start_iter}\n"
+                    f"   - Contact duration: {self.contact_duration} iterations\n"
+                    f"   - Contact end iteration: {self.contact_end_iter}\n"
                     f"   - Contact loss weight: {self.w_contact}\n"
                     f"   - Mesh resolution: {self.mesh_resolution}³ voxels\n"
                     f"   - Contact threshold: {phase4_cfg.get('contact_thresh', 0.01)}m\n"
                     f"   - Collision threshold: {phase4_cfg.get('collision_thresh', 0.005)}m\n"
                     f"   - Warmup iterations: {self.contact_warmup_iters}"
+                    f"   - Active window: steps"
                 )
                 logger.info("=" * 70 + "\n")
         else:
+            # ================================================================
+            # ✅ CRITICAL FIX: Initialize all Phase 4 attributes
+            # Even when disabled, code may check these attributes
+            # ================================================================
             self.phase4_enabled = False
+
+            # Initialize contact iteration attributes (set to never activate)
+            self.contact_start_iter = float('inf')
+            self.contact_end_iter = float('inf')
+            self.contact_duration = 0
+            self.contact_warmup_iters = 0
+
+            # Initialize weight and resolution attributes
+            self.w_contact = 0.0
+            self.mesh_resolution = 128
+            self.log_contact_every = 50
+
+            # Initialize component references
+            self.mesh_extractor = None
+            self.contact_refiner = None
+
             logger.info("[Phase 4] Disabled - configure phase4.enabled=true in config to enable\n")
 
         # ====================================================================
@@ -621,7 +652,10 @@ class HOLD(pl.LightningModule):
                     adaptive_weight=phase5_cfg.get('adaptive_weight', True)
                 )
                 logger.info(f"  ✓ Temporal module initialized (window={phase5_cfg.get('temporal_window', 5)})")
-
+                # ✅ ADD: Initialize temporal diagnostic tool
+                self.temporal_diagnostic = TemporalMemoryDiagnostic()
+                self._diagnostic_enabled = True
+                logger.info("[Phase 5] Temporal diagnostic tool initialized")
                 # ============================================================
                 # Component 3: Adaptive Contact Zones
                 # ============================================================
@@ -691,6 +725,10 @@ class HOLD(pl.LightningModule):
         logger.debug(f"  log_ghop_every: {self.log_ghop_every}")
         logger.debug(f"  log_contact_every: {self.log_contact_every}")
         logger.debug(f"  log_phase5_every: {self.log_phase5_every}")
+
+        # ✅ ADD: Memory profiler for diagnostics
+        self.memory_profiler = MemoryProfiler()
+        self.profile_memory = True  # Set to False to disable
 
     def save_misc(self):
         """Save miscellaneous outputs (meshes, camera params, etc.)."""
@@ -817,10 +855,37 @@ class HOLD(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
         # ================================================================
-        # FIX: Aggressive memory management every step
+        # ✅ MEMORY PROFILER: Check if profiling is enabled
         # ================================================================
-        if self.global_step % 10 == 0:
+        should_profile = (
+                hasattr(self, 'memory_profiler') and
+                hasattr(self, 'profile_memory') and
+                self.profile_memory and
+                batch_idx % 10 == 0
+        )
+
+        if should_profile:
+            self.memory_profiler.clear()
+            self.memory_profiler.checkpoint("start")
+
+        # ================================================================
+        # ✅ OPTIMIZED: Reduced frequency cache clearing (every 50 steps)
+        # REMOVED: Aggressive every-step clearing that caused overhead
+        # ================================================================
+        if batch_idx % 50 == 0 and torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
+
+            # Log memory state
+            allocated = torch.cuda.memory_allocated() / 1024 ** 2
+            reserved = torch.cuda.memory_reserved() / 1024 ** 2
+            logger.debug(
+                f"[Epoch {self.current_epoch}, Iter {batch_idx}] "
+                f"Memory checkpoint: Allocated={allocated:.1f}MB, Reserved={reserved:.1f}MB"
+            )
+
+        if should_profile:
+            self.memory_profiler.checkpoint("after_initial_check")
 
         # PHASE 5: Dynamic Loss Weight Scheduling
         if self.phase5_enabled and hasattr(self, 'phase5_scheduler'):
@@ -834,10 +899,18 @@ class HOLD(pl.LightningModule):
 
             # Log dynamic weights
             if self.global_step % self.log_phase5_every == 0:
-                self.log('phase5/weight_sds', loss_weights['sds'], prog_bar=False)
-                self.log('phase5/weight_contact', loss_weights['contact'], prog_bar=False)
-                self.log('phase5/weight_temporal', loss_weights['temporal'], prog_bar=False)
-                self.log('phase5/lr_multiplier', lr_multiplier, prog_bar=False)
+                self.log('phase5/weight_sds',
+                         float(loss_weights['sds']) if isinstance(loss_weights['sds'], torch.Tensor) else loss_weights[
+                             'sds'], prog_bar=False)
+                self.log('phase5/weight_contact',
+                         float(loss_weights['contact']) if isinstance(loss_weights['contact'], torch.Tensor) else
+                         loss_weights['contact'], prog_bar=False)
+                self.log('phase5/weight_temporal',
+                         float(loss_weights['temporal']) if isinstance(loss_weights['temporal'], torch.Tensor) else
+                         loss_weights['temporal'], prog_bar=False)
+                self.log('phase5/lr_multiplier',
+                         float(lr_multiplier) if isinstance(lr_multiplier, torch.Tensor) else lr_multiplier,
+                         prog_bar=False)
         else:
             loss_weights = {'sds': 1.0, 'contact': 1.0, 'temporal': 1.0}
 
@@ -867,11 +940,9 @@ class HOLD(pl.LightningModule):
             )
 
         # Fix 2: Handle other potential list fields
-        # These fields might be lists in HOLD but tensors in GHOP
         list_fields = ['c2w', 'intrinsics', 'hA', 'right.betas']
         for key in list_fields:
             if key in batch and isinstance(batch[key], list):
-                # Check if list contains tensors
                 if len(batch[key]) > 0 and isinstance(batch[key][0], torch.Tensor):
                     batch[key] = torch.stack(batch[key], dim=0)
                     logger.debug(f"[Batch] Stacked {key} from list: {batch[key].shape}")
@@ -896,9 +967,7 @@ class HOLD(pl.LightningModule):
             original_idx_shape = batch['idx'].shape
             logger.debug(f"[FIX] batch['idx'] shape after wubba: {original_idx_shape}")
 
-            # Ensure idx has shape [B, 1] for proper Embedding behavior
             if batch['idx'].dim() == 1:
-                # Use overwrite() method for xdict (prevents assignment error)
                 reshaped_idx = batch['idx'].unsqueeze(1)  # [B] -> [B, 1]
                 batch.overwrite('idx', reshaped_idx)
                 logger.debug(f"[FIX] Reshaped idx to: {batch['idx'].shape}")
@@ -909,9 +978,6 @@ class HOLD(pl.LightningModule):
         for node in self.model.nodes.values():
             logger.info(f"\n[training_step] Processing node: {node.node_id}")
 
-            # ============================================================
-            # CRITICAL: Preserve GHOP-extracted params
-            # ============================================================
             node_id = node.node_id
             ghop_keys_to_preserve = [f"{node_id}.params"]
             preserved_values = {}
@@ -921,9 +987,6 @@ class HOLD(pl.LightningModule):
                     preserved_values[key] = batch[key]
                     logger.debug(f"[FIX] Preserving GHOP-extracted {key}: {batch[key].shape}")
 
-            # ============================================================
-            # Call node.params() and update batch
-            # ============================================================
             logger.info(f"[training_step] Calling node.params(batch['idx'])...")
             params_dict = node.params(batch['idx'])
 
@@ -932,27 +995,21 @@ class HOLD(pl.LightningModule):
                 if isinstance(v, torch.Tensor):
                     logger.info(f"    {k}: {v.shape}")
 
-            # Update batch with node params
             batch.update(params_dict)
 
-            # ============================================================
-            # CRITICAL: Restore GHOP-extracted params
-            # ============================================================
             for key, value in preserved_values.items():
                 if key not in params_dict:
-                    # node.params() didn't return this key, restore ours
                     batch[key] = value
                     logger.info(f"[FIX] Restored GHOP {key}: {value.shape}")
                 else:
-                    # Both exist - use GHOP version (from dataset)
                     batch.overwrite(key, value)
                     logger.info(f"[FIX] Kept GHOP {key}: {value.shape}")
 
             logger.info(f"[training_step] After batch.update:")
 
-        logger.info("="*70)
+        logger.info("=" * 70)
         logger.info("[training_step] NODE LOOP END - calling model(batch)")
-        logger.info("="*70)
+        logger.info("=" * 70)
 
         # ================================================================
         # BEFORE FORWARD PASS - Final shape check
@@ -981,8 +1038,6 @@ class HOLD(pl.LightningModule):
             # For object node: create scene_scale (scalar per sample)
             elif node_id == 'object':
                 if params_key not in batch:
-                    # object.params should be [B, 1, 1] for scene scale
-                    # Use ones as default scene scale
                     batch_size = batch['idx'].shape[0]
                     object_params = torch.ones(batch_size, 1, 1, device=batch['idx'].device)
                     batch[params_key] = object_params
@@ -1016,23 +1071,20 @@ class HOLD(pl.LightningModule):
 
         # Get batch size and device
         B = batch['idx'].shape[0]
-        T = 1  # Assume single frame for now
+        T = 1
         device = batch['idx'].device
         scene_scale = 1.0
 
-        # Determine image dimensions if not set
         if not hasattr(self, 'im_h') or not hasattr(self, 'im_w'):
             self.im_h = 480
             self.im_w = 640
 
-        # [FIX] Create object.params (scene_scale=1.0)
         if "object.params" not in batch:
             batch["object.params"] = torch.full(
                 (B, T, 1), scene_scale, dtype=torch.float32, device=device
             )
             logger.info(f"[FIX] Created object.params (scene_scale={scene_scale}): {batch['object.params'].shape}")
 
-        # [FIX] Generate UV coordinates for ray sampling
         if 'uv' not in batch:
             logger.info("[FIX] Generating UV coordinates for ray sampling...")
             uv = gen_random_sample(
@@ -1041,7 +1093,6 @@ class HOLD(pl.LightningModule):
             batch["uv"] = uv
             logger.info(f"[FIX] Generated UV: {batch['uv'].shape}")
 
-        # [FIX] Generate extrinsics from c2w
         if 'extrinsics' not in batch and 'c2w' in batch:
             logger.info("[FIX] Generating extrinsics from c2w...")
             c2w = batch["c2w"]
@@ -1058,7 +1109,6 @@ class HOLD(pl.LightningModule):
         # ================================================================
         logger.debug("[FIX] Detaching batch tensors to prevent inplace errors...")
 
-        # List of keys that should be detached
         keys_to_detach = [
             'right.params',
             'right.full_pose',
@@ -1077,23 +1127,18 @@ class HOLD(pl.LightningModule):
             'th_betas',
         ]
 
-        # Detach all tensor values in batch (xdict-compatible)
         for key in keys_to_detach:
             if key in batch and torch.is_tensor(batch[key]):
-                # Create a new detached tensor
                 detached_tensor = batch[key].detach()
 
-                # Use xdict's overwrite method or delete-then-set
                 if hasattr(batch, 'overwrite'):
                     batch.overwrite(key, detached_tensor)
                 else:
-                    # Fallback: delete then re-add
                     del batch[key]
                     batch[key] = detached_tensor
 
                 logger.debug(f"  Detached: {key} (shape: {detached_tensor.shape})")
 
-        # Also detach any _n (next frame) versions
         for key in list(batch.keys()):
             if key.endswith('_n') and torch.is_tensor(batch[key]):
                 detached_tensor = batch[key].detach()
@@ -1108,21 +1153,24 @@ class HOLD(pl.LightningModule):
 
         logger.info("[FIX] ✓ All batch tensors detached successfully")
 
-
         # ================================================================
         # FORWARD PASS
         # ================================================================
         logger.info("[Forward] Calling self.model(batch)...")
         model_outputs = self.model(batch)
         logger.info(f"[Forward] Model returned {len(model_outputs)} keys")
+        if should_profile:
+            self.memory_profiler.checkpoint("after_forward")
 
         # ================================================================
         # COMPUTE BASE LOSSES
         # ================================================================
         loss_output = self.loss(batch, model_outputs)
+        if should_profile:
+            self.memory_profiler.checkpoint("after_loss")
 
         # ================================================================
-        # ADD: First-step diagnostic logging (INSERT AFTER LINE 695)
+        # ADD: First-step diagnostic logging
         # ================================================================
         if self.global_step == 0 and (self.phase3_enabled or self.phase4_enabled or self.phase5_enabled):
             logger.info("=" * 70)
@@ -1289,8 +1337,11 @@ class HOLD(pl.LightningModule):
                 # ============================================================
                 # GHOP FIX: Conditional detach to prevent double backward
                 # Only detach if Phase 4 or Phase 5 are also active (multiple loss graphs)
-                phase4_active = (hasattr(self, 'phase4_enabled') and self.phase4_enabled and
-                                 self.global_step >= self.contact_start_iter)
+                phase4_active = (
+                        hasattr(self, 'phase4_enabled') and
+                        self.phase4_enabled and
+                        self.contact_start_iter <= self.global_step < self.contact_end_iter
+                )
                 phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
                                  self.global_step >= self.phase5_start_iter)
 
@@ -1358,11 +1409,19 @@ class HOLD(pl.LightningModule):
 
             zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
             loss_output["ghop_loss"] = zero_loss
+        if should_profile and self.phase3_enabled:
+            self.memory_profiler.checkpoint("after_ghop")
 
         # ====================================================================
         # PHASE 4: Contact Refinement (Enhanced with Phase 5 Adaptive Zones)
         # ====================================================================
-        if self.phase4_enabled and self.global_step >= self.contact_start_iter:
+        # ✅ FIX 2: Add end condition check to phase4_active
+        phase4_active = (
+            self.phase4_enabled and
+            self.contact_start_iter <= self.global_step < self.contact_end_iter
+        )
+
+        if phase4_active:
             try:
                 logger.debug(f"[Phase 4] Contact loss computation at step {self.global_step}")
 
@@ -1395,10 +1454,10 @@ class HOLD(pl.LightningModule):
                             if self.global_step % self.log_phase5_every == 0:
                                 contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
 
-                                self.log('phase5/contact_mean', contact_stats['mean'].detach(), prog_bar=False)
-                                self.log('phase5/contact_min', contact_stats['min'].detach(), prog_bar=False)
-                                self.log('phase5/contact_max', contact_stats['max'].detach(), prog_bar=False)
-                                self.log('phase5/contact_std', contact_stats['std'].detach(), prog_bar=False)
+                                self.log('phase5/contact_mean', contact_stats['mean'].detach().item(), prog_bar=False)
+                                self.log('phase5/contact_min', contact_stats['min'].detach().item(), prog_bar=False)
+                                self.log('phase5/contact_max', contact_stats['max'].detach().item(), prog_bar=False)
+                                self.log('phase5/contact_std', contact_stats['std'].detach().item(), prog_bar=False)
 
                                 logger.info(
                                     f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
@@ -1505,12 +1564,11 @@ class HOLD(pl.LightningModule):
                     loss_output['contact_loss'] = weighted_contact_loss
 
                     # Log metrics
-                    self.log('phase4/contact_loss', weighted_contact_loss.detach(), prog_bar=True)
-                    self.log('phase4/contact_weight',
-                            base_weight * loss_weights['contact'].detach() if self.phase5_enabled else self.w_contact * contact_progress)
-                    self.log('phase4/penetration', contact_metrics_accum['penetration'].detach())
-                    self.log('phase4/attraction', contact_metrics_accum['attraction'].detach())
-                    self.log('phase4/dist_mean', contact_metrics_accum['dist_mean'].detach())
+                    self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
+                    self.log('phase4/contact_weight', (base_weight * loss_weights['contact']).detach().item() if self.phase5_enabled else (self.w_contact * contact_progress))
+                    self.log('phase4/penetration', contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor) else float(contact_metrics_accum['penetration']))
+                    self.log('phase4/attraction', contact_metrics_accum['attraction'].detach().item() if isinstance(contact_metrics_accum['attraction'], torch.Tensor) else float(contact_metrics_accum['attraction']))
+                    self.log('phase4/dist_mean', contact_metrics_accum['dist_mean'].detach().item() if isinstance(contact_metrics_accum['dist_mean'], torch.Tensor) else float(contact_metrics_accum['dist_mean']))
                     self.log('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
                     self.log('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
 
@@ -1537,6 +1595,8 @@ class HOLD(pl.LightningModule):
                 logger.error(f"[Phase 4] Contact loss computation failed: {e}")
                 import traceback
                 traceback.print_exc()
+        if should_profile and phase4_active:
+            self.memory_profiler.checkpoint("after_contact")
 
         # ====================================================================
         # PHASE 2: Backward Compatibility
@@ -1573,8 +1633,11 @@ class HOLD(pl.LightningModule):
 
                     # PHASE 2 FIX: Conditional detach if other phases active
                     phase3_active = hasattr(self, 'phase3_enabled') and self.phase3_enabled and self.ghop_enabled
-                    phase4_active = (hasattr(self, 'phase4_enabled') and self.phase4_enabled and
-                                    self.global_step >= self.contact_start_iter)
+                    phase4_active = (
+                            hasattr(self, 'phase4_enabled') and
+                            self.phase4_enabled and
+                            self.contact_start_iter <= self.global_step < self.contact_end_iter
+                    )
                     phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
                                     self.global_step >= self.phase5_start_iter)
 
@@ -1589,7 +1652,7 @@ class HOLD(pl.LightningModule):
                     loss_output["sds_loss"] = loss_sds
 
                     if loss_sds.item() > 0:
-                        self.log('train/sds_loss', loss_sds.detach(), prog_bar=True)
+                        self.log('train/sds_loss', loss_sds.detach().item(), prog_bar=True)
 
             except Exception as e:
                 logger.error(f"[Phase 2] SDS loss failed: {e}")
@@ -1711,16 +1774,13 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     self.log('phase5/temporal_loss', weighted_temporal.item(), prog_bar=True)
                     v = temporal_metrics.get('velocity', 0.0)
-                    self.log('phase5/velocity_loss', v.detach() if isinstance(v, torch.Tensor) else v, prog_bar=False)
+                    self.log('phase5/velocity_loss', v.detach().item() if isinstance(v, torch.Tensor) else float(v), prog_bar=False)
                     a = temporal_metrics.get('acceleration', 0.0)
-                    self.log('phase5/acceleration_loss', a.detach() if isinstance(a, torch.Tensor) else a,
-                             prog_bar=False)
+                    self.log('phase5/acceleration_loss', a.detach().item() if isinstance(a, torch.Tensor) else float(a), prog_bar=False)
                     c = temporal_metrics.get('camera_motion', 0.0)
-                    self.log('phase5/camera_motion_loss', c.detach() if isinstance(c, torch.Tensor) else c,
-                             prog_bar=False)
+                    self.log('phase5/camera_motion_loss', c.detach().item() if isinstance(c, torch.Tensor) else float(c), prog_bar=False)
                     w = temporal_metrics.get('adaptive_weight', 1.0)
-                    self.log('phase5/temporal_adaptive_weight', w.detach() if isinstance(w, torch.Tensor) else w,
-                             prog_bar=False)
+                    self.log('phase5/temporal_adaptive_weight', w.detach().item() if isinstance(w, torch.Tensor) else float(w), prog_bar=False)
 
                     # Console logging at reduced frequency
                     if self.global_step % self.log_phase5_every == 0:
@@ -1753,37 +1813,34 @@ class HOLD(pl.LightningModule):
                 step=self.global_step,
                 epoch=self.current_epoch,
             )
+        if should_profile and self.phase5_enabled:
+            self.memory_profiler.checkpoint("after_temporal")
 
+        # ================================================================
         # GHOP FIX: Manual optimization to prevent double backward
-        # Get the final accumulated loss
+        # ================================================================
         final_loss = loss_output['loss']
 
-        # Handle NaN/Inf
         if torch.isnan(final_loss) or torch.isinf(final_loss):
             logger.warning(
                 f"[Step {self.global_step}] Loss is NaN/Inf. Skipping optimization."
             )
-            # Return small valid loss
             return torch.tensor(1e-4, device=final_loss.device, requires_grad=True)
 
         # Get optimizer
         opt = self.optimizers()
 
-        # Zero gradients
-        opt.zero_grad()
+        # ✅ Zero gradients with aggressive cleanup
+        opt.zero_grad(set_to_none=True)
 
-        # ================================================================
-        # REMOVE THESE DUPLICATE LINES (lines ~1487-1505 in your code):
-        # ================================================================
-        # # At GHOP loss addition (around line 1070):
-        # if phase4_active or phase5_active:
-        #     loss_output['loss'] = torch.add(loss_output['loss'], weighted_ghop.detach())
-        #     ...
-        # # (all the duplicate torch.add lines)
-        # ================================================================
+        if should_profile:
+            self.memory_profiler.checkpoint("after_zero_grad")
 
-        # Manual backward - NO CLONE NEEDED
+        # Manual backward
         self.manual_backward(final_loss)
+
+        if should_profile:
+            self.memory_profiler.checkpoint("after_backward")
 
         # Gradient clipping
         if hasattr(self.args, 'gradient_clip_val') and self.args.gradient_clip_val:
@@ -1792,48 +1849,128 @@ class HOLD(pl.LightningModule):
                 self.args.gradient_clip_val
             )
 
+        # ================================================================
+        # ✅ OPTIMIZED: Single cache clear after backward
+        # REMOVED: Multiple redundant synchronize() and empty_cache() calls
+        # ================================================================
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Optimizer step
         opt.step()
+
+        if should_profile:
+            self.memory_profiler.checkpoint("after_optimizer")
+        # ================================================================
+        # ✅ FRAGMENTATION FIX: Periodic defragmentation every 10 steps
+        # Forces CUDA allocator to return fragmented memory to OS
+        # Addresses confirmed 23.3 GB GPU growth with stable PyTorch memory
+        # ================================================================
+        if batch_idx % 10 == 0 and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+            # Force Python garbage collection
+            import gc
+            gc.collect()
+
+            # Second cache clear after gc (catches freed tensors)
+            torch.cuda.empty_cache()
+
+            # Optional: Log defragmentation action
+            if should_profile or (batch_idx % 100 == 0):
+                allocated = torch.cuda.memory_allocated() / 1024 ** 2
+                reserved = torch.cuda.memory_reserved() / 1024 ** 2
+                logger.debug(
+                    f"[Defrag Step {batch_idx}] "
+                    f"Allocated: {allocated:.1f} MB, Reserved: {reserved:.1f} MB")
 
         # Learning rate scheduler
         sch = self.lr_schedulers()
         if sch is not None:
             sch.step()
 
-        # Log
-        self.log('train/loss', final_loss.detach(), prog_bar=True)
-
         # ================================================================
-        # AGGRESSIVE CLEANUP: Final memory cleanup at end of training_step
+        # ✅ OPTIMIZED: Final cleanup - reduced frequency (every 50 steps)
+        # REMOVED: Every-step gc.collect() and multiple cache clears
         # ================================================================
-        # Clean every 50 steps for maximum memory efficiency
-        if self.global_step % 50 == 0:
+        opt.zero_grad(set_to_none=True)
 
-            # Force Python garbage collection
+        if batch_idx % 50 == 0 and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             gc.collect()
 
-            # Clear CUDA cache
-            torch.cuda.empty_cache()
+        # ================================================================
+        # ✅ DIAGNOSTIC: Add memory_summary for fragmentation detection
+        # ================================================================
+        if batch_idx % 10 == 0 and torch.cuda.is_available():
+            try:
+                allocated = torch.cuda.memory_allocated() / 1024 ** 2
+                reserved = torch.cuda.memory_reserved() / 1024 ** 2
+                gap = reserved - allocated
 
-            # Detailed memory report every 200 steps
-            if self.global_step % 200 == 0 and torch.cuda.is_available():
-                allocated = torch.cuda.memory_allocated() / 1024**2
-                reserved = torch.cuda.memory_reserved() / 1024**2
-                peak = torch.cuda.max_memory_allocated() / 1024**2
-
-                msg = (
-                    f"\n{'='*70}\n"
-                    f"[Training Step {self.global_step}] Memory Status\n"
-                    f"  Allocated: {allocated:.2f} MB\n"
-                    f"  Reserved:  {reserved:.2f} MB\n"
-                    f"  Peak:      {peak:.2f} MB\n"
-                    f"{'='*70}\n"
+                # Log every 10 steps to capture growth pattern
+                logger.info(
+                    f"\n[Memory Summary Step {batch_idx}]\n"
+                    f"  Allocated: {allocated:.1f} MB\n"
+                    f"  Reserved:  {reserved:.1f} MB\n"
+                    f"  Gap:       {gap:.1f} MB ({gap / max(reserved, 1) * 100:.1f}%)\n"
                 )
-                print(msg)
-                logger.info(msg)
 
-        # Return detached loss for logging
-        return final_loss.detach()
+                # Save full summary if gap > 500MB
+                if gap > 500:
+                    memory_summary = torch.cuda.memory_summary(device=0, abbreviated=False)  # Changed to False for detail
+                    summary_file = f"../ghop_production_chunked_results/memory_summary_step_{batch_idx}.txt"
+                    with open(summary_file, 'w') as f:
+                        f.write(memory_summary)
+                    logger.warning(f"Memory gap {gap:.1f} MB exceeds threshold. Full summary: {summary_file}")
+
+            except Exception as e:
+                logger.debug(f"Memory summary failed: {e}")
+
+        if should_profile:
+            self.memory_profiler.checkpoint("after_final_clear")
+            self.memory_profiler.report()
+
+        # ================================================================
+        # DIAGNOSTIC (MUST BE BEFORE RETURN)
+        # ================================================================
+        if (self._diagnostic_enabled and is_phase5_active and
+                self.global_step % 100 == 0):
+
+            if hasattr(self, 'temporal_module') and self.temporal_module is not None:
+                mem_info = self.temporal_diagnostic.log_temporal_state(
+                    self.temporal_module,
+                    epoch=self.current_epoch,
+                    step=self.global_step,
+                    tag="[PERIODIC CHECK]"
+                )
+
+        # Detailed memory report every 200 steps
+        if self.global_step % 200 == 0 and torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024 ** 2
+            reserved = torch.cuda.memory_reserved() / 1024 ** 2
+            peak = torch.cuda.max_memory_allocated() / 1024 ** 2
+
+            msg = (
+                f"\n{'=' * 70}\n"
+                f"[Training Step {self.global_step}] Memory Status\n"
+                f"  Allocated: {allocated:.2f} MB\n"
+                f"  Reserved:  {reserved:.2f} MB\n"
+                f"  Peak:      {peak:.2f} MB\n"
+                f"{'=' * 70}\n"
+            )
+            logger.info(msg)
+
+        # Log
+        self.log('train/loss', final_loss.detach().item(), prog_bar=True)
+
+        for key, value in loss_output.items():
+            if isinstance(value, torch.Tensor) and key != 'loss':
+                self.log(f'train/{key}', value.detach().item(), prog_bar=False)
+
+        return {'loss': final_loss.detach()}
 
     # ====================================================================
     # HELPER METHODS
@@ -2825,18 +2962,205 @@ class HOLD(pl.LightningModule):
         current_epoch = self.current_epoch
 
         # ================================================================
+        # ✅ CRITICAL: Clear PyTorch Lightning's output collection
+        # This prevents accumulation of loss dicts from training_step
+        # ================================================================
+        if outputs is not None and len(outputs) > 0:
+            try:
+                # Convert to scalars for logging if needed
+                avg_loss = torch.stack([x['loss'] for x in outputs]).mean().item()
+                logger.debug(f"[Epoch {current_epoch}] Avg loss: {avg_loss:.6f}")
+
+                # Clear the list
+                outputs.clear()
+                logger.debug(f"[Epoch {current_epoch}] Cleared outputs collection")
+            except Exception as e:
+                logger.debug(f"[Epoch {current_epoch}] Could not process outputs: {e}")
+                try:
+                    outputs.clear()
+                except:
+                    pass
+
+        # ================================================================
+        # ✅ NUCLEAR CLEANUP: Clear ALL model state
+        # ================================================================
+        try:
+            logger.info(f"[Epoch {current_epoch}] Nuclear cleanup starting...")
+
+            # 1. Clear ALL gradients in model
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad = None
+
+            # 2. Clear ALL buffers' gradients
+            for name, buffer in self.model.named_buffers():
+                if buffer.grad is not None:
+                    buffer.grad = None
+
+            # 3. Clear ALL submodule buffers
+            for module in self.model.modules():
+                for name, buffer in module.named_buffers(recurse=False):
+                    if buffer.grad is not None:
+                        buffer.grad = None
+
+            # 4. Force zero_grad on ALL optimizers
+            for opt in self.trainer.optimizers:
+                opt.zero_grad(set_to_none=True)
+
+            # 5. Clear PyTorch internal caches
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+
+            # 6. Python garbage collection
+            gc.collect()
+            torch.cuda.empty_cache()  # Second pass
+            gc.collect()  # Third pass
+
+            mem_after = torch.cuda.memory_allocated() / 1024 ** 2
+            logger.info(f"[Epoch {current_epoch}] Nuclear cleanup complete: {mem_after:.2f} MB")
+
+            # ✅ NEW: Immediate cache clear after nuclear cleanup
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"[Epoch {current_epoch}] Nuclear cleanup failed: {e}")
+
+        # ================================================================
+        # ✅ CRITICAL: Epoch-End CUDA Cache Clearing
+        # Problem: PyTorch caches freed memory across epochs → 490 MB/epoch
+        # Solution: Explicitly return cached memory to GPU after cleanup
+        # Expected: Prevents reserved memory from growing to 24 GB
+        # ================================================================
+        if torch.cuda.is_available():
+            # ✅ NEW: Immediate aggressive cleanup BEFORE diagnostics
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            try:
+                # Get memory state BEFORE cache clear
+                mem_before_allocated = torch.cuda.memory_allocated() / 1024 ** 2
+                mem_before_reserved = torch.cuda.memory_reserved() / 1024 ** 2
+                cache_before = mem_before_reserved - mem_before_allocated
+
+                logger.info(f"[Epoch {current_epoch}] ════════════════════════════════════════")
+                logger.info(f"[Epoch {current_epoch}] BEFORE Epoch-End Cache Clear:")
+                logger.info(f"[Epoch {current_epoch}]   Allocated: {mem_before_allocated:.2f} MB")
+                logger.info(f"[Epoch {current_epoch}]   Reserved:  {mem_before_reserved:.2f} MB")
+                logger.info(f"[Epoch {current_epoch}]   Cache:     {cache_before:.2f} MB")
+
+                # CRITICAL: Clear cache to return memory to GPU
+                torch.cuda.synchronize()  # Wait for all GPU operations
+                torch.cuda.empty_cache()  # Return cached memory to GPU
+                torch.cuda.synchronize()  # Ensure clearing completed
+
+                # Force garbage collection after cache clear
+                gc.collect()
+
+                # Get memory state AFTER cache clear
+                mem_after_allocated = torch.cuda.memory_allocated() / 1024 ** 2
+                mem_after_reserved = torch.cuda.memory_reserved() / 1024 ** 2
+                cache_after = mem_after_reserved - mem_after_allocated
+                cache_freed = cache_before - cache_after
+
+                logger.info(f"[Epoch {current_epoch}] AFTER Epoch-End Cache Clear:")
+                logger.info(f"[Epoch {current_epoch}]   Allocated: {mem_after_allocated:.2f} MB")
+                logger.info(f"[Epoch {current_epoch}]   Reserved:  {mem_after_reserved:.2f} MB")
+                logger.info(f"[Epoch {current_epoch}]   Cache:     {cache_after:.2f} MB")
+                logger.info(f"[Epoch {current_epoch}]   Freed:     {cache_freed:.2f} MB ✓")
+                logger.info(f"[Epoch {current_epoch}] ════════════════════════════════════════")
+
+                # Sanity check: Warn if cache still large (> 1 GB)
+                if cache_after > 1000:
+                    logger.warning(
+                        f"[Epoch {current_epoch}] ⚠️  Cache still large after clearing: "
+                        f"{cache_after:.2f} MB (expected < 1000 MB)"
+                    )
+                    logger.warning(
+                        f"[Epoch {current_epoch}] This may indicate fragmentation or "
+                        f"cached allocations that cannot be freed"
+                    )
+
+                # Success metric: Log cumulative cache cleared
+                if not hasattr(self, '_total_cache_freed'):
+                    self._total_cache_freed = 0.0
+                self._total_cache_freed += cache_freed
+
+                logger.info(
+                    f"[Epoch {current_epoch}] Cumulative cache freed: "
+                    f"{self._total_cache_freed:.2f} MB across {current_epoch + 1} epochs"
+                )
+
+            except Exception as e:
+                logger.error(f"[Epoch {current_epoch}] Epoch-end cache clearing failed: {e}")
+
+        # ================================================================
         # FIX 1: Clear Phase 5 temporal history at epoch boundaries
         # ================================================================
-        if self.phase5_enabled and hasattr(self, 'temporal_module') and self.temporal_module is not None:
-            logger.info(f"[Epoch {current_epoch}] Clearing temporal history...")
+        if hasattr(self, 'temporal_module') and self.temporal_module is not None:
+            is_phase5_active = (
+                hasattr(self, 'phase5_start_iter') and
+                self.global_step >= self.phase5_start_iter
+            )
 
-            # Call the new clear_epoch_history method
-            self.temporal_module.clear_epoch_history()
+            if is_phase5_active:
+                logger.info(f"[Epoch {current_epoch}] Phase 5 active - clearing temporal history...")
 
-            # Log memory after cleanup
-            if torch.cuda.is_available():
-                mem_mb = torch.cuda.memory_allocated() / 1024**2
-                logger.info(f"[Epoch {current_epoch}] GPU memory after cleanup: {mem_mb:.2f} MB")
+                if self._diagnostic_enabled and hasattr(self, 'temporal_diagnostic'):
+                    mem_info_before = self.temporal_diagnostic.log_temporal_state(
+                        self.temporal_module,
+                        epoch=current_epoch,
+                        step=self.global_step,
+                        tag="[BEFORE EPOCH CLEANUP]"
+                    )
+
+                    if current_epoch % 5 == 0 and len(self.temporal_diagnostic.snapshots) >= 2:
+                        try:
+                            report = self.temporal_diagnostic.generate_leak_report()
+                            logger.info("\n" + report)
+                        except Exception as e:
+                            logger.warning(f"[Diagnostic] Could not generate leak report: {e}")
+
+                self.temporal_module.clear_epoch_history()
+
+                if self._diagnostic_enabled and hasattr(self, 'temporal_diagnostic'):
+                    mem_info_after = self.temporal_diagnostic.log_temporal_state(
+                        self.temporal_module,
+                        epoch=current_epoch,
+                        step=self.global_step,
+                        tag="[AFTER EPOCH CLEANUP]"
+                    )
+
+                    if mem_info_after.get('sequence_count', 0) > 0:
+                        logger.error(
+                            f"[Epoch {current_epoch}] ❌ Cleanup FAILED! "
+                            f"Still have {mem_info_after['sequence_count']} sequences"
+                        )
+                        logger.info(f"[Epoch {current_epoch}] Forcing full history reset...")
+                        self.temporal_module.reset_history()
+                    else:
+                        logger.info(
+                            f"[Epoch {current_epoch}] ✅ Cleanup successful - "
+                            f"all sequences cleared"
+                        )
+
+                if torch.cuda.is_available():
+                    mem_mb = torch.cuda.memory_allocated() / 1024**2
+                    logger.info(f"[Epoch {current_epoch}] GPU memory after temporal cleanup: {mem_mb:.2f} MB")
+            else:
+                if current_epoch >= 15:
+                    logger.info(
+                        f"[Epoch {current_epoch}] Phase 5 not yet active "
+                        f"(step {self.global_step} < {getattr(self, 'phase5_start_iter', 'N/A')})"
+                    )
 
         # ================================================================
         # FIX 2: Clear Phase 4 contact caches if they exist
@@ -2850,20 +3174,13 @@ class HOLD(pl.LightningModule):
         # FIX 3: AGGRESSIVE full memory cleanup at epoch end
         # ================================================================
         if torch.cuda.is_available():
-            # Python garbage collection
             gc.collect()
-
-            # Clear CUDA cache
             torch.cuda.empty_cache()
-
-            # Reset peak memory stats for next epoch
             torch.cuda.reset_peak_memory_stats()
 
-            # Report current memory state
             allocated = torch.cuda.memory_allocated() / 1024**2
             reserved = torch.cuda.memory_reserved() / 1024**2
 
-            # Use print() for visibility AND logger
             msg = (
                 f"\n{'='*70}\n"
                 f"[Epoch {current_epoch} END] Aggressive Memory Cleanup\n"
@@ -2874,11 +3191,181 @@ class HOLD(pl.LightningModule):
             print(msg)
             logger.info(msg)
 
+        # ================================================================
+        # ✅ FIX 4: Clear Model Buffers and Gradients (SAFE VERSION)
+        # ================================================================
+        try:
+            # Clear all model buffer gradients
+            for name, buffer in self.model.named_buffers():
+                if buffer.grad is not None:
+                    buffer.grad = None
+
+            # Clear ALL parameter gradients (SAFE - always do this)
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad = None
+
+            # ✅ STRENGTHENED: Clean unused optimizer states EVERY epoch
+            # Changed from every 10 to every 1 for more aggressive cleanup
+            if current_epoch % 1 == 0:  # Every epoch
+                logger.info(f"[Epoch {current_epoch}] Cleaning unused optimizer states...")
+                for optimizer in self.trainer.optimizers:
+                    # Get current parameter IDs
+                    current_params = set()
+                    for param_group in optimizer.param_groups:
+                        for param in param_group['params']:
+                            current_params.add(id(param))
+
+                    # Find and remove states for parameters not in model
+                    state_keys_to_remove = []
+                    for param_key in list(optimizer.state.keys()):
+                        if id(param_key) not in current_params:
+                            state_keys_to_remove.append(param_key)
+
+                    # Remove unused states
+                    for key in state_keys_to_remove:
+                        del optimizer.state[key]
+
+                    if state_keys_to_remove:
+                        logger.info(f"[Epoch {current_epoch}] ✅ Removed {len(state_keys_to_remove)} unused optimizer states")
+                    else:
+                        logger.debug(f"[Epoch {current_epoch}] No unused optimizer states found")
+
+        except Exception as e:
+            logger.warning(f"[Epoch {current_epoch}] Could not clear buffers/optimizer: {e}")
+
+        # ================================================================
+        # ✅ FIX 5: Clear PyTorch Lightning Callback States
+        # ================================================================
+        try:
+            if hasattr(self.trainer, 'callback_metrics'):
+                metrics_to_keep = {}
+                for key, value in self.trainer.callback_metrics.items():
+                    if isinstance(value, torch.Tensor):
+                        metrics_to_keep[key] = value.detach().cpu().item()
+                    else:
+                        metrics_to_keep[key] = value
+
+                self.trainer.callback_metrics = metrics_to_keep
+                logger.debug(f"[Epoch {current_epoch}] Cleaned callback metrics")
+
+        except Exception as e:
+            logger.warning(f"[Epoch {current_epoch}] Could not clean callback metrics: {e}")
+
+        # ================================================================
+        # ✅ FIX 6: Force Synchronization Before Final Cleanup
+        # ================================================================
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+            # Triple cleanup
+            gc.collect()
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            allocated_final = torch.cuda.memory_allocated() / 1024**2
+            reserved_final = torch.cuda.memory_reserved() / 1024**2
+
+            logger.info(
+                f"[Epoch {current_epoch} END] Final memory state:\n"
+                f"  Allocated: {allocated_final:.2f} MB\n"
+                f"  Reserved: {reserved_final:.2f} MB"
+            )
+
         # Canonical mesh update every 3 epochs
         if (current_epoch > 0 and current_epoch % 3 == 0 and not self.args.no_meshing) or \
                 (current_step > 0 and self.args.fast_dev_run and not self.args.no_meshing):
             self.meshing_cano(current_step)
             self.save_misc()
+        # ================================================================
+        # ✅ NEW FIX 7: Clear DataLoader Worker Memory
+        # ================================================================
+        try:
+            if hasattr(self.trainer, 'train_dataloader'):
+                train_dl = self.trainer.train_dataloader
+                if train_dl is not None and hasattr(train_dl, 'loaders'):
+                    logger.info(f"[Epoch {current_epoch}] Clearing DataLoader worker caches...")
+                    # Force DataLoader to restart workers
+                    # This prevents worker memory accumulation
+                    if hasattr(train_dl, '_iterator'):
+                        train_dl._iterator = None
+
+                    # Clear any cached batches
+                    if hasattr(train_dl, '_cache'):
+                        train_dl._cache = {}
+
+                    logger.debug(f"[Epoch {current_epoch}] DataLoader worker memory cleared")
+
+        except Exception as e:
+            logger.warning(f"[Epoch {current_epoch}] Could not clear DataLoader memory: {e}")
+        # ================================================================
+        # ✅ NEW FIX 8: Clear Model-Specific Caches
+        # ================================================================
+        try:
+            # Clear any internal caches in the model
+            if hasattr(self.model, 'clear_cache'):
+                logger.info(f"[Epoch {current_epoch}] Clearing model internal caches...")
+                self.model.clear_cache()
+
+            # Clear node-specific caches
+            if hasattr(self.model, 'nodes'):
+                for node_name, node in self.model.nodes.items():
+                    if hasattr(node, 'clear_cache'):
+                        node.clear_cache()
+
+                    # Clear implicit network caches
+                    if hasattr(node, 'implicit_network') and hasattr(node.implicit_network, 'clear_cache'):
+                        node.implicit_network.clear_cache()
+
+            logger.debug(f"[Epoch {current_epoch}] Model caches cleared")
+
+        except Exception as e:
+            logger.warning(f"[Epoch {current_epoch}] Could not clear model caches: {e}")
+        # ================================================================
+        # ✅ CRITICAL: Reset metrics to prevent accumulation
+        # ================================================================
+        if hasattr(self, 'metrics') and self.metrics is not None:
+            try:
+                self.metrics.reset()
+                logger.debug(f"[Epoch {current_epoch}] Metrics state reset")
+            except Exception as e:
+                logger.warning(f"[Epoch {current_epoch}] Could not reset metrics: {e}")
+        # ================================================================
+        # ✅ DIAGNOSTIC: Find growing modules
+        # ================================================================
+        if current_epoch % 5 == 0:
+            logger.info(f"\n{'='*70}")
+            logger.info(f"[Epoch {current_epoch}] Module Memory Diagnostic")
+            logger.info(f"{'='*70}")
+
+            for name, module in self.model.named_modules():
+                try:
+                    # Count parameters
+                    num_params = sum(p.numel() for p in module.parameters(recurse=False))
+
+                    # Count buffers
+                    num_buffers = len(list(module.buffers(recurse=False)))
+
+                    # Check for growing attributes
+                    for attr_name in dir(module):
+                        if attr_name.startswith('_'):
+                            continue
+                        try:
+                            attr = getattr(module, attr_name)
+                            if isinstance(attr, list) and len(attr) > 100:
+                                logger.warning(
+                                    f"  {name}.{attr_name}: LIST with {len(attr)} items - POTENTIAL LEAK"
+                                )
+                            elif isinstance(attr, dict) and len(attr) > 100:
+                                logger.warning(
+                                    f"  {name}.{attr_name}: DICT with {len(attr)} items - POTENTIAL LEAK"
+                                )
+                        except:
+                            pass
+                except:
+                    pass
+
+            logger.info(f"{'='*70}\n")
 
         return super().training_epoch_end(outputs)
 

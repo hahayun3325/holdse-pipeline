@@ -165,5 +165,26 @@ class Background(nn.Module):
         return bg_weights
 
     def step_embedding(self):
-        self.bg_implicit_network.embedder_obj.step()
-        self.bg_rendering_network.embedder_obj.step()
+        """
+        Step embeddings for progressive training.
+
+        ✅ MEMORY OPTIMIZATION COMPATIBLE:
+        When multires=0 (no positional encoding), embedder_obj is None.
+        Skip the step call safely.
+        """
+        # ================================================================
+        # ✅ CRITICAL: Check if embedders exist before calling .step()
+        # When multires=0 or multires_view=-1, embedder_obj is None
+        # ================================================================
+
+        # Check bg_implicit_network embedder
+        if (hasattr(self, 'bg_implicit_network') and
+            hasattr(self.bg_implicit_network, 'embedder_obj') and
+            self.bg_implicit_network.embedder_obj is not None):
+            self.bg_implicit_network.embedder_obj.step()
+
+        # Check bg_rendering_network embedder
+        if (hasattr(self, 'bg_rendering_network') and
+            hasattr(self.bg_rendering_network, 'embedder_obj') and
+            self.bg_rendering_network.embedder_obj is not None):
+            self.bg_rendering_network.embedder_obj.step()

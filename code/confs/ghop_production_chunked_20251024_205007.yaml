@@ -28,7 +28,7 @@ phase3:
   warmup_iters: 0
   w_sds: 5000.0
   sds_iters: 1
-  grid_resolution: 32
+  grid_resolution: 16
   spatial_lim: 1.5
 
   sds:
@@ -44,7 +44,7 @@ phase3:
 # ========================================================================
 phase4:
   # Master switch
-  enabled: true
+  enabled: false
 
   # ======================================================================
   # FAST TEST SCHEDULE: Total 30 iterations (20 SDS + 10 Contact)
@@ -57,7 +57,7 @@ phase4:
   # Contact Refinement Module (NESTED - matches code expectations)
   # ======================================================================
   contact_refinement:
-    enabled: true
+    enabled: false
 
     # Thresholds (keep reasonable values)
     contact_thresh: 0.01            # 10mm contact zone
@@ -75,10 +75,10 @@ phase4:
   # Mesh Extraction (NESTED - matches code expectations)
   # ======================================================================
   mesh_extraction:
-    enabled: true
+    enabled: false
 
     # CRITICAL: Low resolution for speed
-    resolution: 64                  # REDUCED from 128 for 2x speedup
+    resolution: 32                  # REDUCED from 128 for 2x speedup
     threshold: 0.0
     extract_every: 1                # Extract every iteration
 
@@ -109,7 +109,7 @@ phase4:
 # PHASE 5: Fix warmup_iters
 # ================================================================
 phase5:
-  enabled: true
+  enabled: false
   phase5_start_iter: 1100
   total_iterations: 6000
 
@@ -182,48 +182,48 @@ dataset:
 model:
   # Implicit network (SDF network)
   implicit_network:
-    feature_vector_size: 32
+    feature_vector_size: 16
     d_in: 3
     d_out: 1
-    dims: [32, 32]
+    dims: [16, 16]
     init: geometry
     bias: 0.6
     skip_in: []
     weight_norm: true
-    multires: 1
+    multires: 0
     cond: pose
 
   rendering_network:
-    feature_vector_size: 32
+    feature_vector_size: 16
     mode: pose
     d_in: 14
     d_out: 3
-    dims: [32]
+    dims: [16]
     weight_norm: true
     multires_view: -1
 
   bg_implicit_network:
-    feature_vector_size: 32
+    feature_vector_size: 16
     d_in: 4
     d_out: 1
-    dims: [32, 32]
+    dims: [16, 16]
     init: none
     bias: 0.0
     skip_in: []
     weight_norm: false
-    multires: 2
+    multires: 1
     cond: frame
     dim_frame_encoding: 8
 
   bg_rendering_network:
-    feature_vector_size: 32
+    feature_vector_size: 16
     mode: nerf_frame_encoding
     d_in: 3
     d_out: 3
-    dims: [32]
+    dims: [16]
     weight_norm: false
-    multires_view: 1
-    dim_frame_encoding: 8
+    multires_view: 0
+    dim_frame_encoding: 4
 
   density:
     params_init:
@@ -232,13 +232,13 @@ model:
 
   ray_sampler:
     near: 0.0
-    N_samples: 8          # Reduced for speed
-    N_samples_eval: 8
-    N_samples_extra: 4
+    N_samples: 4          # Reduced for speed
+    N_samples_eval: 4
+    N_samples_extra: 2
     eps: 0.1
     beta_iters: 1
     max_total_iters: 1
-    N_samples_inverse_sphere: 4
+    N_samples_inverse_sphere: 2
     add_tiny: 1.0e-06
 
   # SDF bounding sphere

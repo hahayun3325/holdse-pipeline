@@ -22,6 +22,11 @@ def get_rgb_loss(rgb_values, rgb_gt, valid_pix, scores):
 
 # Eikonal loss introduced in IGR
 def get_eikonal_loss(grad_theta):
+    # ✅ Handle None case when grad_theta unavailable
+    if grad_theta is None:
+        # Return zero loss with no gradient
+        return torch.tensor(0.0, requires_grad=False)
+
     eikonal_loss = ((grad_theta.norm(2, dim=-1) - 1) ** 2).mean()
     return eikonal_loss
 

@@ -106,4 +106,6 @@ class Node(nn.Module):
         return color, normal, semantics
 
     def step_embedding(self):
-        self.implicit_network.embedder_obj.step()
+        # ✅ Check if embedder exists (multires=0 has no embedder)
+        if hasattr(self.implicit_network, 'embedder_obj') and self.implicit_network.embedder_obj is not None:
+            self.implicit_network.embedder_obj.step()

@@ -24,10 +24,11 @@ Date: October 2025
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from collections import deque
 import logging
 import numpy as np
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +372,6 @@ class TemporalConsistencyModule(nn.Module):
             # ================================================================
             # FIX 4: Force garbage collection and CUDA cache clear
             # ================================================================
-            import gc
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -416,7 +416,6 @@ class TemporalConsistencyModule(nn.Module):
         self._sequence_access_order.clear()
 
         # Force Python garbage collection
-        import gc
         gc.collect()
 
         # Clear CUDA cache
@@ -436,6 +435,113 @@ class TemporalConsistencyModule(nn.Module):
                 f"[Phase 5 Temporal] Epoch cleanup: "
                 f"Cleared {num_sequences} sequences"
             )
+
+    def clear_old_sequences(self, keep_last_n: int = 5) -> None:
+        """
+        Keep only N most recent sequences (LRU-based cleanup).
+
+        This method is less aggressive than clear_epoch_history and can be
+        called during training to prevent unbounded growth.
+
+        Args:
+            keep_last_n: Number of most recent sequences to keep
+        """
+        if len(self.pose_history) <= keep_last_n:
+            return
+
+        # Get all sequence IDs in access order (from _sequence_access_order)
+        # Most recent sequences are at the end
+        num_to_remove = len(self.pose_history) - keep_last_n
+
+        # Count frames before removal
+        total_frames_before = sum(len(seq) for seq in self.pose_history.values())
+
+        # Remove oldest sequences
+        sequences_removed = []
+        frames_removed = 0
+
+        for _ in range(num_to_remove):
+            if len(self._sequence_access_order) == 0:
+                break
+
+            # Remove least recently used (first in order)
+            oldest_id = self._sequence_access_order[0]
+
+            if oldest_id in self.pose_history:
+                frames_removed += len(self.pose_history[oldest_id])
+                del self.pose_history[oldest_id]
+                sequences_removed.append(oldest_id)
+
+            if oldest_id in self.camera_history:
+                del self.camera_history[oldest_id]
+
+            if oldest_id in self.velocity_history:
+                del self.velocity_history[oldest_id]
+
+            self._sequence_access_order.remove(oldest_id)
+
+        # Force garbage collection
+        gc.collect()
+
+        if len(sequences_removed) > 0:
+            logger.info(
+                f"[Temporal] Cleared {len(sequences_removed)} old sequences:\n"
+                f"  Kept: {keep_last_n} most recent sequences\n"
+                f"  Removed: {len(sequences_removed)} sequences ({frames_removed} frames)\n"
+                f"  Remaining: {len(self.pose_history)} sequences"
+            )
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """
+        Get detailed memory statistics for diagnostic purposes.
+
+        Returns:
+            Dictionary with memory usage breakdown
+        """
+        total_frames = 0
+        total_memory_bytes = 0
+
+        # Count pose history
+        for seq_id, seq_deque in self.pose_history.items():
+            total_frames += len(seq_deque)
+            for frame in seq_deque:
+                if isinstance(frame, torch.Tensor):
+                    total_memory_bytes += frame.element_size() * frame.nelement()
+
+        # Count camera history
+        for seq_id, seq_deque in self.camera_history.items():
+            for frame in seq_deque:
+                if isinstance(frame, torch.Tensor):
+                    total_memory_bytes += frame.element_size() * frame.nelement()
+
+        num_sequences = len(self.pose_history)
+        avg_frames = total_frames / num_sequences if num_sequences > 0 else 0
+
+        return {
+            'num_sequences': num_sequences,
+            'total_frames': total_frames,
+            'avg_frames_per_sequence': avg_frames,
+            'estimated_memory_mb': total_memory_bytes / (1024 ** 2),
+            'max_sequences': self.max_sequences,
+            'window_size': self.window_size,
+            'memory_bounded': avg_frames <= self.window_size * 1.5
+        }
+
+    def log_memory_state(self, epoch: int = 0, step: int = 0):
+        """Log current memory state for debugging"""
+        stats = self.get_memory_stats()
+
+        logger.info(
+            f"[Temporal Memory] Epoch {epoch} Step {step}:\n"
+            f"  Sequences: {stats['num_sequences']}/{stats['max_sequences']}\n"
+            f"  Total frames: {stats['total_frames']}\n"
+            f"  Avg frames/seq: {stats['avg_frames_per_sequence']:.1f} "
+            f"(max: {stats['window_size']})\n"
+            f"  Memory: {stats['estimated_memory_mb']:.2f} MB\n"
+            f"  Status: {'✅ Bounded' if stats['memory_bounded'] else '❌ LEAK DETECTED'}"
+        )
+
+        return stats
 
     def get_smoothed_prediction(
             self,

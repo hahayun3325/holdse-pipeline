@@ -194,13 +194,13 @@ class ErrorBoundSampler(RaySampler):
             a, b, c = dists, d[:, :-1].abs(), d[:, 1:].abs()
             first_cond = a.pow(2) + b.pow(2) <= c.pow(2)
             second_cond = a.pow(2) + c.pow(2) <= b.pow(2)
-            d_star = torch.zeros(z_vals.shape[0], z_vals.shape[1] - 1).cuda()
-            d_star[first_cond] = b[first_cond]
-            d_star[second_cond] = c[second_cond]
+            d_star = torch.zeros(z_vals.shape[0], z_vals.shape[1] - 1, dtype=z_vals.dtype, device=z_vals.device)
+            d_star[first_cond] = b[first_cond].to(d_star.dtype)
+            d_star[second_cond] = c[second_cond].to(d_star.dtype)
             s = (a + b + c) / 2.0
             area_before_sqrt = s * (s - a) * (s - b) * (s - c)
             mask = ~first_cond & ~second_cond & (b + c - a > 0)
-            d_star[mask] = (2.0 * torch.sqrt(area_before_sqrt[mask])) / (a[mask])
+            d_star[mask] = ((2.0 * torch.sqrt(area_before_sqrt[mask])) / (a[mask])).to(d_star.dtype)
             d_star = (
                 d[:, 1:].sign() * d[:, :-1].sign() == 1
             ) * d_star  # Fixing the sign
@@ -231,7 +231,7 @@ class ErrorBoundSampler(RaySampler):
             )
             free_energy = dists * density
             shifted_free_energy = torch.cat(
-                [torch.zeros(dists.shape[0], 1).cuda(), free_energy[:, :-1]], dim=-1
+                [torch.zeros(dists.shape[0], 1, dtype=dists.dtype, device=dists.device), free_energy[:, :-1]], dim=-1
             )
             alpha = 1 - torch.exp(-free_energy)
             transmittance = torch.exp(-torch.cumsum(shifted_free_energy, dim=-1))
@@ -354,7 +354,7 @@ class ErrorBoundSampler(RaySampler):
     def get_error_bound(self, beta, density_fn, sdf, z_vals, dists, d_star):
         density = density_fn(sdf.reshape(z_vals.shape), beta=beta)
         shifted_free_energy = torch.cat(
-            [torch.zeros(dists.shape[0], 1).cuda(), dists * density[:, :-1]], dim=-1
+            [torch.zeros(dists.shape[0], 1, dtype=dists.dtype, device=dists.device), dists * density[:, :-1]], dim=-1
         )
         integral_estimation = torch.cumsum(shifted_free_energy, dim=-1)
         error_per_section = torch.exp(-d_star / beta) * (dists**2.0) / (4 * beta**2)

@@ -68,23 +68,73 @@ class KNNDeformer:
         return x_transformed, outlier_mask
 
     def forward_skinning(self, xc, cond, tfs):
-        num_images = xc.shape[0]
+        """
+        Forward skinning with FP16 support.
+
+        ✅ FP16-SAFE: Converts to FP32 for skinning operations
+        """
+        # ================================================================
+        # ✅ CRITICAL: Save original dtype and convert to FP32
+        # MANO skinning operations may not be FP16-compatible
+        # ================================================================
+        original_dtype = xc.dtype
+
+        # Convert inputs to FP32
+        xc_fp32 = xc.float()
+        tfs_fp32 = tfs.float() if tfs is not None else None
+
+        num_images = xc_fp32.shape[0]
         verts = self.verts.repeat(num_images, 1, 1)
         skin_weights = self.skin_weights.repeat(num_images, 1, 1)
-        # cano -> deformed
-        # query skining weights in cano
+
+        # Ensure verts and skin_weights are FP32
+        verts = verts.float()
+        skin_weights = skin_weights.float()
+
+        # Query skinning weights in cano (now all FP32)
         weights, _ = self.query_skinning_weights_multi(
-            xc, verts=verts, skin_weights=skin_weights
+            xc_fp32, verts=verts, skin_weights=skin_weights
         )
 
-        # LBS
-        x_transformed = skinning(xc, weights, tfs, inverse=False)
+        # LBS (Linear Blend Skinning)
+        x_transformed = skinning(xc_fp32, weights, tfs_fp32, inverse=False)
+
+        # ================================================================
+        # ✅ CRITICAL: Convert result back to original dtype
+        # ================================================================
+        x_transformed = x_transformed.to(original_dtype)
+
         return x_transformed
 
     def query_skinning_weights_multi(self, pts, verts, skin_weights):
+        """
+        Query skinning weights using KNN.
+
+        ✅ FP16-SAFE: Converts to FP32 for PyTorch3D operations
+        """
+        print(f"DEBUG: pts shape: {pts.shape}, dtype: {pts.dtype}")
+        print(f"DEBUG: verts shape: {verts.shape}, dtype: {verts.dtype}")
+        print(f"DEBUG: skin_weights shape: {skin_weights.shape}")
+        # Convert to FP32
+        pts_fp32 = pts.float()
+        verts_fp32 = verts.float()
+        # Check dims
+        print(f"DEBUG: pts_fp32.dim() = {pts_fp32.dim()}")
+        print(f"DEBUG: verts_fp32.dim() = {verts_fp32.dim()}")
+        # ================================================================
+        # ✅ CRITICAL: Don't add extra batch dimension
+        # pts and verts already have batch dimension from forward_skinning
+        # They are already [B, N, 3] and [B, V, 3]
+        # ================================================================
+
+        # KNN search (NO .unsqueeze(0))
         distance_batch, index_batch, neighbor_points = ops.knn_points(
-            pts, verts, K=self.K, return_nn=True
+            pts_fp32,  # Already [B, N, 3]
+            verts_fp32,  # Already [B, V, 3]
+            K=5,
+            return_nn=True
         )
+
         distance_batch = torch.clamp(distance_batch, max=4)
         weights_conf = torch.exp(-distance_batch)
         distance_batch = torch.sqrt(distance_batch)
@@ -102,6 +152,7 @@ class KNNDeformer:
 
         distance_batch = distance_batch.min(dim=2).values
         outlier_mask = distance_batch > self.max_dist
+
         return weights, outlier_mask
 
     def query_weights(self, xc):

@@ -1,7 +1,9 @@
 import sys
 
 import torch
+import logging
 
+logger = logging.getLogger(__name__)
 from src.engine.rendering import sort_tensor
 import numpy as np
 
@@ -289,17 +291,33 @@ def prepare_loss_targets_hand(out_dict, sample_dict, node):
         # sample points around each  vertex
         # compute its gradient for eikonal later
         num_samples = 256
-        verts_c = node.server.verts_c.repeat(sample_dict["batch_size"], 1, 1)
-        out_dict[f"{node_id}.grad_theta"] = volsdf_utils.compute_gradient_samples(
-            pt_in_space_sampler_h,
-            node.implicit_network,
-            sample_dict["cond"],
-            num_samples,
-            verts_c,
-            local_sigma=0.008,
-            global_ratio=0.20,
-        )
+        # ✅ FIX: Add None check before accessing verts_c
+        if (hasattr(node, 'server') and
+            node.server is not None and
+            hasattr(node.server, 'verts_c') and
+            node.server.verts_c is not None):
 
+            verts_c = node.server.verts_c.repeat(sample_dict["batch_size"], 1, 1)
+            out_dict[f"{node_id}.grad_theta"] = volsdf_utils.compute_gradient_samples(
+                pt_in_space_sampler_h,
+                node.implicit_network,
+                sample_dict["cond"],
+                num_samples,
+                verts_c,
+                local_sigma=0.008,
+                global_ratio=0.20,
+            )
+        else:
+            # Server not initialized yet - skip gradient computation
+            # This happens in early training before MANO model is ready
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(
+                f"[{node_id}] Skipping gradient computation - "
+                f"node.server.verts_c not available yet (step {sample_dict.get('global_step', 'unknown')})"
+            )
+            # Return empty gradient or skip this output
+            out_dict[f"{node_id}.grad_theta"] = None
 
 def volumetric_render(factors, is_training):
     # density to weights
@@ -403,8 +421,6 @@ def downsample_rendering(batch, k):
                 im_w = img_size[0, 1].item()
             else:
                 # Unexpected shape
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.warning(
                     f"[downsample_rendering] Unexpected img_size shape: {img_size.shape}. "
                     f"Using default [480, 640]"
@@ -432,8 +448,6 @@ def downsample_rendering(batch, k):
             # Ultimate fallback
             im_h, im_w = 480, 640
 
-        import logging
-        logger = logging.getLogger(__name__)
         logger.debug(
             f"[downsample_rendering] img_size not in batch, "
             f"inferred/defaulted to [{im_h}, {im_w}]"

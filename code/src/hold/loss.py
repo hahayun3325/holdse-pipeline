@@ -150,10 +150,18 @@ class Loss(nn.Module):
             w_sparse = torch.linspace(0.0, 1.0, self.milestone + 1)[progress]
             loss_dict["loss/opacity_sparse"] = opacity_sparse_loss * w_sparse
 
-        # Eikonal loss
+        # ================================================================
+        # ✅ FIX: Eikonal loss with None handling
+        # ================================================================
         eikonal_loss = 0.0
         for key in model_outputs.search("grad_theta").keys():
-            eikonal_loss += loss_terms.get_eikonal_loss(model_outputs[key])
+            # ✅ FIX: Skip if grad_theta is None (happens when server not initialized)
+            if model_outputs[key] is not None:
+                eikonal_loss += loss_terms.get_eikonal_loss(model_outputs[key])
+            # Optionally log first occurrence
+            elif not hasattr(self, '_logged_grad_theta_none'):
+                logger.debug(f"Skipping eikonal loss for {key} - grad_theta is None (server not ready)")
+                self._logged_grad_theta_none = True
 
         # Eikonal loss with threshold
         low_bnd_eikonal = 0.0008

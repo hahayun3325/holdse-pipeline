@@ -109,18 +109,18 @@ phase4:
 # PHASE 5: Fix warmup_iters
 # ================================================================
 phase5:
-  enabled: true
-  phase5_start_iter: 100
-  total_iterations: 1000
+  enabled: false
+  phase5_start_iter: 1100
+  total_iterations: 6000
 
   # ================================================================
   # FIX 2: Change warmup_iters to 0
   # ================================================================
   warmup_iters: 0                 # ← CHANGE: from 50 to 0
-  finetune_start_iter: 800
+  finetune_start_iter: 1200
 
   # Temporal consistency settings
-  temporal_window: 5
+  temporal_window: 3
   w_velocity: 0.5
   w_acceleration: 0.1
   w_camera_motion: 0.3
@@ -174,7 +174,7 @@ dataset:
     drop_last: false
     shuffle: false      # ← CRITICAL: Missing field causing error
     num_workers: 0
-    pixel_per_batch: 256  # Reduced from 512
+    pixel_per_batch: 512  # Reduced from 512
 
 # ========================================================================
 # MINIMAL MODEL (tiny architecture)
@@ -268,15 +268,3 @@ optimizer:
 experiment:
   name: 'ghop_quick_bottle_1'
   description: 'Quick test for Bottle_1'
-
-# ================================================================
-# LOSS WEIGHTS (CRITICAL FIX - ADDED BY SCRIPT)
-# ================================================================
-loss:
-  w_rgb: 10.0              # RGB loss weight (was missing!)
-  w_mask: 5.0              # Mask loss
-  w_mano_cano: 0.5         # REDUCED to prevent 99.61% dominance
-  w_eikonal: 0.1
-  w_smooth: 0.01
-  w_semantic: 1.0
-  w_opacity_sparse: 0.1

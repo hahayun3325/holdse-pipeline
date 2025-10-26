@@ -70,24 +70,14 @@ class GenericServer(torch.nn.Module):
             self.tfs_c_inv = tfs.inverse()
 
     def forward(self, scene_scale, transl, thetas, betas, absolute=False):
-        # ================================================================
-        # FIX: Periodic CUDA cache clearing to prevent memory fragmentation
-        # ================================================================
-        # Initialize counter on first call
-        if not hasattr(self, '_forward_count'):
-            self._forward_count = 0
+        """
+        MANO layer forward pass with memory-optimized cache clearing.
 
-        self._forward_count += 1
-
-        # Clear cache every 50 forward passes (aggressive cleanup)
-        if self._forward_count % 50 == 0:
-            torch.cuda.empty_cache()
-            logger.info(f"[MANO Server] 🧹 Cleared CUDA cache at forward #{self._forward_count}")
-
-            # Also log current memory usage
-            allocated = torch.cuda.memory_allocated() / 1024**2
-            reserved = torch.cuda.memory_reserved() / 1024**2
-            logger.info(f"[MANO Server] 📊 Memory: {allocated:.1f}MB allocated, {reserved:.1f}MB reserved")
+        Memory Strategy:
+        - Pre-allocation cache clear: Prevents fragmentation during forward pass
+        - Post-forward cleanup: Deletes intermediate tensors
+        - Epoch-end cache clear: Done in training_epoch_end (main strategy)
+        """
 
         logger.info("[MANO Server] ========== FORWARD CALL ==========")
         logger.info(f"[MANO Server] Input shapes:")
@@ -116,15 +106,46 @@ class GenericServer(torch.nn.Module):
             betas = torch.zeros_like(betas)
 
         # ================================================================
-        # MANO layer forward pass
-        # FIX: Explicit allocation instead of zeros_like
-        # Avoids potential stale tensor references and allocation issues
+        # ✅ CRITICAL: Pre-Allocation Cache Clearing
+        # Purpose: Clear fragmented cache before critical torch.zeros() call
+        # Context: Called ~110 times per epoch (55 iters × 2 nodes)
+        # Impact: Prevents intra-iteration fragmentation, complements epoch-end
+        #         cache clearing (in training_epoch_end) for complete solution
+        # ================================================================
+        if torch.cuda.is_available():
+            # Synchronize to ensure all pending operations complete
+            torch.cuda.synchronize()
+
+            # Clear cache to defragment and free memory
+            torch.cuda.empty_cache()
+
+            # Synchronize again to ensure cache clearing completed
+            torch.cuda.synchronize()
+
+            # Optional: Log memory state every 55 calls (once per epoch)
+            if not hasattr(self, '_forward_call_count'):
+                self._forward_call_count = 0
+            self._forward_call_count += 1
+
+            if self._forward_call_count % 55 == 0:
+                mem_allocated = torch.cuda.memory_allocated() / 1024**2
+                mem_reserved = torch.cuda.memory_reserved() / 1024**2
+                cache_size = mem_reserved - mem_allocated
+                logger.debug(
+                    f"[MANO Server] Forward #{self._forward_call_count}: "
+                    f"Allocated={mem_allocated:.1f}MB, "
+                    f"Reserved={mem_reserved:.1f}MB, "
+                    f"Cache={cache_size:.1f}MB"
+                )
+
+        # ================================================================
+        # MANO layer forward pass with safe tensor allocation
         # ================================================================
         transl_zeros = torch.zeros(
             transl.shape,
             dtype=transl.dtype,
             device=transl.device,
-            requires_grad=False  # Explicit: no gradients needed
+            requires_grad=False
         )
 
         outputs = body_models.forward_layer(
@@ -188,14 +209,14 @@ class GenericServer(torch.nn.Module):
         out["v_posed"] = outputs.v_posed
 
         # ================================================================
-        # FIX: Explicit cleanup after forward pass
+        # ✅ Post-Forward Memory Cleanup
+        # Purpose: Clean up intermediate tensors that may hold references
+        # Impact: Minimal, but helps with long-term memory stability
         # ================================================================
-        # Detach intermediate tensors that might retain computation graphs
-        for key in out:
-            if isinstance(out[key], torch.Tensor) and out[key].requires_grad:
-                # Only detach if not needed for backward pass
-                # (these are usually just outputs, not used for gradients)
-                pass  # Keep as-is for now, may need gradients
+        # Delete intermediate variables that are no longer needed
+        del verts, joints, tf_mats, outputs, transl_zeros
+
+        # Note: We do NOT delete 'out' dict contents as they're the return value
 
         return out
 

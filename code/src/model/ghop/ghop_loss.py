@@ -15,6 +15,9 @@ import torch.nn.functional as F
 import numpy as np
 from src.model.ghop.ghop_prior import load_ghop_prior
 from loguru import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # PHASE 3: Core SDS Loss Implementation
@@ -91,17 +94,32 @@ class SDSLoss(nn.Module):
         B = object_sdf.shape[0]
         device = object_sdf.device
 
+        # ✅ LOG 1: Entry point
+        mem_start = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] === Starting SDS forward (iteration {iteration}) ===")
+        logger.info(f"[SDS-MEMORY] GPU memory at entry: {mem_start:.2f} MB")
+        logger.info(f"[SDS-MEMORY] Input object_sdf shape: {object_sdf.shape}, size: {object_sdf.element_size() * object_sdf.nelement() / 1024**2:.2f} MB")
+
         # ================================================================
         # Step 1: Build 15-channel hand skeletal distance field
         # ================================================================
         hand_field_64 = self.hand_field(hand_params=hand_params)  # (B, 15, 64, 64, 64)
+
+        # ✅ LOG 2: After hand field
+        mem_after_hand = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] After hand_field: {mem_after_hand:.2f} MB (delta: +{mem_after_hand - mem_start:.2f} MB)")
+        logger.info(f"[SDS-MEMORY] hand_field_64 shape: {hand_field_64.shape}, size: {hand_field_64.element_size() * hand_field_64.nelement() / 1024**2:.2f} MB")
 
         # ================================================================
         # Step 2: Encode to latent space via VQ-VAE
         # ================================================================
         # Note: encode() returns (z_q, indices, vq_loss)
         z_0, _, vq_loss = self.vqvae.encode(object_sdf, hand_field_64)
-        # z_0: (B, 3, 16, 16, 16) quantized latent
+
+        # ✅ LOG 3: After VQ-VAE encode
+        mem_after_encode = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] After VQ-VAE encode: {mem_after_encode:.2f} MB (delta: +{mem_after_encode - mem_after_hand:.2f} MB)")
+        logger.info(f"[SDS-MEMORY] z_0 shape: {z_0.shape}, size: {z_0.element_size() * z_0.nelement() / 1024**2:.2f} MB")
 
         # ================================================================
         # Step 3: Sample timestep with progressive annealing
@@ -123,27 +141,50 @@ class SDSLoss(nn.Module):
         # Diffusion forward process: z_t = sqrt(α̅_t) * z_0 + sqrt(1-α̅_t) * ε
         z_t = torch.sqrt(alpha_bar_t) * z_0 + torch.sqrt(1 - alpha_bar_t) * noise
 
+        # ✅ LOG 4: After noise addition
+        mem_after_noise = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] After noise addition: {mem_after_noise:.2f} MB (delta: +{mem_after_noise - mem_after_encode:.2f} MB)")
+        logger.info(f"[SDS-MEMORY] z_t shape: {z_t.shape}, noise shape: {noise.shape}")
+
         # ================================================================
         # Step 5: Predict noise with classifier-free guidance
         # ================================================================
         # Downsample hand field to latent resolution (optional conditioning)
         hand_field_16 = self.hand_field.downsample_to_latent(hand_field_64, 16)
 
+        # ✅ LOG 5: Before U-Net
+        mem_before_unet = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] Before U-Net calls: {mem_before_unet:.2f} MB")
+
         with torch.no_grad():
             # Get text embeddings (currently placeholder)
             text_emb = self._get_text_embeddings(text_prompts, B, device)
 
-            # Conditional prediction: ε_θ(z_t, t, c)
+            # ✅ LOG 6: Before first U-Net call
+            mem_before_unet1 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+            logger.info(f"[SDS-MEMORY] Calling U-Net (conditional)...")
+
             eps_cond = self.unet.predict_noise(z_t, t, text_emb)
 
-            # Unconditional prediction: ε_θ(z_t, t, ∅)
-            eps_uncond = self.unet.predict_noise(
-                z_t, t, torch.zeros_like(text_emb)
-            )
+            # ✅ LOG 7: After first U-Net call
+            mem_after_unet1 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+            logger.info(f"[SDS-MEMORY] After U-Net call 1: {mem_after_unet1:.2f} MB (delta: +{mem_after_unet1 - mem_before_unet1:.2f} MB)")
+            logger.info(f"[SDS-MEMORY] eps_cond shape: {eps_cond.shape}, size: {eps_cond.element_size() * eps_cond.nelement() / 1024**2:.2f} MB")
 
-            # Apply classifier-free guidance:
-            # ε̂_θ = ε_uncond + w * (ε_cond - ε_uncond)
+            # ✅ LOG 8: Before second U-Net call
+            logger.info(f"[SDS-MEMORY] Calling U-Net (unconditional)...")
+
+            eps_uncond = self.unet.predict_noise(z_t, t, torch.zeros_like(text_emb))
+
+            # ✅ LOG 9: After second U-Net call
+            mem_after_unet2 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+            logger.info(f"[SDS-MEMORY] After U-Net call 2: {mem_after_unet2:.2f} MB (delta: +{mem_after_unet2 - mem_after_unet1:.2f} MB)")
+
             eps_theta = eps_uncond + self.guidance_scale * (eps_cond - eps_uncond)
+
+        # ✅ LOG 10: After guidance
+        mem_after_guidance = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] After guidance: {mem_after_guidance:.2f} MB")
 
         # ================================================================
         # Steps 6-9: SDS gradient computation (GHOP sd.py lines 102-115)
@@ -161,6 +202,12 @@ class SDSLoss(nn.Module):
         # SDS loss as MSE (enables gradient flow to z_0)
         sds_loss = 0.5 * F.mse_loss(z_0, target, reduction='mean')
 
+        # ✅ LOG 11: Final memory
+        mem_end = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-MEMORY] At exit: {mem_end:.2f} MB")
+        logger.info(f"[SDS-MEMORY] Total delta from entry: +{mem_end - mem_start:.2f} MB")
+        logger.info(f"[SDS-MEMORY] === SDS forward complete ===\n")
+
         # ================================================================
         # Diagnostics for logging
         # ================================================================
@@ -171,7 +218,8 @@ class SDSLoss(nn.Module):
             'grad_norm': grad.norm().item(),
             'current_max_step': current_max,
             'vq_loss': vq_loss.item() if isinstance(vq_loss, torch.Tensor) else 0.0,
-            'noise_pred_norm': eps_theta.norm().item()
+            'noise_pred_norm': eps_theta.norm().item(),
+            'memory_mb': mem_end  # Add to diagnostics
         }
 
         return sds_loss, info
@@ -190,6 +238,9 @@ class SDSLoss(nn.Module):
             sds_loss: torch.Tensor, weighted SDS loss
             info: dict, diagnostic information
         """
+        mem_start = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+        logger.info(f"[SDS-WRAPPER] compute_sds_loss called at memory: {mem_start:.2f} MB")
+        logger.info(f"[SDS-WRAPPER] obj_sdf shape: {obj_sdf.shape}")
         try:
             # ============================================================
             # Validate and normalize text_prompt
@@ -229,6 +280,9 @@ class SDSLoss(nn.Module):
             info['sds_weighted'] = sds_loss_weighted.item() if isinstance(sds_loss_weighted, torch.Tensor) else float(sds_loss_weighted)
             info['sds_raw'] = sds_loss_raw.item() if isinstance(sds_loss_raw, torch.Tensor) else float(sds_loss_raw)
             info['weight'] = weight
+
+            mem_end = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+            logger.info(f"[SDS-WRAPPER] After forward: {mem_end:.2f} MB (delta: +{mem_end - mem_start:.2f} MB)")
 
             return sds_loss_weighted, info
 
