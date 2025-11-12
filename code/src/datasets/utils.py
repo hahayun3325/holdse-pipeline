@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from loguru import logger
 
 
 def load_mask(mask_path, img_size):
@@ -74,17 +75,14 @@ def create_dataset(split, args):
 
     if split.type == "train":
         from src.datasets.tempo_dataset import TempoDataset
-
         DATASET_CLS = TempoDataset
         workers = args.num_workers
     elif split.type == "val":
         from src.datasets.eval_datasets import ValDataset
-
         DATASET_CLS = ValDataset
         workers = 0
     elif split.type == "test":
         from src.datasets.eval_datasets import TestDataset
-
         DATASET_CLS = TestDataset
         workers = 0
     else:
@@ -111,11 +109,7 @@ def create_dataset(split, args):
         # Get PyTorch version
         pytorch_version = tuple(int(x) for x in torch.__version__.split('.')[:2])
 
-        # ================================================================
-        # Smart logic:
-        # - PyTorch >= 2.0 + single worker (workers=0): Safe to use
-        # - PyTorch < 2.0 or multiple workers: Memory leak risk
-        # ================================================================
+        # Smart logic
         if pytorch_version >= (2, 0) and workers == 0:
             use_pin_memory = True
             logger.info(
@@ -129,9 +123,7 @@ def create_dataset(split, args):
                 f"(PyTorch {torch.__version__}, num_workers={workers})"
             )
 
-    # ================================================================
     # Additional memory safety check
-    # ================================================================
     if use_pin_memory and workers > 0:
         logger.warning(
             f"[DataLoader {split.type}] pin_memory=True with num_workers={workers} "
@@ -141,26 +133,25 @@ def create_dataset(split, args):
     dataset = DATASET_CLS(args)
 
     # ================================================================
-    # Create DataLoader with configured pin_memory
+    # FIXED: Build DataLoader kwargs conditionally
     # ================================================================
-    return DataLoader(
-        dataset,
-        batch_size=split.batch_size,
-        drop_last=split.drop_last,
-        shuffle=split.shuffle,
-        num_workers=workers,
-        pin_memory=use_pin_memory,  # ← CHANGED: Was True, now configurable
+    dataloader_kwargs = {
+        'dataset': dataset,
+        'batch_size': split.batch_size,
+        'drop_last': split.drop_last,
+        'shuffle': split.shuffle,
+        'num_workers': workers,
+        'pin_memory': use_pin_memory,
+    }
 
-        # ================================================================
-        # Optional: Add prefetch_factor for better performance
-        # ================================================================
-        prefetch_factor=2 if workers > 0 else None,
+    # ================================================================
+    # CRITICAL FIX: Only add multiprocessing options if workers > 0
+    # ================================================================
+    if workers > 0:
+        dataloader_kwargs['prefetch_factor'] = 2
+        dataloader_kwargs['persistent_workers'] = True
 
-        # ================================================================
-        # Optional: Add persistent_workers to prevent respawning
-        # ================================================================
-        persistent_workers=True if workers > 0 else False,
-    )
+    return DataLoader(**dataloader_kwargs)
 
 def bilinear_interpolation(xs, ys, dist_map):
     x1 = np.floor(xs).astype(np.int32)

@@ -71,7 +71,8 @@ def extract_features(
             inputs=pnts_c,
             grad_outputs=d_out,
             create_graph=create_graph,
-            retain_graph=True if i < num_dim - 1 else retain_graph,
+            # retain_graph=True if i < num_dim - 1 else retain_graph
+            retain_graph=True,
             only_inputs=True,
         )[0]
         grads.append(grad)
@@ -188,30 +189,92 @@ def render_fg_rgb(
     )
 
     # ================================================================
-    # ✅ CRITICAL: ALL lines below MUST be inside this if block!
+    # DIAGNOSTIC 1: After implicit network feature extraction
+    # ================================================================
+    print(f"\n[DIAGNOSTIC 1] After implicit network extraction:")
+    print(f"  feature_vectors shape: {feature_vectors.shape}")
+    print(f"  Expected last dim for d_in=48: should eventually be 48")
+
+    # ================================================================
+    # Handle time_code if present
     # ================================================================
     if time_code is not None:
-        # Ensure time_code is at least 2D [B, D]
+        print(f"\n[DIAGNOSTIC 1.5] time_code processing starting:")
+        print(f"  time_code shape BEFORE: {time_code.shape}")
+        print(f"  time_code.ndim: {time_code.ndim}")
+
+        # ✅ FIX: Ensure time_code is EXACTLY 2D [B, D]
+        # Squeeze ALL extra dimensions (handles [B, 1, D] → [B, D])
+        while time_code.ndim > 2:
+            time_code = time_code.squeeze(1)  # Remove dimension at index 1
+
+        # After squeezing, ensure it's at least 2D
         if time_code.ndim == 1:
-            time_code = time_code.unsqueeze(0)
+            time_code = time_code.unsqueeze(0)  # [D] → [1, D]
 
-            num_images = time_code.shape[0]
-            num_samples = pnts_c.shape[0] // num_images
+        print(f"  time_code shape AFTER squeezing: {time_code.shape}")
+        print(f"  time_code.ndim AFTER: {time_code.ndim}")
 
-            # ✅ MUST BE INDENTED - inside the if block!
-            time_code = (
-                time_code[:, None, :]            # ← 4 spaces indent
-                .repeat(1, num_samples, 1)       # ← 4 spaces indent
-                .reshape(-1, time_code.shape[-1])# ← 4 spaces indent
-            )                                     # ← 4 spaces indent
-            feature_vectors = torch.cat([feature_vectors, time_code], dim=-1)  # ← 4 spaces indent
+        # Now time_code is guaranteed to be [B, D]
+        num_images = time_code.shape[0]
+        num_samples = pnts_c.shape[0] // num_images
 
-    # Rendering
-    fg_rendering_output = rendering_network(
-        pnts_c, normals, view_dirs, cond["pose"], feature_vectors
-    )
-    rgb_vals = fg_rendering_output[:, :3]
-    return rgb_vals, normals
+        # ✅ Now safe: time_code is [B, D], can do [:, None, :] → [B, 1, D]
+        time_code = (
+            time_code[:, None, :]                           # [B, 1, D]
+            .repeat(1, num_samples, 1)                      # [B, N, D]
+            .reshape(-1, time_code.shape[-1])               # [B*N, D]
+        )
+
+        # ================================================================
+        # DIAGNOSTIC 2: After time_code expansion (NOW OUTSIDE the ndim check)
+        # ================================================================
+        print(f"\n[DIAGNOSTIC 2] After time_code expansion:")
+        print(f"  time_code shape: {time_code.shape}")
+        print(f"  feature_vectors shape before concat: {feature_vectors.shape}")
+
+        # Concatenate with features
+        feature_vectors = torch.cat([feature_vectors, time_code], dim=-1)
+
+        # ================================================================
+        # DIAGNOSTIC 3: After concatenation (NOW OUTSIDE the ndim check)
+        # ================================================================
+        print(f"\n[DIAGNOSTIC 3] After time_code concatenation:")
+        print(f"  feature_vectors shape: {feature_vectors.shape}")
+        print(f"  Expected d_in from config: 48")
+        print(f"  Actual dimension: {feature_vectors.shape[-1]}")
+
+        if feature_vectors.shape[-1] != 48:
+            print(f"  ⚠️  MISMATCH: {feature_vectors.shape[-1]} != 48")
+
+    else:
+        print(f"\n[DIAGNOSTIC] time_code is None - using features as-is")
+        print(f"  feature_vectors shape: {feature_vectors.shape}")
+
+    # ================================================================
+    # DIAGNOSTIC 4: Before rendering network call
+    # ================================================================
+    print(f"\n[DIAGNOSTIC 4] Before rendering network:")
+    print(f"  pnts_c shape: {pnts_c.shape}")
+    print(f"  normals shape: {normals.shape}")
+    print(f"  view_dirs shape: {view_dirs.shape}")
+    print(f"  feature_vectors shape: {feature_vectors.shape}")
+    print(f"  pose shape: {cond['pose'].shape if 'pose' in cond else 'N/A'}")
+
+    try:
+        # Rendering
+        fg_rendering_output = rendering_network(
+            pnts_c, normals, view_dirs, cond["pose"], feature_vectors
+        )
+        rgb_vals = fg_rendering_output[:, :3]
+        return rgb_vals, normals
+
+    except RuntimeError as e:
+        print(f"\n❌ ERROR in rendering network:")
+        print(f"  Error: {str(e)}")
+        print(f"  feature_vectors shape (last dimension is d_in): {feature_vectors.shape}")
+        print(f"  Config d_in should be: {feature_vectors.shape[-1]}")
+        raise
 
 
 def sdf_func_with_deformer(deformer, sdf_fn, training, x, deform_info):

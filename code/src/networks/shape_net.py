@@ -130,11 +130,11 @@ class ImplicitNet(nn.Module):
                 # Use input batch size, repeat/slice cond as needed
                 if cond_batch > original_num_batch:
                     # Too many cond samples, slice
-                    cond_slice = cond[self.cond][:original_num_batch]
+                    cond_slice = cond_tensor[:original_num_batch]
                 else:
                     # Too few cond samples, repeat
                     repeats = (original_num_batch + cond_batch - 1) // cond_batch
-                    cond_slice = cond[self.cond].repeat(repeats, 1)[:original_num_batch]
+                    cond_slice = cond_tensor.repeat(repeats, 1)[:original_num_batch]
 
                 input_cond = cond_slice.unsqueeze(1).expand(original_num_batch, original_num_point, num_cond)
 
@@ -170,15 +170,26 @@ class ImplicitNet(nn.Module):
 
                 if input_cond.shape[1] != expected_cond_dim:
                     logger.warning(f"input_cond dim {input_cond.shape[1]} != expected {expected_cond_dim}, padding/slicing")
-                    if input_cond.shape[1] < expected_cond_dim:
+
+                    if expected_cond_dim == 0:
+                        # Model was trained without conditioning - don't concatenate anything
+                        logger.warning("Model expects NO conditioning (dim=0), ignoring provided conditioning")
+                        # x remains unchanged
+                    elif input_cond.shape[1] < expected_cond_dim:
                         # Pad with zeros
                         padding = torch.zeros(input_cond.shape[0], expected_cond_dim - input_cond.shape[1], device=input_cond.device)
                         input_cond = torch.cat([input_cond, padding], dim=-1)
+                        x = torch.cat([x, input_cond], dim=-1)
                     else:
                         # Slice
                         input_cond = input_cond[:, :expected_cond_dim]
+                        x = torch.cat([x, input_cond], dim=-1)
+                else:
+                    # Dimensions match
+                    if expected_cond_dim > 0:
+                        x = torch.cat([x, input_cond], dim=-1)
+                    # If expected_cond_dim == 0, don't concatenate
 
-                x = torch.cat([x, input_cond], dim=-1)
 
             if l in self.skip_in:
                 x = torch.cat([x, input], 1) / np.sqrt(2)

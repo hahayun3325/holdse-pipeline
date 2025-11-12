@@ -1,0 +1,21 @@
+2025-11-03 08:39:50.957 | INFO     | src.hold.hold:training_step:1561 - [GHOP] ⏭️  Skipped at step 8000:
+2025-11-03 08:39:50.957 | INFO     | src.hold.hold:training_step:1562 -     global_step (8000) >= phase3_start_iter (0): True
+2025-11-03 08:39:50.957 | INFO     | src.hold.hold:training_step:1563 -     global_step (8000) >= warmup_iters (0): True
+2025-11-03 08:39:50.957 | INFO     | src.hold.hold:training_step:1564 -     global_step % sds_iters == 0: True
+2025-11-03 08:39:50.957 | INFO     | src.hold.hold:training_step:2044 - 
+[Loss Composition - Step 8000]
+  Base RGB loss:     1.002464
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.002464
+  ────────────────────
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Batch keys:        ['uv', 'intrinsics', 'extrinsics', 'im_path', 'idx', 'gt.rgb', 'gt.mask', 'img_size']
+  idx: tensor([[56],
+        [57]], device='cuda:0')
+[depth2pts_outside] Input checks:
+  depth: min=0.000057, max=0.666661, has_nan=False
+  ray_o: has_nan=False, max_norm=0.000000

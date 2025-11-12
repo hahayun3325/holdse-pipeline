@@ -118,13 +118,19 @@ class ObjectNode(Node):
         # Compute sample points
         points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
 
-        # ✅ ADD THIS: Expand cond to match ray batch
-        if batch_size > 1:
-            # Repeat cond for each pixel in the batch
-            # cond: [B, 3] -> [B, num_pixels, 3] -> [B*num_pixels, 3]
-            cond_expanded = cond["pose"].unsqueeze(1).repeat(1, num_pixels, 1)
-            cond_expanded = cond_expanded.reshape(-1, 3)
-            cond = {"pose": cond_expanded}
+        pose = cond["pose"]
+
+        # Ensure 2D
+        if pose.dim() == 1:
+            pose = pose.unsqueeze(0)
+        elif pose.dim() > 2:
+            # Squeeze all middle singleton dimensions
+            original_batch = pose.shape[0]
+            pose = pose.reshape(original_batch, -1)
+
+        # Expand: [B, D] -> [B*num_pixels, D]
+        cond_expanded = pose.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, pose.shape[-1])
+        cond = {"pose": cond_expanded}
 
         # ================================================================
         # ✅ FIX: Build output dict with correct variable names

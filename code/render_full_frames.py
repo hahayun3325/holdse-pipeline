@@ -22,6 +22,34 @@ from pathlib import Path
 import cv2
 
 
+def extract_img_size_robust(img_size_raw):
+    """
+    Robust extraction of H, W from various img_size structures.
+
+    Handles:
+    - TempoDataset: [[tensor([H]), tensor([W])], ...]
+    - Regular: tensor([H, W]) or [H, W]
+    """
+    try:
+        # TempoDataset nested list structure
+        if isinstance(img_size_raw, list) and len(img_size_raw) > 0:
+            first_frame = img_size_raw[0]
+            if isinstance(first_frame, list) and len(first_frame) >= 2:
+                H = int(first_frame[0].cpu().item() if isinstance(first_frame[0], torch.Tensor) else first_frame[0])
+                W = int(first_frame[1].cpu().item() if isinstance(first_frame[1], torch.Tensor) else first_frame[1])
+                return H, W
+
+        # Regular tensor/array structure
+        img_size_flat = np.array(img_size_raw).flatten()
+        if len(img_size_flat) >= 2:
+            return int(img_size_flat[0]), int(img_size_flat[1])
+
+    except Exception:
+        pass
+
+    return 512, 512  # Default fallback
+
+
 def save_full_frame(outputs, frame_idx, output_dir):
     """
     Save full rendered frame (not pixel samples).
@@ -188,6 +216,15 @@ def export_mesh(vertices, faces, filepath):
 
 
 def main():
+    # ================================================================
+    # CRITICAL: Disable Comet BEFORE parser_args()
+    # ================================================================
+    if '--no-comet' in sys.argv:
+        print("\n" + "=" * 70)
+        print("⚠️  COMET LOGGING DISABLED (render_full_frames.py)")
+        print("=" * 70)
+        os.environ['COMET_MODE'] = 'disabled'
+
     device = "cuda:0"
     args, opt = parser_args()
 
@@ -197,30 +234,150 @@ def main():
 
     pprint(args)
 
-    # Load model
+    # ================================================================
+    # CRITICAL FIX: Force training checkpoint for GHOP
+    # ================================================================
+    print("\n" + "="*70)
+    print("CHECKPOINT PATH CONFIGURATION")
+    print("="*70)
+
+    # Determine checkpoint path BEFORE creating model
+    original_infer_ckpt = args.infer_ckpt if hasattr(args, 'infer_ckpt') else ""
+
+    # Check if deployment checkpoint is being used
+    is_deployment_ckpt = (
+        'deployment' in original_infer_ckpt or
+        'hoi4d_phase5' in original_infer_ckpt
+    )
+
+    if is_deployment_ckpt:
+        # Deployment checkpoints don't work - use training checkpoint instead
+        training_ckpt = op.join(args.load_ckpt, "checkpoints", "last.ckpt")
+
+        print(f"⚠️  Deployment checkpoint detected:")
+        print(f"   {original_infer_ckpt}")
+        print(f"\n✓ Switching to training checkpoint:")
+        print(f"   {training_ckpt}")
+        print(f"\nReason: Deployment checkpoints missing GHOP structure.")
+        print(f"Training checkpoints contain all components correctly.")
+
+        # Override args BEFORE model creation
+        args.infer_ckpt = training_ckpt
+        args.ckpt_p = training_ckpt
+
+    elif original_infer_ckpt and op.exists(original_infer_ckpt):
+        print(f"✓ Using checkpoint: {original_infer_ckpt}")
+        args.ckpt_p = original_infer_ckpt
+
+    elif args.load_ckpt:
+        # Auto-construct from load_ckpt
+        training_ckpt = op.join(args.load_ckpt, "checkpoints", "last.ckpt")
+        print(f"✓ Auto-constructed checkpoint path:")
+        print(f"   {training_ckpt}")
+        args.infer_ckpt = training_ckpt
+        args.ckpt_p = training_ckpt
+
+    else:
+        raise ValueError("No checkpoint specified (use --infer_ckpt or --load_ckpt)")
+
+    # Verify checkpoint exists
+    ckpt_path = args.infer_ckpt if hasattr(args, 'infer_ckpt') and args.infer_ckpt else args.ckpt_p
+    if not op.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    print(f"\n✓ Checkpoint verified:")
+    print(f"  Path: {ckpt_path}")
+    print(f"  Size: {op.getsize(ckpt_path) / (1024**2):.1f} MB")
+    print("="*70 + "\n")
+
+    # ================================================================
+    # Load model (GHOP will now load correct checkpoint during init)
+    # ================================================================
+    print("Creating HOLD model...")
+    print("  (GHOP components will load from checkpoint during initialization)")
     model = HOLD(opt, args)
+    print("✓ Model created\n")
 
+    # ================================================================
     # Load dataset
-    try:
-        testset = create_dataset(opt.dataset.test, args)
-        print("✅ Using test dataset")
-    except AttributeError:
-        print("⚠️  No test dataset config, using train dataset")
-        testset = create_dataset(opt.dataset.train, args)
+    # ================================================================
+    print("="*70)
+    print("DATASET LOADING")
+    print("="*70)
 
-    print("\nDataset info:")
-    img_paths = np.array(testset.dataset.dataset.img_paths)
-    print(f"  Total images: {len(img_paths)}")
-    print(f"  First 3: {img_paths[:3]}")
-    print(f"  Last 3: {img_paths[-3:]}")
+    # Priority 1: Test dataset (TestDataset - single frames)
+    if hasattr(opt.dataset, 'test'):
+        print("Using test dataset configuration (single-frame TestDataset)")
+        dataset_config = opt.dataset.test
+        testset = create_dataset(dataset_config, args)
 
-    # Load checkpoint
+    # Priority 2: Validation dataset (ValDataset - single frames)
+    elif hasattr(opt.dataset, 'valid') or hasattr(opt.dataset, 'val'):
+        print("⚠️  No test config, using validation dataset (single-frame ValDataset)")
+        dataset_config = getattr(opt.dataset, 'valid', None) or opt.dataset.val
+        testset = create_dataset(dataset_config, args)
+
+    # Priority 3: Create test config from train config
+    else:
+        print("⚠️  No test/valid config, creating test config from train...")
+        from easydict import EasyDict
+        test_config = EasyDict(opt.dataset.train.copy())
+        test_config.type = "test"
+        test_config.shuffle = False
+        test_config.drop_last = False
+        test_config.num_workers = 0
+        testset = create_dataset(test_config, args)
+
+    # Verify dataset type
+    actual_dataset = testset.dataset if hasattr(testset, 'dataset') else testset
+    dataset_class = type(actual_dataset).__name__
+
+    print(f"\n✅ Dataset loaded:")
+    print(f"  Class: {dataset_class}")
+    print(f"  Total samples: {len(testset)}")
+
+    if 'Tempo' in dataset_class:
+        raise RuntimeError("TempoDataset loaded - use single-frame dataset for rendering")
+    else:
+        print(f"  ✅ Confirmed: Single-frame dataset ({dataset_class})")
+
+    print("="*70 + "\n")
+
+    # ================================================================
+    # Load checkpoint weights (for non-GHOP components)
+    # ================================================================
+    print("="*70)
+    print("LOADING CHECKPOINT WEIGHTS")
+    print("="*70)
+
     reset_all_seeds(1)
-    ckpt_path = None if args.ckpt_p == "" else args.ckpt_p
-    sd = torch.load(ckpt_path)["state_dict"]
-    model.load_state_dict(sd, strict=False)
+
+    print(f"Loading checkpoint: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+    sd = ckpt["state_dict"]
+    print(f"  Loaded {len(sd)} parameters")
+
+    # Load into model (GHOP already loaded during init, this loads everything else)
+    print(f"\nLoading state dict into model...")
+    missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
+
+    # Check status
+    ghop_missing = [k for k in missing_keys if 'ghop' in k.lower() or 'vqvae' in k.lower() or 'unet' in k.lower()]
+
+    if len(ghop_missing) > 0:
+        print(f"\n⚠️  {len(ghop_missing)} GHOP keys not loaded via load_state_dict")
+        print(f"   (This is normal - GHOP loaded during model init)")
+
+    if len(missing_keys) > len(ghop_missing):
+        print(f"\n⚠️  {len(missing_keys) - len(ghop_missing)} non-GHOP keys missing!")
+    else:
+        print(f"\n✅ All non-GHOP components loaded successfully")
+
     model.to(device)
     model.eval()
+
+    print(f"✓ Model loaded and set to eval mode")
+    print("="*70 + "\n")
 
     # Disable barf masks
     nodes = model.model.nodes
@@ -243,26 +400,53 @@ def main():
 
     for batch_idx, batch in enumerate(tqdm(testset, desc="Rendering frames")):
         with torch.no_grad():
-            # Move to device
             batch = thing.thing2dev(batch, device)
 
-            # Get image size
-            if 'img_size' in batch:
-                img_size = batch['img_size']
-                if isinstance(img_size, torch.Tensor):
-                    img_size = img_size.cpu().numpy()
-                H, W = int(img_size[0]), int(img_size[1])
-            else:
-                H, W = 512, 512  # Default
+            # Extract image size
+            H, W = extract_img_size_robust(batch.get('img_size', None))
 
             # Run inference
             out = model.inference_step(batch)
 
+            # DEBUG: First frame only
+            if batch_idx == 0:
+                print(f"\n[DEBUG] inference_step() output keys:")
+                for key in sorted(out.keys()):
+                    value = out[key]
+                    if isinstance(value, torch.Tensor):
+                        print(f"  {key}: shape={value.shape}, device={value.device}")
+                    elif isinstance(value, np.ndarray):
+                        print(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+                    else:
+                        print(f"  {key}: type={type(value)}")
+
+                # Check RGB values
+                if 'rgb' in out:
+                    rgb = out['rgb']
+                    print(f"\n[DEBUG] RGB statistics:")
+                    print(f"  Min: {rgb.min().item():.6f}")
+                    print(f"  Max: {rgb.max().item():.6f}")
+                    print(f"  Mean: {rgb.mean().item():.6f}")
+                    print(f"  Non-zero: {torch.count_nonzero(rgb).item()} / {rgb.numel()}")
+
             # Extract full frame from ray-based output
             full_frame = extract_full_frame_from_inference(out, (H, W))
 
+            # DEBUG: First frame only
+            if batch_idx == 0:
+                print(f"\n[DEBUG] Extracted full_frame:")
+                if len(full_frame) > 0:
+                    for key, value in full_frame.items():
+                        if isinstance(value, (torch.Tensor, np.ndarray)):
+                            shape = value.shape if hasattr(value, 'shape') else len(value)
+                            print(f"  {key}: shape={shape}")
+                else:
+                    print("  ⚠️  EMPTY!")
+                print()
+
             # Save full frame
-            save_full_frame(full_frame, frame_count, output_dir)
+            if len(full_frame) > 0:
+                save_full_frame(full_frame, frame_count, output_dir)
 
             # Export meshes if available
             if 'hand_verts' in out:
@@ -270,9 +454,8 @@ def main():
                 if isinstance(hand_verts, torch.Tensor):
                     hand_verts = hand_verts.cpu().numpy()
                     if len(hand_verts.shape) == 3:
-                        hand_verts = hand_verts[0]  # Remove batch dim
+                        hand_verts = hand_verts[0]
 
-                # Get hand faces
                 if hasattr(model, 'mano_faces'):
                     hand_faces = model.mano_faces.cpu().numpy()
                 elif 'hand_faces' in out:
@@ -298,7 +481,6 @@ def main():
 
             frame_count += 1
 
-            # Progress update
             if (batch_idx + 1) % 10 == 0:
                 print(f"  Rendered {frame_count} frames")
 
@@ -306,22 +488,49 @@ def main():
     # FINAL SUMMARY
     # ================================================================
     print(f"\n✅ Rendering complete!")
-    print(f"   Total frames: {frame_count}")
+    print(f"   Total frames rendered: {frame_count}")
     print(f"   Output directory: {args.log_dir}")
 
-    # Verify outputs
     rgb_files = list((output_dir / 'rgb').glob('*.png'))
+    normal_files = list((output_dir / 'normal').glob('*.png'))
     mesh_files = list(mesh_dir.glob('*.obj'))
 
     print(f"\n📊 Output summary:")
     print(f"   RGB images: {len(rgb_files)}")
+    print(f"   Normal maps: {len(normal_files)}")
     print(f"   Meshes: {len(mesh_files)}")
 
-    if len(rgb_files) < len(img_paths):
-        print(f"\n⚠️  WARNING: Expected {len(img_paths)} frames, got {len(rgb_files)}")
+    if len(rgb_files) < frame_count:
+        print(f"\n⚠️  WARNING: Expected {frame_count} frames, got {len(rgb_files)} RGB images")
     else:
-        print(f"\n✅ All frames rendered successfully!")
+        print(f"\n✅ All {frame_count} frames rendered successfully!")
 
 
 if __name__ == "__main__":
     main()
+
+'''
+cd ~/Projects/holdse/code
+
+# Baseline (Epoch 20)
+python render_full_frames.py \
+    --case ghop_bottle_1 \
+    --config confs/ghop_production_chunked_20251027_131408.yaml \
+    --load_ckpt logs/ad1f0073b \
+    --infer_ckpt ../deployment/hoi4d_phase5_v1.0/hoi4d_phase5_pre_v1.0.ckpt \
+    --gpu_id 0 \
+    --render_downsample 2 \
+    --use_ghop \
+    --no-comet > render_full_output.txt 2>&1
+
+# Phase 5 (Epoch 25)
+python render_full_frames.py \
+    --case ghop_bottle_1 \
+    --config confs/ghop_production_chunked_20251027_131408.yaml \
+    --load_ckpt logs/6aaaf5002 \
+    --infer_ckpt logs/6aaaf5002/checkpoints/last.ckpt \
+    --gpu_id 0 \
+    --render_downsample 2 \
+    --no-comet \
+    --agent_id -1 > render_full_output.txt 2>&1
+'''

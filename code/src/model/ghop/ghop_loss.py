@@ -289,7 +289,7 @@ class SDSLoss(nn.Module):
         except Exception as e:
             # Fallback: return zero loss on error
             device = obj_sdf.device
-            zero_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            zero_loss = torch.tensor(0.0, device=device, requires_grad=False)
             info = {
                 'error': str(e),
                 'sds_weighted': 0.0,

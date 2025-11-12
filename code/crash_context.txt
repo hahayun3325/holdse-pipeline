@@ -1,0 +1,50 @@
+    self._call_and_handle_interrupt(
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 683, in _call_and_handle_interrupt
+    return trainer_fn(*args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 773, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 1195, in _run
+    self._dispatch()
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 1275, in _dispatch
+    self.training_type_plugin.start_training(self)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/plugins/training_type/training_type_plugin.py", line 202, in start_training
+    self._results = trainer.run_stage()
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 1285, in run_stage
+    return self._run_train()
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 1315, in _run_train
+    self.fit_loop.run()
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/base.py", line 145, in run
+    self.advance(*args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/fit_loop.py", line 234, in advance
+    self.epoch_loop.run(data_fetcher)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/base.py", line 145, in run
+    self.advance(*args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/epoch/training_epoch_loop.py", line 193, in advance
+    batch_output = self.batch_loop.run(batch, batch_idx)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/base.py", line 145, in run
+    self.advance(*args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/batch/training_batch_loop.py", line 90, in advance
+    outputs = self.manual_loop.run(split_batch, batch_idx)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/base.py", line 145, in run
+    self.advance(*args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/loops/optimization/manual_loop.py", line 111, in advance
+    training_step_output = self.trainer.accelerator.training_step(step_kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/accelerators/accelerator.py", line 216, in training_step
+    return self.training_type_plugin.training_step(*step_kwargs.values())
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/plugins/training_type/training_type_plugin.py", line 213, in training_step
+    return self.model.training_step(*args, **kwargs)
+  File "/home/fredcui/Projects/holdse/code/src/hold/hold.py", line 2132, in training_step
+    self.manual_backward(final_loss, retain_graph=is_phase_transition)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/core/lightning.py", line 1415, in manual_backward
+    self.trainer.accelerator.backward(loss, None, None, *args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/accelerators/accelerator.py", line 311, in backward
+    self.precision_plugin.backward(self.lightning_module, closure_loss, *args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/plugins/precision/precision_plugin.py", line 91, in backward
+    model.backward(closure_loss, optimizer, *args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/core/lightning.py", line 1434, in backward
+    loss.backward(*args, **kwargs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/torch/_tensor.py", line 255, in backward
+    torch.autograd.backward(self, gradient, retain_graph, create_graph, inputs=inputs)
+  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/torch/autograd/__init__.py", line 147, in backward
+    Variable._execution_engine.run_backward(
+RuntimeError: Trying to backward through the graph a second time (or directly access saved variables after they have already been freed). Saved intermediate values of the graph are freed when you call .backward() or autograd.grad(). Specify retain_graph=True if you need to backward through the graph a second time or if you need to access saved variables after calling backward.

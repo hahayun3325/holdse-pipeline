@@ -1,0 +1,12 @@
+2025-10-28 12:49:06.948 | WARNING  | src.hold.hold_net:init_network:185 - Using MANO init that is for h2o, not the one in CVPR.
+2025-10-28 12:49:07.883 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
+2025-10-28 12:49:07.883 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
+2025-10-28 12:49:08.170 | WARNING  | src.model.ghop.diffusion:_load_checkpoint:559 - ⚠️  No matching keys found - using random initialization
+2025-10-28 12:49:08.170 | WARNING  | src.model.ghop.diffusion:_load_checkpoint:560 -   This is expected if GHOP checkpoint doesn't contain standard U-Net
+2025-10-28 12:49:08.195 | WARNING  | src.datasets.utils:create_dataset:121 - [DataLoader test] Disabling pin_memory to prevent memory leak (PyTorch 1.9.1+cu111, num_workers=0)
+[DEBUG] inference_step() output keys:
+[DEBUG] Extracted full_frame:
+   Total frames rendered: 3
+   RGB images: 0
+   Meshes: 0
+❌ ERROR: No RGB images saved!

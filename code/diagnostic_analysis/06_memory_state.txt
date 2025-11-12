@@ -1,0 +1,100 @@
+2167906:2025-11-03 08:39:27.410 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1780] Allocated: 34.3 MB, Reserved: 52.0 MB
+2167908:[Memory Summary Step 1780]
+2167909:  Allocated: 34.2 MB
+2167910:  Reserved:  52.0 MB
+2170706:2025-11-03 08:39:28.679 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1790] Allocated: 34.3 MB, Reserved: 52.0 MB
+2170708:[Memory Summary Step 1790]
+2170709:  Allocated: 34.2 MB
+2170710:  Reserved:  52.0 MB
+2173527:2025-11-03 08:39:29.713 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1800] Allocated: 34.3 MB, Reserved: 52.0 MB
+2173529:[Memory Summary Step 1800]
+2173530:  Allocated: 34.2 MB
+2173531:  Reserved:  52.0 MB
+2173553:  Allocated: 34.21 MB
+2173554:  Reserved:  52.00 MB
+2176331:2025-11-03 08:39:30.790 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1810] Allocated: 34.3 MB, Reserved: 52.0 MB
+2176333:[Memory Summary Step 1810]
+2176334:  Allocated: 34.2 MB
+2176335:  Reserved:  52.0 MB
+2179131:2025-11-03 08:39:31.790 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1820] Allocated: 34.3 MB, Reserved: 52.0 MB
+2179133:[Memory Summary Step 1820]
+2179134:  Allocated: 34.2 MB
+2179135:  Reserved:  52.0 MB
+2181935:2025-11-03 08:39:32.805 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1830] Allocated: 34.3 MB, Reserved: 52.0 MB
+2181937:[Memory Summary Step 1830]
+2181938:  Allocated: 34.2 MB
+2181939:  Reserved:  52.0 MB
+2184563:2025-11-03 08:39:33.803 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1840] Allocated: 34.3 MB, Reserved: 52.0 MB
+2184565:[Memory Summary Step 1840]
+2184566:  Allocated: 34.2 MB
+2184567:  Reserved:  52.0 MB
+2187366:2025-11-03 08:39:34.900 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1850] Allocated: 34.3 MB, Reserved: 52.0 MB
+2187368:[Memory Summary Step 1850]
+2187369:  Allocated: 34.2 MB
+2187370:  Reserved:  52.0 MB
+2190161:2025-11-03 08:39:36.001 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1860] Allocated: 34.3 MB, Reserved: 52.0 MB
+2190163:[Memory Summary Step 1860]
+2190164:  Allocated: 34.2 MB
+2190165:  Reserved:  52.0 MB
+2192968:2025-11-03 08:39:36.999 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1870] Allocated: 34.3 MB, Reserved: 52.0 MB
+2192970:[Memory Summary Step 1870]
+2192971:  Allocated: 34.2 MB
+2192972:  Reserved:  52.0 MB
+2195766:2025-11-03 08:39:38.002 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1880] Allocated: 34.3 MB, Reserved: 52.0 MB
+2195768:[Memory Summary Step 1880]
+2195769:  Allocated: 34.3 MB
+2195770:  Reserved:  52.0 MB
+2198561:2025-11-03 08:39:38.990 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1890] Allocated: 34.3 MB, Reserved: 52.0 MB
+2198563:[Memory Summary Step 1890]
+2198564:  Allocated: 34.3 MB
+2198565:  Reserved:  52.0 MB
+2201384:2025-11-03 08:39:39.989 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1900] Allocated: 34.3 MB, Reserved: 52.0 MB
+2201386:[Memory Summary Step 1900]
+2201387:  Allocated: 34.3 MB
+2201388:  Reserved:  52.0 MB
+2204182:2025-11-03 08:39:41.049 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1910] Allocated: 34.3 MB, Reserved: 52.0 MB
+2204184:[Memory Summary Step 1910]
+2204185:  Allocated: 34.3 MB
+2204186:  Reserved:  52.0 MB
+2206978:2025-11-03 08:39:42.041 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1920] Allocated: 34.3 MB, Reserved: 52.0 MB
+2206980:[Memory Summary Step 1920]
+2206981:  Allocated: 34.3 MB
+2206982:  Reserved:  52.0 MB
+2209784:2025-11-03 08:39:43.100 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1930] Allocated: 34.4 MB, Reserved: 52.0 MB
+2209786:[Memory Summary Step 1930]
+2209787:  Allocated: 34.3 MB
+2209788:  Reserved:  52.0 MB
+2212409:2025-11-03 08:39:44.285 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1940] Allocated: 34.4 MB, Reserved: 52.0 MB
+2212411:[Memory Summary Step 1940]
+2212412:  Allocated: 34.3 MB
+2212413:  Reserved:  52.0 MB
+2215215:2025-11-03 08:39:45.291 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1950] Allocated: 34.4 MB, Reserved: 52.0 MB
+2215217:[Memory Summary Step 1950]
+2215218:  Allocated: 34.3 MB
+2215219:  Reserved:  52.0 MB
+2218010:2025-11-03 08:39:46.363 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1960] Allocated: 34.4 MB, Reserved: 52.0 MB
+2218012:[Memory Summary Step 1960]
+2218013:  Allocated: 34.3 MB
+2218014:  Reserved:  52.0 MB
+2220813:2025-11-03 08:39:47.385 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1970] Allocated: 34.4 MB, Reserved: 52.0 MB
+2220815:[Memory Summary Step 1970]
+2220816:  Allocated: 34.3 MB
+2220817:  Reserved:  52.0 MB
+2223615:2025-11-03 08:39:48.398 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1980] Allocated: 34.4 MB, Reserved: 52.0 MB
+2223617:[Memory Summary Step 1980]
+2223618:  Allocated: 34.3 MB
+2223619:  Reserved:  52.0 MB
+2226410:2025-11-03 08:39:49.392 | DEBUG    | src.hold.hold:training_step:2179 - [Defrag Step 1990] Allocated: 34.4 MB, Reserved: 52.0 MB
+2226412:[Memory Summary Step 1990]
+2226413:  Allocated: 34.3 MB
+2226414:  Reserved:  52.0 MB
+2228994:2025-11-03 08:39:50.278 | INFO     | src.hold.hold:training_epoch_end:3399 - [Epoch 3]   Allocated: 4.49 MB
+2228995:2025-11-03 08:39:50.278 | INFO     | src.hold.hold:training_epoch_end:3400 - [Epoch 3]   Reserved:  44.00 MB
+2228998:2025-11-03 08:39:50.332 | INFO     | src.hold.hold:training_epoch_end:3418 - [Epoch 3]   Allocated: 4.49 MB
+2228999:2025-11-03 08:39:50.332 | INFO     | src.hold.hold:training_epoch_end:3419 - [Epoch 3]   Reserved:  44.00 MB
+2229007:  Allocated: 4.49 MB
+2229008:  Reserved: 44.00 MB
+2229015:  Allocated: 4.49 MB
+2229016:  Reserved: 44.00 MB
+2229295:  Allocated: 4.49 MB
+2229296:  Reserved: 44.00 MB

@@ -117,10 +117,10 @@ def create_dataset_with_ghop_support(dataset_config, args):
 
     # Check for GHOP-specific markers in config
     use_ghop = (
-            hasattr(args, 'use_ghop') and args.use_ghop or
-            dataset_config.get('dataset_type', '') == 'ghop_hoi' or
-            dataset_config.get('is_video', False) or
-            'ghop' in args.case.lower()  # Case name contains 'ghop'
+        (hasattr(args, 'use_ghop') and args.use_ghop) or
+        dataset_config.get('dataset_type', '') == 'ghop_hoi' or
+        dataset_config.get('is_video', False)
+        # Removed: 'ghop' in args.case.lower()
     )
 
     # ================================================================
@@ -184,24 +184,48 @@ def create_dataset_with_ghop_support(dataset_config, args):
             logger.warning(f"  ⚠️  Phase 5 will SKIP")
 
         logger.info("=" * 70)
-
+        return dataset
     else:
         # ================================================================
-        # HOLD Single-Image Dataset (Original)
+        # HOLD Single-Image Dataset
         # ================================================================
         logger.info("=" * 70)
         logger.info("CREATING HOLD SINGLE-IMAGE DATASET")
         logger.info("=" * 70)
 
-        dataset = create_image_dataset(dataset_config, args)
+        # ❌ OLD CODE (returns DataLoader):
+        # dataset = create_image_dataset(dataset_config, args)
+
+        # ✅ NEW CODE (returns Dataset directly):
+        # Determine dataset class based on split type
+        if dataset_type == "train":
+            from src.datasets.tempo_dataset import TempoDataset
+            dataset = TempoDataset(args)
+            logger.info(f"  Dataset class: TempoDataset")
+        elif dataset_type == "val":
+            from src.datasets.eval_datasets import ValDataset
+            dataset = ValDataset(args)
+            logger.info(f"  Dataset class: ValDataset")
+        else:
+            raise ValueError(f"Unknown dataset type: {dataset_type}")
 
         logger.info(f"✓ HOLD dataset created:")
-        logger.info(f"  Images: {len(dataset)}")
-        logger.info(f"  Type: Single-image")
+        logger.info(f"  Total samples: {len(dataset)}")
+
+        # ✅ CRITICAL: Verify RGB ground truth is present
+        sample = dataset[0]
+        has_rgb = 'gt.rgb' in sample
+
+        if has_rgb:
+            logger.info(f"  ✅ Has gt.rgb: {sample['gt.rgb'].shape}")
+        else:
+            logger.warning(f"  ⚠️  Missing gt.rgb - RGB loss will fail!")
+            logger.warning(f"     Batch keys: {list(sample.keys())}")
+
         logger.info(f"  ⚠️  Phase 5 temporal will SKIP (no video data)")
         logger.info("=" * 70)
 
-    return dataset
+        return dataset  # ← Returns Dataset object (not DataLoader)
 
 def main():
     # ================================================================

@@ -1,0 +1,251 @@
+# Save as: confs/ghop_stage3_full_pipeline.yaml
+
+# ================================================================
+# STAGE 3: Full Pipeline Training
+# Phases: 3 (GHOP SDS) + 4 (Contact) + 5 (Temporal)
+# Must match Stage 2 network architecture EXACTLY
+# ================================================================
+
+# Dataset Configuration (same as Stage 2)
+dataset:
+  train:
+    type: "train"
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 4
+    prefetch_factor: 2
+
+  valid:
+    type: "val"
+    enabled: false
+    batch_size: 1
+
+# Training Configuration
+training:
+  num_epochs: 20               # Increase from 10 to give phases time
+  max_steps: -1
+  eval_every_epoch: 999
+  log_every: 10
+  gradient_clip: 1.0           # Slightly higher for multi-phase stability
+
+# Loss Configuration
+loss:
+  w_rgb: 1.0
+  w_mask: 0.1
+  w_eikonal: 1.0
+  w_smooth: 0.005
+  w_temporal: 1.0              # Temporal consistency
+  w_contact: 10.0              # Hand-object contact
+  rgb_loss_type: "l1"
+
+# ================================================================
+# MODEL: MUST MATCH STAGE 2 ARCHITECTURE EXACTLY
+# ================================================================
+model:
+  implicit_network:
+    feature_vector_size: 256    # ✅ Match Stage 2
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256]  # ✅ Match Stage 2
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: pose
+
+  rendering_network:
+    feature_vector_size: 256    # ✅ Match Stage 2
+    mode: pose
+    d_in: 270                   # ✅ Match Stage 2
+    d_out: 3
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]  # ✅ Match Stage 2
+    weight_norm: true
+    multires_view: 0
+    time_code_dim: 32
+    d_implicit_features: 256
+
+  bg_implicit_network:
+    feature_vector_size: 256    # ✅ Match Stage 2
+    d_in: 4
+    d_out: 1
+    dims: [256, 256, 256]
+    init: none
+    bias: 0.0
+    skip_in: []
+    weight_norm: true
+    multires: 10
+    cond: frame
+    dim_frame_encoding: 32
+
+  bg_rendering_network:
+    feature_vector_size: 256    # ✅ Match Stage 2
+    mode: nerf_frame_encoding
+    d_in: 259                   # ✅ Match Stage 2
+    d_out: 3
+    dims: [128]
+    weight_norm: true
+    multires_view: 4
+    dim_frame_encoding: 32
+
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  ray_sampler:
+    near: 0.0
+    N_samples: 64               # ✅ Match Stage 2 (not 6!)
+    N_samples_eval: 128         # ✅ Match Stage 2 (not 8!)
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 10
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+
+  sdf_bounding_sphere: 1.5
+
+# ================================================================
+# PHASE 3: GHOP SDS (Continue from Stage 2)
+# ================================================================
+phase3:
+  enabled: true
+  ghop:
+    config_path: checkpoints/ghop/config.yaml
+    device: cuda
+    text_lib: null
+    unet_checkpoint: checkpoints/ghop/last.ckpt
+    unet_use_pretrained: true
+    unified_checkpoint: checkpoints/ghop/last.ckpt
+    vqvae_checkpoint: checkpoints/ghop/last.ckpt
+    vqvae_use_pretrained: true
+
+  grid_resolution: 24
+  phase3_start_iter: 0
+  phase3_end_iter: 99999
+
+  sds:
+    diffusion_steps: 1000
+    guidance_scale: 3.0          # ✅ Reduce from 4.0
+    max_step_ratio: 0.98
+    min_step_ratio: 0.02
+    noise_schedule: linear
+    prediction_respacing: 50
+
+  sds_iters: 1
+  spatial_lim: 1.5
+  use_modular_init: true
+  w_sds: 10.0                    # ✅ Use 10.0 (NOT 5000!)
+  warmup_iters: 0
+
+# ================================================================
+# PHASE 4: CONTACT REFINEMENT (Hand-Object Contacts)
+# ================================================================
+phase4:
+  enabled: true
+
+  # Start Phase 4 after initial convergence
+  contact_start_iter: 2000       # ✅ Start AFTER Phase 3 ends
+  contact_warmup_iters: 500
+  contact_duration: 99999
+
+  # Contact refinement settings
+  contact_refinement:
+    enabled: true
+    contact_thresh: 0.01         # 10mm contact threshold
+    collision_thresh: 0.005      # 5mm collision threshold
+    contact_zones: zones
+    w_penetration: 5.0           # Reduce from 20
+    w_attraction: 1.0            # Reduce from 3
+    w_damping: 0.1               # ✅ ADD damping for stability
+
+  # Loss weight
+  w_contact: 1.0                 # Reduce from 5.0
+  contact_grad_clip: 5.0
+
+  # Mesh extraction for contact computation
+  mesh_extraction:
+    enabled: true
+    extract_every: 5             # Extract every 5 iters (not every iter)
+    resolution: 64
+    threshold: 0.0
+
+  # Caching and optimization
+  use_mesh_cache: true
+  cache_max_age: 10              # Cache meshes for 10 iterations
+  use_pytorch3d: true
+  fallback_on_error: true
+
+  # Logging
+  enable_tb_logging: true
+  log_contact_every: 10
+  visualize_contact: false       # Disable for speed
+  visualize_every: 100
+  visualize_output_dir: phase4_visualizations
+
+# ================================================================
+# PHASE 5: TEMPORAL CONSISTENCY (Motion Smoothness)
+# ================================================================
+phase5:
+  enabled: true
+
+  # Start Phase 5 after Phase 4 has stabilized
+  phase5_start_iter: 5000        # ✅ Delay activation (not 1000)
+  warmup_iters: 500              # ✅ Gradual ramp-up
+
+  # Temporal consistency settings
+  temporal_window: 3             # Consider 3 consecutive frames
+  proximity_threshold: 0.015     # 15mm proximity for contact tracking
+
+  # Loss weights
+  w_temporal: 0.01               # Reduce from 1.0 (100× reduction!)
+  w_velocity: 0.005              # Reduce from 0.3
+  w_acceleration: 0.001          # Reduce from 0.05
+  w_camera_motion: 0.005         # Reduce from 0.2
+
+  # Contact tracking
+  min_contact_verts: 5
+  max_contact_verts: 50
+  contact_update_freq: 10
+  penalize_palm: true
+
+  # Diffusion guidance (for temporal)
+  guidance_scale: 3.0            # ✅ REDUCE from 4.0 (gentler)
+  max_step: 0.98
+  min_step: 0.02
+  prediction_respacing: 100
+
+  # Optimization
+  use_scheduler: false
+  w_schedule: dream
+  adaptive_weight: true
+  enable_geometry_sampling: false
+
+  # Logging
+  log_phase5_every: 10
+
+  # Total iterations (will be ignored, just for reference)
+  total_iterations: 99999        # ✅ Remove unrealistic limit
+
+# Optimizer Configuration
+optimizer:
+  lr: 0.00003                    # ✅ LOWER for multi-phase stability
+  type: "adam"
+  weight_decay: 0.0
+
+# Experiment metadata
+experiment:
+  name: 'ghop_stage3_full_pipeline'
+  description: 'Full pipeline with Phase 3+4+5'
+
+# Logging
+logging:
+  log_images_every: 50
+  log_mesh_every: 500            # Don't log meshes too frequently
+  log_to_file: true
+  verbose: true
+
+# Validation (disabled for speed)
+validation:
+  enabled: false

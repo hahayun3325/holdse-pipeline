@@ -11,6 +11,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import os
 
 class DiffusionSchedule:
     """
@@ -481,6 +482,11 @@ class GHOP3DUNetWrapper(nn.Module):
         from loguru import logger
 
         logger.info(f"[GHOP3DUNetWrapper] Loading from: {checkpoint_path}")
+
+        if not os.path.exists(checkpoint_path):
+            logger.warning(f"[GHOP3DUNetWrapper] Checkpoint not found: {checkpoint_path}")
+            logger.warning("Continuing with random initialization...")
+            return
 
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')

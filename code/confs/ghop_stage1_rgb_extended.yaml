@@ -1,0 +1,86 @@
+# ========================================================================
+# STAGE 1: EXTENDED RGB TRAINING (30 epochs)
+# ========================================================================
+
+defaults:
+  - sanity_check_fast  # This inherits all model, architecture configs
+
+# ========================================================================
+# OVERRIDE: Dataset settings
+# ========================================================================
+dataset:
+  train:
+    type: train
+    batch_size: 1
+    shuffle: true
+    num_workers: 0
+    drop_last: false
+
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    enabled: false
+
+# ========================================================================
+# OVERRIDE: Loss configuration (RGB ONLY)
+# ========================================================================
+loss:
+  w_rgb: 1.0
+  w_mask: 0.0
+  w_eikonal: 0.0
+  w_smooth: 0.0
+  w_contact: 0.0
+  w_temporal: 0.0
+  rgb_loss_type: "l1"
+
+# ========================================================================
+# OVERRIDE: Disable phases 3-5
+# ========================================================================
+phase3:
+  enabled: false
+
+phase4:
+  enabled: false
+
+phase5:
+  enabled: false
+
+# ========================================================================
+# OVERRIDE: Training parameters
+# ========================================================================
+training:
+  num_epochs: 30          # Extended from 10
+  max_steps: -1
+  eval_every_epoch: 999   # Disable validation
+  log_every: 1
+  gradient_clip: 0.5
+
+# ========================================================================
+# OVERRIDE: Optimizer with learning rate scheduler
+# ========================================================================
+optimizer:
+  type: adam
+  lr: 0.00005             # Lower than before for stability
+  weight_decay: 0.0
+  
+  # Learning rate scheduler
+  lr_scheduler:
+    type: step
+    step_size: 10         # Reduce LR every 10 epochs
+    gamma: 0.5            # Multiply by 0.5 each time
+
+# ========================================================================
+# OVERRIDE: Validation disabled
+# ========================================================================
+validation:
+  enabled: false
+
+# ========================================================================
+# OVERRIDE: Logging
+# ========================================================================
+logging:
+  verbose: false
+  log_images_every: 999
+  log_mesh_every: 999999

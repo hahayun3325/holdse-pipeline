@@ -48,7 +48,14 @@ class Loss(nn.Module):
         device = batch["idx"].device
 
         # Equal scoring for now
-        image_scores = torch.ones(batch["idx"].shape).float().to(device)
+        idx = batch["idx"]
+        # Ensure idx is 1D for image_scores shape
+        if idx.dim() > 1:
+            idx = idx.squeeze()
+        if idx.dim() == 0:
+            idx = idx.unsqueeze(0)
+
+        image_scores = torch.ones(idx.shape[0]).float().to(device)
 
         # Get image dimensions
         if self.im_w is None:
@@ -123,6 +130,7 @@ class Loss(nn.Module):
                 image_scores,
             )
             loss_dict["loss/rgb"] = rgb_loss * 1.0
+            print(f"[DEBUG RGB LOSS] rgb_loss value: {rgb_loss.item():.6f}")
 
         # Semantic segmentation loss
         if "semantics" in model_outputs:

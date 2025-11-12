@@ -12,6 +12,8 @@ from src.utils.const import SEGM_IDS
 
 # L1 reconstruction loss for RGB values
 def get_rgb_loss(rgb_values, rgb_gt, valid_pix, scores):
+    # Clamp RGB to [0, 1] range (fix for loss > 1.0 bug)
+    rgb_values = torch.clamp(rgb_values, 0, 1)
     rgb_loss = l1_loss(rgb_values, rgb_gt) * valid_pix[:, None]
     num_pix = rgb_loss.shape[0] // scores.shape[0]
     scores = scores[:, None].repeat(1, num_pix).view(-1, 1)

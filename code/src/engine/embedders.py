@@ -71,16 +71,22 @@ class BarfEmbedder(Embedder):
         self.start = start
         self.end = end
         self.dev = dev
-        self.alphas = torch.cat(
-            (
-                torch.zeros(self.start),
-                torch.linspace(0, self.num_freq, self.end - self.start),
-            ),
-            dim=0,
-        )
+        # Handle case where BARF is disabled (start=0, end=0)
+        if self.start == 0 and self.end == 0:
+            # BARF disabled: use full frequency from the start
+            self.alphas = torch.tensor([self.num_freq], dtype=torch.float32)
+        else:
+            # BARF enabled: gradually increase frequency
+            self.alphas = torch.cat(
+                (
+                    torch.zeros(self.start),
+                    torch.linspace(0, self.num_freq, self.end - self.start),
+                ),
+                dim=0,
+            )
 
         self.register_buffer("alpha_iter", torch.tensor(0))
-        self.alpha = self.alphas[self.alpha_iter]
+        self.alpha = self.alphas[self.alpha_iter] if len(self.alphas) > 0 else torch.tensor(self.num_freq, dtype=torch.float32)
         self.register_buffer("alpha_max_iter", torch.tensor(len(self.alphas)))
         self.populate_barf_weights(self.alpha)
 

@@ -3,13 +3,44 @@ import torch.nn as nn
 
 from ..engine.embedders import get_embedder
 
+def debug_embedder(multires):
+    """Calculate positional encoding dimensions"""
+    # From get_embedder() implementation
+    embed_fns = []
+    d = 3  # input dimension (xyz or view direction)
+    out_dim = 0
+
+    if True:  # include_input
+        out_dim += d
+
+    max_freq = multires - 1
+    N_freqs = multires
+
+    for freq_idx in range(N_freqs):
+        for p_fn in [torch.sin, torch.cos]:
+            out_dim += d
+
+    print(f"\n[EMBEDDER DEBUG] multires={multires}:")
+    print(f"  Input dim: {d}")
+    print(f"  Include input: {d}D")
+    print(f"  Frequencies: {N_freqs}")
+    print(f"  Sin/Cos pairs: {N_freqs} * 2 * {d} = {N_freqs * 2 * d}D")
+    print(f"  Total output: {out_dim}D")
+    print(f"  Overhead: {out_dim - d}D")
+    return out_dim
 
 class RenderingNet(nn.Module):
     def __init__(self, opt, args, body_specs):
         super().__init__()
 
         self.mode = opt.mode
-        dims = [opt.d_in + opt.feature_vector_size] + list(opt.dims) + [opt.d_out]
+        # dims = [opt.d_in + opt.feature_vector_size] + list(opt.dims) + [opt.d_out]
+        dims = [opt.d_in] + list(opt.dims) + [opt.d_out]
+
+        # ✅ DEBUG 1: Print initial dims
+        print(f"\n[RENDER NET INIT] Initial configuration:")
+        print(f"  opt.d_in: {opt.d_in}")
+        print(f"  dims[0] BEFORE adjustments: {dims[0]}")
 
         self.body_specs = body_specs
 
@@ -22,17 +53,39 @@ class RenderingNet(nn.Module):
                 barf_e=args.barf_e,
                 no_barf=args.no_barf,
             )
+            # ✅ DEBUG: Verify embedder dimensions
+            calculated_input_ch = debug_embedder(opt.multires_view)
+            assert calculated_input_ch == input_ch, f"Embedder mismatch: {calculated_input_ch} != {input_ch}"
+
             self.embedder_obj = embedder_obj
+
+            # ✅ DEBUG 2: Print multires_view adjustment
+            print(f"\n[RENDER NET INIT] multires_view adjustment:")
+            print(f"  opt.multires_view: {opt.multires_view}")
+            print(f"  input_ch from embedder: {input_ch}")
+            print(f"  dims[0] BEFORE: {dims[0]}")
             dims[0] += input_ch - 3
+            print(f"  dims[0] AFTER: {dims[0]} (added {input_ch - 3})")
+
         if self.mode == "nerf_frame_encoding":
             dims[0] += opt.dim_frame_encoding
         if self.mode == "pose":
             self.dim_cond_embed = 8
-            self.cond_dim = (
-                self.body_specs.pose_dim
-            )  # dimension of the body pose, global orientation excluded.
-            # lower the condition dimension
+            self.cond_dim = self.body_specs.pose_dim
             self.lin_pose = torch.nn.Linear(self.cond_dim, self.dim_cond_embed)
+
+            # ✅ DEBUG 3: Print pose configuration
+            print(f"\n[RENDER NET INIT] Pose mode configuration:")
+            print(f"  body_specs.pose_dim: {self.cond_dim}")
+            print(f"  dim_cond_embed: {self.dim_cond_embed}")
+
+        # ✅ DEBUG 4: Print final dims
+        print(f"\n[RENDER NET INIT] Final network dims:")
+        print(f"  dims: {dims}")
+        print(f"  lin0 will be: {dims[0]} → {dims[1]}")
+        print(f"  Total layers: {len(dims) - 1}")
+        print(f"=" * 70 + "\n")
+
         self.num_layers = len(dims)
         for l in range(0, self.num_layers - 1):
             out_dim = dims[l + 1]
@@ -52,6 +105,16 @@ class RenderingNet(nn.Module):
         feature_vectors,
         frame_latent_code=None,
     ):
+        # ✅ FIX: Add None checks to debug prints
+        print(f"\n[RENDER NET FORWARD] Raw inputs:")
+        print(f"  points: {points.shape if points is not None else 'None'}")
+        print(f"  normals: {normals.shape if normals is not None else 'None'}")
+        print(f"  view_dirs: {view_dirs.shape if view_dirs is not None else 'None'}")
+        print(f"  body_pose: {body_pose.shape if body_pose is not None else 'None'}")
+        print(f"  feature_vectors: {feature_vectors.shape if feature_vectors is not None else 'None'}")
+        print(f"  frame_latent_code: {frame_latent_code.shape if frame_latent_code is not None else 'None'}")
+        print(f"  mode: {self.mode}")
+
         if self.embedder_obj is not None:
             if self.mode == "nerf_frame_encoding":
                 view_dirs = self.embedder_obj.embed(view_dirs)
@@ -122,6 +185,14 @@ class RenderingNet(nn.Module):
                 rendering_input = rendering_input.view(-1, rendering_input.shape[2])
             # else already 2D
         elif self.mode == "pose":
+            # ✅ FIX: Only access shapes if not None
+            if points is None or normals is None or body_pose is None:
+                raise ValueError(
+                    f"[RENDER NET] mode='pose' requires points, normals, and body_pose, "
+                    f"but got points={points is not None}, normals={normals is not None}, "
+                    f"body_pose={body_pose is not None}"
+                )
+
             num_images = body_pose.shape[0]
             points = points.view(num_images, -1, 3)
 
@@ -134,12 +205,16 @@ class RenderingNet(nn.Module):
             )
             num_dim = body_pose.shape[1]
 
-            # ================================================================
-            # ✅ FIX: Handle zero or non-zero pose dimensions CORRECTLY
-            # ================================================================
+            # ✅ DEBUG 6: Print pose processing
+            print(f"\n[RENDER NET FORWARD] Pose processing:")
+            print(f"  num_images: {num_images}")
+            print(f"  num_points: {num_points}")
+            print(f"  body_pose before lin_pose: {body_pose.shape}")
+
             if num_dim > 0 and self.cond_dim > 0:
                 # Normal case: MANO has pose (45D), has linear layer
                 body_pose = self.lin_pose(body_pose)
+                print(f"  body_pose after lin_pose: {body_pose.shape}")
             elif num_dim > 0 and self.cond_dim == 0:
                 # Object case: has orient (3D) but NO pose linear layer
                 # The network was trained WITHOUT pose conditioning
@@ -154,6 +229,7 @@ class RenderingNet(nn.Module):
                 needed_body_pose_size = expected_input_size - current_size
 
                 body_pose = torch.zeros(points.shape[0], needed_body_pose_size, device=points.device)
+                print(f"  body_pose zeroed: {body_pose.shape}")
             else:
                 # No pose parameters at all
                 expected_input_size = self.lin0.weight.shape[1]
@@ -164,6 +240,26 @@ class RenderingNet(nn.Module):
             rendering_input = torch.cat(
                 [points, normals, body_pose, feature_vectors], dim=-1
             )
+
+            # ✅ DEBUG 7: Print concatenation result
+            print(f"\n[RENDER NET FORWARD] Concatenation breakdown:")
+            print(f"  points: {points.shape[-1]}D")
+            print(f"  normals: {normals.shape[-1]}D")
+            print(f"  body_pose: {body_pose.shape[-1]}D")
+            print(f"  feature_vectors: {feature_vectors.shape[-1]}D")
+            print(f"  rendering_input: {rendering_input.shape}")
+            print(f"  Total dims: {points.shape[-1]} + {normals.shape[-1]} + {body_pose.shape[-1]} + {feature_vectors.shape[-1]} = {rendering_input.shape[-1]}")
+
+            # ✅ DEBUG 8: Compare with lin0 expectation
+            print(f"\n[RENDER NET FORWARD] Dimension check:")
+            print(f"  rendering_input actual: {rendering_input.shape[-1]}D")
+            print(f"  lin0 expects: {self.lin0.weight.shape[1]}D")
+            if rendering_input.shape[-1] != self.lin0.weight.shape[1]:
+                print(f"  ❌ MISMATCH! Difference: {self.lin0.weight.shape[1] - rendering_input.shape[-1]}")
+            else:
+                print(f"  ✅ MATCH!")
+            print(f"=" * 70 + "\n")
+
         else:
             raise NotImplementedError
 
@@ -174,4 +270,5 @@ class RenderingNet(nn.Module):
             if l < self.num_layers - 2:
                 x = self.relu(x)
         x = self.sigmoid(x)
+
         return x

@@ -195,7 +195,7 @@ class GHOPContactRefinement(nn.Module):
             penetration_values = self.collision_thresh - dists[penetration_mask]
             penetration_loss = penetration_values.pow(2).mean()
         else:
-            penetration_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            penetration_loss = torch.tensor(0.0, device=device, requires_grad=False)
 
         # ====================================================================
         # Attraction Loss (Contact Formation)
@@ -209,7 +209,7 @@ class GHOPContactRefinement(nn.Module):
             # Note: contact_dists is detached, so the graph starts HERE
             attraction_loss = contact_dists[attraction_mask].pow(2).mean()
         else:
-            attraction_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            attraction_loss = torch.tensor(0.0, device=device, requires_grad=False)
 
         # ====================================================================
         # Total Contact Loss

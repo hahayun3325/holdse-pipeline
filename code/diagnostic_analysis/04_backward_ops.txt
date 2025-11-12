@@ -1,0 +1,2 @@
+2229392:    self.manual_backward(final_loss, retain_graph=is_phase_transition or True)
+2229393:  File "/home/fredcui/anaconda3/envs/ghop_hold_integrated/lib/python3.8/site-packages/pytorch_lightning/core/lightning.py", line 1415, in manual_backward

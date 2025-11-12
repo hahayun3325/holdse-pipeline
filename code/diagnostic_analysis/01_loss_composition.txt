@@ -1,0 +1,648 @@
+  Base RGB loss:     1.682737
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.682737
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.556551
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.556551
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.605917
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.605917
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.338836
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.338836
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.364674
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.364674
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.406463
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.406463
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.407517
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.407517
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.040279
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.040279
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.336923
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.336923
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.330232
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.330232
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.127981
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.127981
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.990532
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.990532
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.375163
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.375163
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.260474
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.260474
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.225299
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.225299
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.337417
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.337417
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.271223
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.271223
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.202732
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.202732
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.970867
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.970867
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.122098
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.122098
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.255205
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.255205
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.309697
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.309697
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.251149
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.251149
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.997025
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.997025
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.216726
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.216726
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.227457
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.227457
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.177794
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.177794
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.145444
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.145444
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.072296
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.072296
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.217178
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.217178
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.123067
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.123067
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.241794
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.241794
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.158039
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.158039
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.987976
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.987976
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.999519
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.999519
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.098737
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.098737
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.149686
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.149686
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.978998
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.978998
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.180533
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.180533
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.031237
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.031237
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.968401
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.968401
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.120226
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.120226
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.215190
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.215190
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.148525
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.148525
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.189991
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.189991
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.958946
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.958946
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.155572
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.155572
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.107625
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.107625
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.042881
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.042881
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.915303
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.915303
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.050124
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.050124
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.121109
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.121109
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.080804
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.080804
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.121218
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.121218
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.060711
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.060711
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.049284
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.049284
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.178239
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.178239
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.057401
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.057401
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.998485
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.998485
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.066965
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.066965
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.056911
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.056911
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.051041
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.051041
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.067271
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.067271
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.135492
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.135492
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.083360
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.083360
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.110894
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.110894
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.004055
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.004055
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     0.998443
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       0.998443
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.091379
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.091379
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.062155
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.062155
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.047435
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.047435
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.083597
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.083597
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.096493
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.096493
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.050620
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.050620
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.102252
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.102252
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.067898
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.067898
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.119621
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.119621
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.097531
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.097531
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.056921
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.056921
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.056830
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.056830
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False
+  Base RGB loss:     1.002464
+  GHOP SDS loss:     0.000000
+  Contact loss:      0.000000
+  Temporal loss:     0.000000
+  Final total:       1.002464
+  Phase 3 active:    False
+  Phase 4 active:    False
+  Phase 5 active:    False

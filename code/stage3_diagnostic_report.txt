@@ -1,0 +1,51 @@
+======================================================================
+STAGE 3 TRAINING DIAGNOSTIC REPORT
+======================================================================
+
+1. LOSS PROGRESSION:
+   Epoch 0: 0.000926 ✅
+   Epoch 1: 0.000000 ✅
+   Epoch 2: 0.000000 ✅
+   Epoch 3: 0.001671 ✅
+   Epoch 4: 0.001845 ✅
+   Epoch 5: 0.001618 ✅
+   Epoch 6: 0.001313 ✅
+   Epoch 7: 0.001394 ✅
+   Epoch 8: 0.001894 ✅
+   Epoch 9: 0.001316 ✅
+   Epoch 10: 0.001777 ✅
+   Epoch 11: 0.001389 ✅
+   Epoch 12: 0.001646 ✅
+   Epoch 13: 0.001920 ✅
+   Epoch 14: 0.001551 ✅
+   Epoch 15: 0.001737 ✅
+   Epoch 16: 0.001366 ✅
+   Epoch 17: 0.001618 ✅
+   Epoch 18: 0.112200 ❌
+   Epoch 19: 0.142773 ❌
+   Epoch 20: 0.127378 ❌
+   Epoch 21: 0.131299 ❌
+   Epoch 22: 0.146877 ❌
+   Epoch 23: 0.143356 ❌
+   Epoch 24: 0.137667 ❌
+   Epoch 25: 0.144241 ❌
+   Epoch 26: 0.132057 ❌
+
+2. MEMORY USAGE:
+   Initial: 1352.40 MB
+   Final: 1360.80 MB
+   Growth: 8.40 MB (0.6%)
+
+3. PHASE ACTIVATION:
+   ✅ Phase 3 (GHOP SDS): Active
+   ✅ Phase 4 (Contact): Active
+   ✅ Phase 5 (Temporal): Active
+
+4. CRITICAL ISSUES:
+   ⚠️ Zero loss detected (Epochs 1-2)
+   ❌ Loss spike at Epoch 18: 0.112200
+   ❌ OOM error detected
+
+5. RECOMMENDATIONS:
+   • Reduce Phase 4/5 loss weights (w_contact, w_temporal)
+   • Fix zero loss: check phase warmup configuration

@@ -23,7 +23,9 @@ class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
             beta = self.get_beta()
 
         alpha = 1 / beta
-        return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
+        density = alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
+        # CRITICAL FIX: Clamp to prevent unbounded values
+        return torch.clamp(density, 0, 1.0)
 
     def get_beta(self):
         beta = self.beta.abs() + self.beta_min
@@ -32,8 +34,8 @@ class LaplaceDensity(Density):  # alpha * Laplace(loc=0, scale=beta).cdf(-sdf)
 
 class AbsDensity(Density):  # like NeRF++
     def density_func(self, sdf, beta=None):
-        return torch.abs(sdf)
-
+        # Unbounded torch.abs(sdf) can cause free_energy = dists * huge_density = Inf
+        return torch.clamp(torch.abs(sdf), max=1.0)
 
 class SimpleDensity(Density):  # like NeRF
     def __init__(self, params_init={}, noise_std=1.0):
@@ -44,4 +46,5 @@ class SimpleDensity(Density):  # like NeRF
         if self.training and self.noise_std > 0.0:
             noise = torch.randn(sdf.shape).cuda() * self.noise_std
             sdf = sdf + noise
-        return torch.relu(sdf)
+        # CRITICAL FIX: Clamp ReLU output to prevent unbounded density
+        return torch.clamp(torch.relu(sdf), max=1.0)

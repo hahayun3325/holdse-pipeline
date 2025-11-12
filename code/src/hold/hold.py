@@ -34,6 +34,7 @@ from src.training.phase5_scheduler import Phase5TrainingScheduler
 import gc
 from src.utils.memory_profiler import MemoryProfiler
 import subprocess
+
 # ========================================================================
 # PHASE 2: GHOP VALIDATION FUNCTION
 # ========================================================================
@@ -185,7 +186,22 @@ class HOLD(pl.LightningModule):
                 vqvae_use_pretrained = phase3_cfg.ghop.get('vqvae_use_pretrained', False)
                 unet_use_pretrained = phase3_cfg.ghop.get('unet_use_pretrained', False)
 
-                model_checkpoint = phase3_cfg.ghop.get('model_checkpoint', 'checkpoints/ghop/last.ckpt')
+                # ============================================================
+                # CRITICAL FIX: Determine checkpoint path with priority
+                # ============================================================
+                # Priority 1: Command-line args (for rendering)
+                # Priority 2: Config file (for training)
+                # Priority 3: Default path (for backward compatibility)
+
+                if hasattr(args, 'infer_ckpt') and args.infer_ckpt:
+                    model_checkpoint = args.infer_ckpt
+                    logger.info(f"[GHOP] Using checkpoint from args.infer_ckpt: {model_checkpoint}")
+                elif hasattr(args, 'ckpt_p') and args.ckpt_p:
+                    model_checkpoint = args.ckpt_p
+                    logger.info(f"[GHOP] Using checkpoint from args.ckpt_p: {model_checkpoint}")
+                else:
+                    model_checkpoint = phase3_cfg.ghop.get('model_checkpoint', 'checkpoints/ghop/last.ckpt')
+                    logger.info(f"[GHOP] Using config/default checkpoint: {model_checkpoint}")
 
                 # Determine if we need the checkpoint file
                 need_checkpoint = vqvae_use_pretrained or unet_use_pretrained
@@ -199,8 +215,9 @@ class HOLD(pl.LightningModule):
                     if not os.path.exists(model_checkpoint):
                         raise FileNotFoundError(
                             f"GHOP checkpoint not found: {model_checkpoint}\n"
-                            f"Expected: Unified checkpoint (~1.1 GB) from GHOP project\n"
-                            f"Run: ln -s ~/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt {model_checkpoint}"
+                            f"Expected: Unified checkpoint (~167 MB) from training or pretrained GHOP\n"
+                            f"For training checkpoint: specify --infer_ckpt logs/xxx/checkpoints/last.ckpt\n"
+                            f"For pretrained GHOP: ln -s <ghop_checkpoint> checkpoints/ghop/last.ckpt"
                         )
 
                     # Load checkpoint once
@@ -214,8 +231,8 @@ class HOLD(pl.LightningModule):
                     logger.info(f"✓ Unified checkpoint loaded: {len(state_dict)} parameters")
 
                     # Analyze checkpoint structure
-                    vqvae_keys = [k for k in state_dict.keys() if 'first_stage_model' in k or 'encoder' in k or 'decoder' in k or 'quantize' in k]
-                    unet_keys = [k for k in state_dict.keys() if 'model' in k and 'first_stage' not in k]
+                    vqvae_keys = [k for k in state_dict.keys() if 'first_stage_model' in k or 'encoder' in k or 'decoder' in k or 'quantize' in k or 'vqvae' in k.lower()]
+                    unet_keys = [k for k in state_dict.keys() if 'model' in k and 'first_stage' not in k or 'unet' in k.lower()]
 
                     logger.info(f"  VQ-VAE components: {len(vqvae_keys)} parameters")
                     logger.info(f"  U-Net components: {len(unet_keys)} parameters")
@@ -603,7 +620,7 @@ class HOLD(pl.LightningModule):
             if not self.phase3_enabled:
                 logger.error("Phase 5: Cannot enable Phase 5 without Phase 3. Skipping...")
                 self.phase5_enabled = False
-            elif self.vqvae is None or self.hand_field_builder is None:  # FIX: Consistent naming
+            elif self.vqvae is None or self.hand_field_builder is None:
                 logger.error(
                     "Phase 5: Cannot enable Phase 5 without modular Phase 3 initialization. "
                     "Set phase3.use_modular_init=true in config."
@@ -617,12 +634,6 @@ class HOLD(pl.LightningModule):
                 phase5_cfg = opt.phase5
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-                # FIX: Add all Phase 5 imports at the beginning
-                from src.model.ghop.diffusion_prior import GHOPDiffusionPrior
-                from src.model.ghop.temporal_consistency import TemporalConsistencyModule
-                from src.model.ghop.adaptive_contact_zones import AdaptiveContactZones
-                from src.training.phase5_scheduler import Phase5TrainingScheduler
-
                 # ============================================================
                 # Component 1: Diffusion Prior for Geometry Guidance
                 # ============================================================
@@ -630,7 +641,7 @@ class HOLD(pl.LightningModule):
                 self.diffusion_prior = GHOPDiffusionPrior(
                     vqvae_wrapper=self.vqvae,
                     unet_wrapper=self.unet,
-                    handfield_builder=self.hand_field_builder,  # FIX: Consistent naming
+                    handfield_builder=self.hand_field_builder,
                     guidance_scale=phase5_cfg.get('guidance_scale', 4.0),
                     min_step_ratio=phase5_cfg.get('min_step', 0.02),
                     max_step_ratio=phase5_cfg.get('max_step', 0.98),
@@ -652,10 +663,12 @@ class HOLD(pl.LightningModule):
                     adaptive_weight=phase5_cfg.get('adaptive_weight', True)
                 )
                 logger.info(f"  ✓ Temporal module initialized (window={phase5_cfg.get('temporal_window', 5)})")
-                # ✅ ADD: Initialize temporal diagnostic tool
+
+                # Initialize temporal diagnostic tool
                 self.temporal_diagnostic = TemporalMemoryDiagnostic()
                 self._diagnostic_enabled = True
                 logger.info("[Phase 5] Temporal diagnostic tool initialized")
+
                 # ============================================================
                 # Component 3: Adaptive Contact Zones
                 # ============================================================
@@ -667,51 +680,107 @@ class HOLD(pl.LightningModule):
                     update_frequency=phase5_cfg.get('contact_update_freq', 10),
                     penalize_palm=phase5_cfg.get('penalize_palm', True)
                 )
-                logger.info(
-                    f"  ✓ Adaptive contacts initialized (threshold={phase5_cfg.get('proximity_threshold', 0.015)}m)")
+                logger.info(f"  ✓ Adaptive contacts initialized (threshold={phase5_cfg.get('proximity_threshold', 0.015)}m)")
 
                 # ============================================================
-                # Component 4: Phase 5 Training Scheduler
+                # ✅ FIX: Store Phase 5 hyperparameters FIRST
+                # These must be set regardless of scheduler configuration
                 # ============================================================
-                logger.info("Initializing Phase 5 Training Scheduler...")
-
-                # ================================================================
-                # FIX 3: Extract phase3_start from config
-                # ================================================================
-                phase3_start = opt.phase3.get('phase3_start_iter', 0)
-                phase4_start = self.contact_start_iter if hasattr(self, 'contact_start_iter') else 500
-
-                self.phase5_scheduler = Phase5TrainingScheduler(
-                    total_iterations=phase5_cfg.get('total_iterations', 1000),
-                    warmup_iters=phase5_cfg.get('warmup_iters', 0),      # Will be 0 after fix
-                    phase3_start=phase3_start,                            # ✅ From config, not hardcoded
-                    phase4_start=phase4_start,                            # = 20
-                    phase5_start=phase5_cfg.get('phase5_start_iter', 100),  # = 100
-                    finetune_start=phase5_cfg.get('finetune_start_iter', 800)  # = 800
-                )
-
-                # Store Phase 5 hyperparameters
-                self.phase5_start_iter = phase5_cfg.get('phase5_start_iter', 600)
+                self.phase5_start_iter = phase5_cfg.get('phase5_start_iter', 8000)
                 self.w_temporal = phase5_cfg.get('w_temporal', 1.0)
                 self.log_phase5_every = phase5_cfg.get('log_phase5_every', 50)
                 self.enable_geometry_sampling = phase5_cfg.get('enable_geometry_sampling', False)
                 self.phase5_enabled = True
 
-                logger.info(
-                    f"✓ Phase 5 initialized successfully\n"
-                    f"  - Diffusion guidance scale: {phase5_cfg.get('guidance_scale', 4.0)}\n"
-                    f"  - Temporal window: {phase5_cfg.get('temporal_window', 5)} frames\n"
-                    f"  - Contact proximity: {phase5_cfg.get('proximity_threshold', 0.015)}m\n"
-                    f"  - Phase 5 start iteration: {self.phase5_start_iter}\n"
-                    f"  - Fine-tuning starts: {phase5_cfg.get('finetune_start_iter', 800)}"
-                )
+                logger.info("  Phase 5 Hyperparameters Set:")
+                logger.info(f"    - phase5_start_iter: {self.phase5_start_iter}")
+                logger.info(f"    - w_temporal: {self.w_temporal}")
+                logger.info(f"    - log_phase5_every: {self.log_phase5_every}")
+                logger.info(f"    - enable_geometry_sampling: {self.enable_geometry_sampling}")
+
+                # ============================================================
+                # Component 4: Phase 5 Training Scheduler
+                # ============================================================
+                logger.info("Initializing Phase 5 Training Scheduler...")
+                use_scheduler = phase5_cfg.get('use_scheduler', False)
+
+                if not use_scheduler:
+                    logger.info("  [Phase5Scheduler] Disabled (use_scheduler=false)")
+                    logger.info("  Using boundary-based phase switching for two-stage training")
+                    self.phase5_scheduler = None
+                else:
+                    # Validate configuration before initialization
+                    phase3_start = opt.phase3.get('phase3_start_iter', 0)
+                    phase4_start = opt.phase4.get('contact_start_iter', 999999)
+                    phase5_start = self.phase5_start_iter
+                    finetune_start = phase5_cfg.get('finetune_start_iter', 10000)
+                    total_iterations = phase5_cfg.get('total_iterations', 12000)
+                    warmup_iters = phase5_cfg.get('warmup_iters', 0)
+
+                    # Check ordering
+                    if not (warmup_iters <= phase3_start <= phase4_start <= phase5_start <= finetune_start <= total_iterations):
+                        logger.error(
+                            f"[Phase5Scheduler] Invalid phase ordering:\n"
+                            f"  warmup_iters={warmup_iters}\n"
+                            f"  phase3_start={phase3_start}\n"
+                            f"  phase4_start={phase4_start}\n"
+                            f"  phase5_start={phase5_start}\n"
+                            f"  finetune_start={finetune_start}\n"
+                            f"  total_iterations={total_iterations}\n"
+                            f"\nRequired: warmup <= phase3 <= phase4 <= phase5 <= finetune <= total"
+                        )
+                        raise ValueError("Invalid Phase5Scheduler configuration - see error above")
+
+                    self.phase5_scheduler = Phase5TrainingScheduler(
+                        total_iterations=total_iterations,
+                        warmup_iters=warmup_iters,
+                        phase3_start=phase3_start,
+                        phase4_start=phase4_start,
+                        phase5_start=phase5_start,
+                        finetune_start=finetune_start
+                    )
+                    logger.info("  ✓ Phase5Scheduler initialized with custom schedule")
+
+                # ============================================================
+                # ✅ FIX: Verify Phase Boundaries
+                # ============================================================
+                logger.info("\n" + "=" * 70)
+                logger.info("[Phase 5] Verifying Phase Boundaries")
                 logger.info("=" * 70)
+
+                if hasattr(self, 'phase3_end_iter'):
+                    logger.info(f"  Phase 3 (SDS):")
+                    logger.info(f"    Start:  {self.phase3_start_iter}")
+                    logger.info(f"    End:    {self.phase3_end_iter}")
+                    logger.info(f"    Active: [{self.phase3_start_iter}, {self.phase3_end_iter}]")
+                    logger.info(f"")
+                    logger.info(f"  Phase 5 (Temporal):")
+                    logger.info(f"    Start:  {self.phase5_start_iter}")
+                    logger.info(f"    Active: [{self.phase5_start_iter}, ∞)")
+                    logger.info(f"")
+
+                    if self.phase3_end_iter + 1 == self.phase5_start_iter:
+                        logger.info(f"  ✅ Phases are MUTUALLY EXCLUSIVE (no overlap)")
+                    else:
+                        gap = self.phase5_start_iter - self.phase3_end_iter - 1
+                        if gap > 0:
+                            logger.warning(f"  ⚠️  Phase boundary gap: {gap} iterations")
+                        else:
+                            logger.error(f"  ❌ Phase OVERLAP detected!")
+                else:
+                    logger.warning("  ⚠️  Phase boundaries not set - setup_phase_boundaries() may not have been called")
+
+                logger.info("=" * 70 + "\n")
         else:
             self.phase5_enabled = False
             self.diffusion_prior = None
             self.temporal_module = None
             self.adaptive_contacts = None
             self.phase5_scheduler = None
+            self.phase5_start_iter = 0
+            self.w_temporal = 0.0
+            self.log_phase5_every = 0
+            self.enable_geometry_sampling = False
             logger.info("Phase 5: Disabled - configure phase5.enabled=true in config to enable")
 
         # ================================================================
@@ -729,6 +798,48 @@ class HOLD(pl.LightningModule):
         # ✅ ADD: Memory profiler for diagnostics
         self.memory_profiler = MemoryProfiler()
         self.profile_memory = True  # Set to False to disable
+        # ✅ ADD: Setup and validate phase boundaries
+        self.setup_phase_boundaries()
+
+    def setup_phase_boundaries(self):
+        """Setup and validate phase boundaries to prevent overlap."""
+
+        # Get phase configuration from args/config
+        self.phase3_enabled = getattr(self, 'phase3_enabled', False)
+        self.phase3_start_iter = getattr(self, 'phase3_start_iter', 0)
+
+        self.phase4_enabled = getattr(self, 'phase4_enabled', False)
+        self.contact_start_iter = getattr(self, 'contact_start_iter', 1000)
+        self.contact_end_iter = getattr(self, 'contact_end_iter', 1100)
+
+        self.phase5_enabled = getattr(self, 'phase5_enabled', False)
+        self.phase5_start_iter = getattr(self, 'phase5_start_iter', 1100)
+
+        # If phase3_end_iter not set, derive from phase5_start_iter
+        if not hasattr(self, 'phase3_end_iter'):
+            self.phase3_end_iter = self.phase5_start_iter - 1 if self.phase5_enabled else 99999
+        else:
+            self.phase3_end_iter = getattr(self, 'phase3_end_iter', 99999)
+
+        # Validate non-overlapping phases
+        if self.phase3_enabled and self.phase5_enabled:
+            if self.phase3_start_iter >= self.phase5_start_iter:
+                raise ValueError(
+                    f"[Phase Boundaries] Phase 3 start ({self.phase3_start_iter}) "
+                    f"must be BEFORE Phase 5 start ({self.phase5_start_iter}). "
+                    f"This causes simultaneous activation and double backward error."
+                )
+
+            logger.info(f"[Phase Boundaries] Phase 3: [{self.phase3_start_iter}, {self.phase3_end_iter})")
+            logger.info(f"[Phase Boundaries] Phase 5: [{self.phase5_start_iter}, inf)")
+
+        # Check Phase 3 vs Phase 4
+        elif self.phase3_enabled and self.phase4_enabled:
+            if self.phase3_start_iter >= self.contact_start_iter:
+                logger.warning(
+                    f"[Phase Boundaries] Phase 3 starts at {self.phase3_start_iter}, "
+                    f"Phase 4 starts at {self.contact_start_iter}. Phases may overlap."
+                )
 
     def save_misc(self):
         """Save miscellaneous outputs (meshes, camera params, etc.)."""
@@ -813,6 +924,8 @@ class HOLD(pl.LightningModule):
         # Generate canonical meshes
         mesh_dict = self.meshing_cano("misc")
         out.update(mesh_dict)
+        # ⚠️ CRITICAL FIX: Restore model to training mode after meshing
+        self.model.train()
 
         # Save to file
         out_p = f"{self.args.log_dir}/misc/{self.global_step:09d}.npy"
@@ -854,6 +967,29 @@ class HOLD(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
+        print(f"[DEBUG BATCH] Keys: {list(batch.keys())}")
+        if 'rgb' in batch:
+            print(f"[DEBUG BATCH] rgb shape: {batch['rgb'].shape}")
+
+        # ====================================================================
+        # INITIALIZATION: Verify critical phase variables exist
+        # ====================================================================
+        # Ensure phase boundaries are set
+        if not hasattr(self, 'phase3_end_iter'):
+            self.phase3_end_iter = getattr(self, 'phase5_start_iter', 99999) - 1
+            logger.debug(f"[Init] Set phase3_end_iter to {self.phase3_end_iter}")
+
+        if not hasattr(self, 'phase5_start_iter'):
+            self.phase5_start_iter = 99999
+            logger.debug(f"[Init] Set phase5_start_iter to {self.phase5_start_iter}")
+
+        # Get device
+        device = next(self.parameters()).device
+
+        # Verify optimizer exists
+        if not hasattr(self, 'optimizer') or self.optimizer is None:
+            logger.warning("[Step 0] Optimizer not set, will use trainer's optimizer")
+
         # ================================================================
         # ✅ MEMORY PROFILER: Check if profiling is enabled
         # ================================================================
@@ -888,7 +1024,8 @@ class HOLD(pl.LightningModule):
             self.memory_profiler.checkpoint("after_initial_check")
 
         # PHASE 5: Dynamic Loss Weight Scheduling
-        if self.phase5_enabled and hasattr(self, 'phase5_scheduler'):
+        if self.phase5_enabled and self.phase5_scheduler is not None:
+            # Scheduler enabled - use dynamic progressive weights
             loss_weights = self.phase5_scheduler.get_loss_weights(self.global_step)
             lr_multiplier = self.phase5_scheduler.get_learning_rate_multiplier(self.global_step)
 
@@ -897,21 +1034,37 @@ class HOLD(pl.LightningModule):
                 base_lr = param_group.get('initial_lr', param_group['lr'])
                 param_group['lr'] = base_lr * lr_multiplier
 
-            # Log dynamic weights
+            # Log dynamic weights at specified frequency
             if self.global_step % self.log_phase5_every == 0:
-                self.log('phase5/weight_sds',
-                         float(loss_weights['sds']) if isinstance(loss_weights['sds'], torch.Tensor) else loss_weights[
-                             'sds'], prog_bar=False)
-                self.log('phase5/weight_contact',
-                         float(loss_weights['contact']) if isinstance(loss_weights['contact'], torch.Tensor) else
-                         loss_weights['contact'], prog_bar=False)
-                self.log('phase5/weight_temporal',
-                         float(loss_weights['temporal']) if isinstance(loss_weights['temporal'], torch.Tensor) else
-                         loss_weights['temporal'], prog_bar=False)
-                self.log('phase5/lr_multiplier',
-                         float(lr_multiplier) if isinstance(lr_multiplier, torch.Tensor) else lr_multiplier,
-                         prog_bar=False)
+                sds_weight = float(loss_weights['sds']) if isinstance(loss_weights['sds'], torch.Tensor) else loss_weights['sds']
+                contact_weight = float(loss_weights['contact']) if isinstance(loss_weights['contact'], torch.Tensor) else loss_weights['contact']
+                temporal_weight = float(loss_weights['temporal']) if isinstance(loss_weights['temporal'], torch.Tensor) else loss_weights['temporal']
+                lr_mult = float(lr_multiplier) if isinstance(lr_multiplier, torch.Tensor) else lr_multiplier
+
+                self.log('phase5/weight_sds', sds_weight, prog_bar=False)
+                self.log('phase5/weight_contact', contact_weight, prog_bar=False)
+                self.log('phase5/weight_temporal', temporal_weight, prog_bar=False)
+                self.log('phase5/lr_multiplier', lr_mult, prog_bar=False)
+
+                logger.debug(
+                    f"[Step {self.global_step}] Phase 5 Scheduler: "
+                    f"sds={sds_weight:.3f}, contact={contact_weight:.3f}, "
+                    f"temporal={temporal_weight:.3f}, lr_mult={lr_mult:.3f}"
+                )
+
+        elif self.phase5_enabled:
+            # ✅ Phase 5 enabled but scheduler is None (two-stage training mode)
+            # Use constant weights and standard learning rate
+            loss_weights = {'sds': 1.0, 'contact': 1.0, 'temporal': 1.0}
+
+            if self.global_step % self.log_phase5_every == 0:
+                logger.debug(
+                    f"[Step {self.global_step}] Phase 5: Using fixed weights "
+                    f"(scheduler disabled via use_scheduler=false)"
+                )
+
         else:
+            # Phase 5 not enabled - baseline configuration
             loss_weights = {'sds': 1.0, 'contact': 1.0, 'temporal': 1.0}
 
         # Existing preprocessing code continues...
@@ -998,12 +1151,8 @@ class HOLD(pl.LightningModule):
             batch.update(params_dict)
 
             for key, value in preserved_values.items():
-                if key not in params_dict:
-                    batch[key] = value
-                    logger.info(f"[FIX] Restored GHOP {key}: {value.shape}")
-                else:
-                    batch.overwrite(key, value)
-                    logger.info(f"[FIX] Kept GHOP {key}: {value.shape}")
+                batch.overwrite(key, value)
+                logger.info(f"[FIX] Restored {key}: {value.shape}")
 
             logger.info(f"[training_step] After batch.update:")
 
@@ -1204,7 +1353,7 @@ class HOLD(pl.LightningModule):
                 logger.warning("  ✗ No MANO parameter candidates found!")
 
             logger.info("=" * 70)
-        # PHASE 3 & PHASE 5 UNIFIED SDS COMPUTATION WITH EXPLICIT LOGGING
+        # PHASE 3 & PHASE 5: SDS COMPUTATION WITH MUTUAL EXCLUSIVITY
         if self.phase3_enabled and self.ghop_enabled:
             # Log activation status at first step
             if self.global_step == 0:
@@ -1222,9 +1371,18 @@ class HOLD(pl.LightningModule):
             # CRITICAL: Check if GHOP should activate at this step
             should_compute_ghop = (
                 self.global_step >= getattr(self, 'phase3_start_iter', 0) and
+                self.global_step < getattr(self, 'phase3_end_iter', 99999) and  # ← ADD THIS
                 self.global_step >= getattr(self, 'warmup_iters', 0) and
                 (self.global_step % getattr(self, 'sds_iters', 1)) == 0
             )
+
+            # Log phase transitions
+            if self.global_step == self.phase3_start_iter:
+                logger.info(f"[Phase 3] SDS diffusion ACTIVATED at step {self.global_step}")
+
+            if self.global_step == self.phase3_end_iter:  # ← ADD THIS
+                logger.info(f"[Phase 3] SDS diffusion DEACTIVATED at step {self.global_step}")
+                logger.info(f"[Phase 5] Temporal consistency will activate at step {self.phase5_start_iter}")
 
             # Log every 50 steps
             if self.global_step % 50 == 0:
@@ -1345,15 +1503,11 @@ class HOLD(pl.LightningModule):
                 phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
                                  self.global_step >= self.phase5_start_iter)
 
-                if phase4_active or phase5_active:
-                    # Multiple phases: detach to prevent graph conflicts
-                    loss_output['loss'] = loss_output['loss'] + weighted_ghop.detach()
-                    logger.debug(f"[Phase 3] Detached GHOP loss (multi-phase mode)")
-                else:
-                    # Only Phase 3: keep gradients for full performance
-                    loss_output['loss'] = loss_output['loss'] + weighted_ghop
-
-                loss_output['ghop_loss'] = weighted_ghop
+                # Always detach GHOP loss to ensure consistent graph structure across all phases
+                weighted_ghop_detached = weighted_ghop.detach()
+                loss_output['loss'] = loss_output['loss'] + weighted_ghop_detached
+                logger.debug(f"[Phase 3] Detached GHOP loss (consistent strategy)")
+                loss_output['ghop_loss'] = weighted_ghop_detached
 
                 # ============================================================
                 # STEP 7: Log GHOP metrics
@@ -1438,7 +1592,8 @@ class HOLD(pl.LightningModule):
 
                 if self.phase5_enabled and hasattr(self, 'adaptive_contacts') and hasattr(self, 'phase5_scheduler'):
                     # Check if update is needed via scheduler
-                    if self.phase5_scheduler.should_update_contact_zones(self.global_step):
+                    if self.phase5_scheduler is not None and self.phase5_scheduler.should_update_contact_zones(
+                            self.global_step):
                         logger.debug(f"[Phase 5] Detecting adaptive contact zones at step {self.global_step}")
 
                         try:
@@ -1553,15 +1708,11 @@ class HOLD(pl.LightningModule):
                     phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
                                     self.global_step >= self.phase5_start_iter)
 
-                    if phase5_active:
-                        # Phase 5 active: detach to prevent graph conflicts
-                        loss_output["loss"] = loss_output["loss"] + weighted_contact_loss.detach()
-                        logger.debug(f"[Phase 4] Detached contact loss (Phase 5 active)")
-                    else:
-                        # Only Phase 4: keep gradients
-                        loss_output["loss"] = loss_output["loss"] + weighted_contact_loss
-
-                    loss_output['contact_loss'] = weighted_contact_loss
+                    # Always detach contact loss to ensure consistent graph structure
+                    weighted_contact_detached = weighted_contact_loss.detach()
+                    loss_output["loss"] = loss_output["loss"] + weighted_contact_detached
+                    logger.debug(f"[Phase 4] Detached contact loss (consistent strategy)")
+                    loss_output['contact_loss'] = weighted_contact_detached
 
                     # Log metrics
                     self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
@@ -1659,10 +1810,18 @@ class HOLD(pl.LightningModule):
 
         # ====================================================================
         # PHASE 5: TEMPORAL CONSISTENCY FOR VIDEO SEQUENCES
-        # COMPLETE IMPLEMENTATION WITH ERROR HANDLING
         # ====================================================================
-        if self.phase5_enabled and self.global_step >= self.phase5_start_iter:
+        # ✅ FIX: Ensure Phase 3 has ended before Phase 5 starts
+        phase3_still_active = (
+            self.phase3_enabled and
+            self.global_step < getattr(self, 'phase3_end_iter', 0)
+        )
+        if self.phase5_enabled and self.global_step >= self.phase5_start_iter and not phase3_still_active:
             try:
+                # Log phase transition
+                if self.global_step == self.phase5_start_iter:
+                    logger.info(f"[Phase 5] Temporal consistency ACTIVATED at step {self.global_step}")
+                    logger.info(f"[Phase 3] SDS diffusion fully DISABLED")
                 # =============================================================
                 # Step 1: Check if this is a video batch with consecutive frames
                 # =============================================================
@@ -1764,10 +1923,11 @@ class HOLD(pl.LightningModule):
                     weighted_temporal = temporal_loss * loss_weights['temporal'] * self.w_temporal
 
                     # =============================================================
-                    # Step 7: Add to total loss
+                    # Step 7: Add to total loss (detached for consistent graph)
                     # =============================================================
-                    loss_output['loss'] = loss_output['loss'] + weighted_temporal
-                    loss_output['temporal_loss'] = weighted_temporal
+                    weighted_temporal_detached = weighted_temporal.detach()
+                    loss_output['loss'] = loss_output['loss'] + weighted_temporal_detached
+                    loss_output['temporal_loss'] = weighted_temporal_detached  # Keep non-detached for logging
 
                     # =============================================================
                     # Step 8: Log temporal metrics
@@ -1803,7 +1963,11 @@ class HOLD(pl.LightningModule):
                 logger.warning(f"[Phase 5] Temporal consistency computation failed: {e}")
                 import traceback
                 traceback.print_exc()
-
+        elif self.phase5_enabled and phase3_still_active:
+            logger.debug(
+                f"[Phase 5] SKIPPED at step {self.global_step}: "
+                f"Phase 3 still active (ends at {self.phase3_end_iter})"
+            )
         # Logging
         if self.global_step % self.args.log_every == 0:
             self.metrics(model_outputs, batch, self.global_step, self.current_epoch)
@@ -1816,6 +1980,110 @@ class HOLD(pl.LightningModule):
         if should_profile and self.phase5_enabled:
             self.memory_profiler.checkpoint("after_temporal")
 
+        # ====================================================================
+        # ✅ CRITICAL FIX: Verify Loss is Not Zero Before Backward
+        # ====================================================================
+        final_loss = loss_output.get("loss",
+                                     torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True))
+
+        # Safety check: Ensure loss_output['loss'] exists and is valid
+        if "loss" not in loss_output:
+            logger.error(
+                f"[Step {self.global_step}] CRITICAL: loss_output has no 'loss' key! Keys: {list(loss_output.keys())}")
+            loss_output["loss"] = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
+            final_loss = loss_output["loss"]
+
+        # Ensure loss has requires_grad
+        if not final_loss.requires_grad and final_loss.item() != 0.0:
+            logger.warning(f"[Step {self.global_step}] Loss doesn't require gradients (detached)")
+
+        # Get phase activity status for diagnostics
+        phase3_active = (
+                hasattr(self, 'phase3_enabled') and self.phase3_enabled and
+                self.global_step >= getattr(self, 'phase3_start_iter', 0) and
+                self.global_step < getattr(self, 'phase3_end_iter', 99999)
+        )
+        phase4_active = (
+                hasattr(self, 'phase4_enabled') and
+                self.phase4_enabled and
+                self.contact_start_iter <= self.global_step < self.contact_end_iter
+        )
+        phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
+                         self.global_step >= self.phase5_start_iter)
+
+        # Convert to float for logging
+        def to_float(x):
+            if isinstance(x, torch.Tensor):
+                return x.item() if x.numel() > 0 else 0.0
+            return float(x) if x is not None else 0.0
+
+        # ====================================================================
+        # DEBUG: Loss Composition Logging (Every 100 steps)
+        # ====================================================================
+        if self.global_step % 100 == 0:
+            loss_base = loss_output.get('loss', torch.tensor(0.0))
+            loss_ghop = loss_output.get('ghop_loss', torch.tensor(0.0))
+            loss_contact = loss_output.get('contact_loss', torch.tensor(0.0))
+            loss_rgb = loss_output.get('loss/rgb', torch.tensor(0.0))
+            loss_temporal = loss_output.get('temporal_loss', torch.tensor(0.0))
+
+            base_f = to_float(loss_base)
+            ghop_f = to_float(loss_ghop)
+            contact_f = to_float(loss_contact)
+            rgb_f = to_float(loss_rgb)
+            temporal_f = to_float(loss_temporal)
+            final_f = final_loss.item() if final_loss.numel() > 0 else 0.0
+
+            logger.info(
+                f"\n[Loss Composition - Step {self.global_step}]\n"
+                f"  Base RGB loss:     {base_f:.6f}\n"
+                f"  GHOP SDS loss:     {ghop_f:.6f}\n"
+                f"  Contact loss:      {contact_f:.6f}\n"
+                f"  Temporal loss:     {temporal_f:.6f}\n"
+                f"  Final total:       {final_f:.6f}\n"
+                f"  ────────────────────\n"
+                f"  Phase 3 active:    {phase3_active}\n"
+                f"  Phase 4 active:    {phase4_active}\n"
+                f"  Phase 5 active:    {phase5_active}\n"
+                f"  Batch keys:        {list(batch.keys())[:8]}"
+            )
+
+            # Log to tensorboard
+            try:
+                self.log('train/loss_total', final_f, prog_bar=True)
+                self.log('train/loss_base_rgb', base_f, prog_bar=False)
+                self.log('train/loss_ghop_sds', ghop_f, prog_bar=False)
+                self.log('train/loss_contact', contact_f, prog_bar=False)
+            except Exception as e:
+                logger.debug(f"Could not log losses to tensorboard: {e}")
+
+        # ====================================================================
+        # CRITICAL: Check for Zero Loss at Phase Transitions
+        # ====================================================================
+        loss_value = final_loss.item() if final_loss.numel() > 0 else 0.0
+
+        if abs(loss_value) < 1e-8:  # Effectively zero
+            logger.warning(
+                f"\n[Step {self.global_step}] ⚠️  ZERO LOSS DETECTED!\n"
+                f"  Loss value:       {loss_value:.10f}\n"
+                f"  Phase 3 active:   {phase3_active}\n"
+                f"  Phase 4 active:   {phase4_active}\n"
+                f"  Phase 5 active:   {phase5_active}\n"
+                f"  Loss components:\n"
+                f"    - Base RGB:     {to_float(loss_output.get('loss', 0.0)):.6f}\n"
+                f"    - GHOP:         {to_float(loss_output.get('ghop_loss', 0.0)):.6f}\n"
+                f"    - Contact:      {to_float(loss_output.get('contact_loss', 0.0)):.6f}\n"
+                f"  Skipping backward for this iteration (preventing crash)\n"
+            )
+
+            # Clear gradients and skip this iteration
+            opt = self.optimizers()
+            opt.zero_grad(set_to_none=True)
+
+            # Return dummy loss for PyTorch Lightning
+            dummy_loss = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=False)
+            return dummy_loss
+
         # ================================================================
         # GHOP FIX: Manual optimization to prevent double backward
         # ================================================================
@@ -1825,7 +2093,7 @@ class HOLD(pl.LightningModule):
             logger.warning(
                 f"[Step {self.global_step}] Loss is NaN/Inf. Skipping optimization."
             )
-            return torch.tensor(1e-4, device=final_loss.device, requires_grad=True)
+            return torch.tensor(1e-4, device=final_loss.device, requires_grad=False)
 
         # Get optimizer
         opt = self.optimizers()
@@ -1836,8 +2104,30 @@ class HOLD(pl.LightningModule):
         if should_profile:
             self.memory_profiler.checkpoint("after_zero_grad")
 
-        # Manual backward
-        self.manual_backward(final_loss)
+        # Manual backward - SINGLE call only
+        # ================================================================
+        # ✅ FIX: Add phase transition detection
+        # ================================================================
+        is_phase_transition = (
+                hasattr(self, 'phase3_end_iter') and
+                hasattr(self, 'phase5_start_iter') and
+                (self.phase3_end_iter - 1) <= self.global_step <= (self.phase5_start_iter + 1)
+        )
+
+        if is_phase_transition:
+            logger.warning(
+                f"[Step {self.global_step}] Phase transition detected. "
+                f"Using retain_graph=True"
+            )
+
+        # Single backward call with appropriate retain_graph setting
+        # self.manual_backward(final_loss, retain_graph=is_phase_transition or True)
+        # self.manual_backward(final_loss, retain_graph=is_phase_transition)
+        self.manual_backward(final_loss, retain_graph=True)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
         if should_profile:
             self.memory_profiler.checkpoint("after_backward")
@@ -1889,7 +2179,15 @@ class HOLD(pl.LightningModule):
         sch = self.lr_schedulers()
         if sch is not None:
             sch.step()
-
+        # ================================================================
+        # ✅ FIX: Define is_phase5_active before diagnostic check
+        # ================================================================
+        is_phase5_active = (
+            hasattr(self, 'temporal_module') and
+            self.temporal_module is not None and
+            hasattr(self, 'hparams') and
+            self.global_step >= self.hparams.get('phase5_start_iter', 1100)
+        )
         # ================================================================
         # ✅ OPTIMIZED: Final cleanup - reduced frequency (every 50 steps)
         # REMOVED: Every-step gc.collect() and multiple cache clears
@@ -1972,237 +2270,283 @@ class HOLD(pl.LightningModule):
 
         return {'loss': final_loss.detach()}
 
+        # ================================================================
+        # DIAGNOSTIC (MUST BE BEFORE RETURN)
+        # ================================================================
+        if (self._diagnostic_enabled and is_phase5_active and
+                self.global_step % 100 == 0):
+
+            if hasattr(self, 'temporal_module') and self.temporal_module is not None:
+                mem_info = self.temporal_diagnostic.log_temporal_state(
+                    self.temporal_module,
+                    epoch=self.current_epoch,
+                    step=self.global_step,
+                    tag="[PERIODIC CHECK]"
+                )
+
+        # Detailed memory report every 200 steps
+        if self.global_step % 200 == 0 and torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024 ** 2
+            reserved = torch.cuda.memory_reserved() / 1024 ** 2
+            peak = torch.cuda.max_memory_allocated() / 1024 ** 2
+
+            msg = (
+                f"\n{'=' * 70}\n"
+                f"[Training Step {self.global_step}] Memory Status\n"
+                f"  Allocated: {allocated:.2f} MB\n"
+                f"  Reserved:  {reserved:.2f} MB\n"
+                f"  Peak:      {peak:.2f} MB\n"
+                f"{'=' * 70}\n"
+            )
+            logger.info(msg)
+
+        # Log
+        self.log('train/loss', final_loss.detach().item(), prog_bar=True)
+
+        for key, value in loss_output.items():
+            if isinstance(value, torch.Tensor) and key != 'loss':
+                self.log(f'train/{key}', value.detach().item(), prog_bar=False)
+
+        # After computing each loss
+        print(f"[Loss Debug] RGB: {rgb_loss.item():.6f}")
+        print(f"[Loss Debug] SDS: {sds_loss.item():.6f}")
+        print(f"[Loss Debug] Contact: {contact_loss.item():.6f}")
+        print(f"[Loss Debug] Temporal: {temporal_loss.item():.6f}")
+        print(f"[Loss Debug] TOTAL: {total_loss.item():.6f}")
+        return {'loss': final_loss.detach()}
+
     # ====================================================================
     # HELPER METHODS
     # ====================================================================
 
-    def _extract_sdf_grid_from_nodes(self, batch, resolution=64):
+    def _extract_sdf_grid_from_nodes(self, batch, resolution=32):
         """Extract SDF values on regular grid from object node."""
-        # Step 1: Determine batch size
-        if 'idx' in batch:
-            B = batch['idx'].shape[0]
-        else:
-            for node in self.model.nodes.values():
-                if "hand" in node.node_id.lower() or "right" in node.node_id.lower():
-                    mano_pose_key = f"{node.node_id}.mano_pose"
-                    if mano_pose_key in batch:
-                        B = batch[mano_pose_key].shape[0]
-                        break
+        # ================================================================
+        # ✅ MEMORY OPTIMIZATION: Clear cache before expensive operation
+        # ================================================================
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # ✅ FORCE no gradient tracking
+        original_grad_mode = torch.is_grad_enabled()
+        torch.set_grad_enabled(False)
+
+        try:  # ✅ FIX: Wrap in try-finally to ensure gradient mode is restored
+            # Step 1: Determine batch size
+            if 'idx' in batch:
+                B = batch['idx'].shape[0]
             else:
-                B = 1
+                for node in self.model.nodes.values():
+                    if "hand" in node.node_id.lower() or "right" in node.node_id.lower():
+                        mano_pose_key = f"{node.node_id}.mano_pose"
+                        if mano_pose_key in batch:
+                            B = batch[mano_pose_key].shape[0]
+                            break
+                else:
+                    B = 1
 
-        H = resolution
-        device = next(self.model.parameters()).device
+            H = resolution
+            device = next(self.model.parameters()).device
 
-        # Step 2: Create coordinate grid in canonical space [-1.5, 1.5]³
-        x = torch.linspace(-1.5, 1.5, H, device=device)
-        try:
-            grid = torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1)
-        except TypeError:
-            grid = torch.stack(torch.meshgrid(x, x, x), dim=-1)
-        grid = grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # (B, H, H, H, 3)
-        # Step 3: Find object node
-        object_node = None
-        for node in self.model.nodes.values():
-            if "object" in node.node_id.lower():
-                object_node = node
-                break
-        if object_node is None:
-            logger.warning("[Helper] No object node found, returning zero SDF")
-            return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
-        grid_flat = grid.reshape(B, -1, 3)
-        # Step 4: Try multiple SDF extraction methods
-        with torch.no_grad():
-            sdf_values = None
+            # Step 2: Create coordinate grid in canonical space [-1.5, 1.5]³
+            # ✅ FIX: Explicitly disable gradient tracking
+            x = torch.linspace(-1.5, 1.5, H, device=device, requires_grad=False)
+            try:
+                grid = torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1)
+            except TypeError:
+                grid = torch.stack(torch.meshgrid(x, x, x), dim=-1)
 
-            # METHOD 1: server.forward_sdf (preferred)
-            if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
-                try:
-                    sdf_output = object_node.server.forward_sdf(grid_flat)
-                    if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
-                        sdf_values = sdf_output['sdf']
-                    elif isinstance(sdf_output, torch.Tensor):
-                        sdf_values = sdf_output
-                    logger.debug(f"[Helper] METHOD 1 SUCCESS: server.forward_sdf: {sdf_values.shape}")
-                except Exception as e:
-                    logger.debug(f"[Helper] METHOD 1 FAILED: server.forward_sdf: {e}")
+            # ✅ FIX: Explicit detach
+            grid = grid.detach()
+            grid = grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # (B, H, H, H, 3)
 
-            # METHOD 2: server.shape_net (alternative)
-            if sdf_values is None and hasattr(object_node, "server") and hasattr(object_node.server, "shape_net"):
-                try:
-                    latent_code = getattr(object_node.server, 'latent_code', None)
-                    if latent_code is not None:
-                        sdf_output = object_node.server.shape_net(grid_flat, latent_code)
+            # Step 3: Find object node
+            object_node = None
+            for node in self.model.nodes.values():
+                if "object" in node.node_id.lower():
+                    object_node = node
+                    break
+
+            if object_node is None:
+                logger.warning("[Helper] No object node found, returning zero SDF")
+                return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+
+            grid_flat = grid.reshape(B, -1, 3)
+
+            # Step 4: Try multiple SDF extraction methods
+            with torch.no_grad():
+                sdf_values = None
+
+                # METHOD 1: server.forward_sdf (preferred)
+                if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
+                    try:
+                        sdf_output = object_node.server.forward_sdf(grid_flat)
                         if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
                             sdf_values = sdf_output['sdf']
                         elif isinstance(sdf_output, torch.Tensor):
                             sdf_values = sdf_output
-                        logger.debug(f"[Helper] METHOD 2 SUCCESS: server.shape_net: {sdf_values.shape}")
-                except Exception as e:
-                    logger.debug(f"[Helper] METHOD 2 FAILED: server.shape_net: {e}")
+                        logger.debug(f"[Helper] METHOD 1 SUCCESS: server.forward_sdf: {sdf_values.shape}")
+                    except Exception as e:
+                        logger.debug(f"[Helper] METHOD 1 FAILED: server.forward_sdf: {e}")
 
-            # METHOD 3: node.forward (requires proper inputs)
-            if sdf_values is None and hasattr(object_node, "forward"):
-                try:
-                    # Build proper forward call with points
-                    forward_input = {
-                        'points': grid_flat,  # [B, H³, 3]
-                        'indices': batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
-                    }
+                # METHOD 2: server.shape_net (alternative)
+                if sdf_values is None and hasattr(object_node, "server") and hasattr(object_node.server, "shape_net"):
+                    try:
+                        latent_code = getattr(object_node.server, 'latent_code', None)
+                        if latent_code is not None:
+                            sdf_output = object_node.server.shape_net(grid_flat, latent_code)
+                            if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
+                                sdf_values = sdf_output['sdf']
+                            elif isinstance(sdf_output, torch.Tensor):
+                                sdf_values = sdf_output
+                            logger.debug(f"[Helper] METHOD 2 SUCCESS: server.shape_net: {sdf_values.shape}")
+                    except Exception as e:
+                        logger.debug(f"[Helper] METHOD 2 FAILED: server.shape_net: {e}")
 
-                    node_output = object_node(**forward_input)
+                # METHOD 3: node.forward (requires proper inputs)
+                if sdf_values is None and hasattr(object_node, "forward"):
+                    try:
+                        # Build proper forward call with points
+                        forward_input = {
+                            'points': grid_flat,  # [B, H³, 3]
+                            'indices': batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                        }
 
-                    if isinstance(node_output, dict):
-                        if 'sdf' in node_output:
-                            sdf_values = node_output['sdf']
-                        elif 'geometry' in node_output:
-                            sdf_values = node_output['geometry']
-                    elif isinstance(node_output, torch.Tensor):
-                        sdf_values = node_output
+                        node_output = object_node(**forward_input)
 
-                    if sdf_values is not None:
-                        logger.debug(f"[Helper] METHOD 3 SUCCESS: node.forward: {sdf_values.shape}")
-                except Exception as e:
-                    logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
+                        if isinstance(node_output, dict):
+                            if 'sdf' in node_output:
+                                sdf_values = node_output['sdf']
+                            elif 'geometry' in node_output:
+                                sdf_values = node_output['geometry']
+                        elif isinstance(node_output, torch.Tensor):
+                            sdf_values = node_output
 
-            # ============================================================
-            # METHOD 4: Query via model's render_core (FIXED)
-            # ============================================================
-            if sdf_values is None and hasattr(object_node, "implicit_network"):
-                try:
-                    logger.debug("[Helper] Attempting METHOD 4: model render_core query")
+                        if sdf_values is not None:
+                            logger.debug(f"[Helper] METHOD 3 SUCCESS: node.forward: {sdf_values.shape}")
+                    except Exception as e:
+                        logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
 
-                    # Get batch indices
-                    idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                # METHOD 4: Query via model's render_core (FIXED)
+                if sdf_values is None and hasattr(object_node, "implicit_network"):
+                    try:
+                        logger.debug("[Helper] Attempting METHOD 4: model render_core query")
 
-                    # ================================================================
-                    # FIX: Ensure idx is 1D [B] before expand
-                    # ================================================================
-                    # idx might be [B], [B, 1], or [B, 1, 1] depending on upstream
-                    # We need it to be exactly [B] for expand to work
+                        # Get batch indices
+                        idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
 
-                    if idx.ndim > 1:
-                        # Squeeze all trailing dimensions
-                        idx = idx.squeeze()  # [B, 1, 1] → [B]
+                        # FIX: Ensure idx is 1D [B] before expand
+                        if idx.ndim > 1:
+                            idx = idx.squeeze()
+                            if idx.ndim == 0:
+                                idx = idx.unsqueeze(0)
 
-                        # Handle edge case: if B=1, squeeze() returns scalar
-                        if idx.ndim == 0:
-                            idx = idx.unsqueeze(0)  # scalar → [1]
+                        logger.debug(f"[Helper] idx shape after squeeze: {idx.shape}")
 
-                    logger.debug(f"[Helper] idx shape after squeeze: {idx.shape}")
+                        # Now safe to expand
+                        num_points = grid_flat.shape[1]  # H³
+                        idx_expanded = idx.unsqueeze(1).expand(-1, num_points)
 
-                    # ================================================================
-                    # Now safe to expand
-                    # ================================================================
-                    num_points = grid_flat.shape[1]  # H³
+                        logger.debug(f"[Helper] idx_expanded shape: {idx_expanded.shape}")
 
-                    # Expand idx to match all grid points
-                    # idx: [B] → [B, H³]
-                    idx_expanded = idx.unsqueeze(1).expand(-1, num_points)  # ✅ Works now!
+                        model_input = {
+                            'points': grid_flat,  # [B, H³, 3]
+                            'indices': idx_expanded,  # [B, H³]
+                        }
 
-                    logger.debug(f"[Helper] idx_expanded shape: {idx_expanded.shape}")
-
-                    model_input = {
-                        'points': grid_flat,  # [B, H³, 3]
-                        'indices': idx_expanded,  # [B, H³]
-                    }
-
-                    # Forward through model
-                    with torch.no_grad():
-                        # Use object node's implicit network if available
-                        if hasattr(object_node, 'implicit_network'):
-                            # Get feature vector for this sample
-                            if hasattr(object_node, 'embedding'):
-                                features = object_node.embedding(idx)  # [B, feature_dim]
-                            elif hasattr(object_node, 'feature_vector'):
-                                features = object_node.feature_vector.weight[idx]  # [B, feature_dim]
-                            else:
-                                # Use zero features
-                                features = None
-
-                            # Query implicit network point-by-point to avoid shape issues
-                            sdf_list = []
-                            for b in range(B):
-                                # Get points for this batch sample
-                                points_b = grid_flat[b]  # [H³, 3]
-
-                                # Call implicit network with correct interface
-                                if features is not None:
-                                    # Concatenate features to each point
-                                    feat_b = features[b].unsqueeze(0).expand(points_b.shape[0], -1)  # [H³, feat_dim]
-                                    input_b = torch.cat([points_b, feat_b], dim=-1)  # [H³, 3+feat_dim]
+                        # Forward through model
+                        with torch.no_grad():
+                            if hasattr(object_node, 'implicit_network'):
+                                # Get feature vector for this sample
+                                if hasattr(object_node, 'embedding'):
+                                    features = object_node.embedding(idx)  # [B, feature_dim]
+                                elif hasattr(object_node, 'feature_vector'):
+                                    features = object_node.feature_vector.weight[idx]  # [B, feature_dim]
                                 else:
-                                    input_b = points_b  # [H³, 3]
+                                    features = None
 
-                                # Forward (assuming implicit_network expects single input)
-                                try:
-                                    output_b = object_node.implicit_network(input_b.unsqueeze(0))  # [1, H³, ...]
+                                # Query implicit network point-by-point
+                                sdf_list = []
+                                for b in range(B):
+                                    points_b = grid_flat[b]  # [H³, 3]
 
-                                    # Extract SDF
-                                    if isinstance(output_b, dict):
-                                        sdf_b = output_b.get('sdf', output_b.get('model_out', output_b.get('output')))
+                                    if features is not None:
+                                        feat_b = features[b].unsqueeze(0).expand(points_b.shape[0], -1)
+                                        input_b = torch.cat([points_b, feat_b], dim=-1)
                                     else:
-                                        sdf_b = output_b
+                                        input_b = points_b
 
-                                    # Ensure shape [1, H³, 1]
-                                    if sdf_b.dim() == 2:
-                                        sdf_b = sdf_b.unsqueeze(-1)
-                                    if sdf_b.shape[-1] != 1:
-                                        sdf_b = sdf_b[..., :1]
+                                    try:
+                                        output_b = object_node.implicit_network(input_b.unsqueeze(0))
 
-                                    sdf_list.append(sdf_b)
-                                except Exception as e_inner:
-                                    logger.debug(f"[Helper] Batch {b} failed: {e_inner}, using zeros")
-                                    sdf_list.append(torch.zeros(1, points_b.shape[0], 1, device=device))
+                                        if isinstance(output_b, dict):
+                                            sdf_b = output_b.get('sdf', output_b.get('model_out', output_b.get('output')))
+                                        else:
+                                            sdf_b = output_b
 
-                            # Stack results
-                            if len(sdf_list) == B:
-                                sdf_values = torch.cat(sdf_list, dim=0)  # [B, H³, 1]
-                                logger.debug(f"[Helper] METHOD 4 SUCCESS: Per-batch query: {sdf_values.shape}")
+                                        if sdf_b.dim() == 2:
+                                            sdf_b = sdf_b.unsqueeze(-1)
+                                        if sdf_b.shape[-1] != 1:
+                                            sdf_b = sdf_b[..., :1]
 
-                except Exception as e:
-                    logger.debug(f"[Helper] METHOD 4 FAILED: render_core: {e}")
-                    import traceback
-                    logger.debug(f"[Helper] Traceback: {traceback.format_exc()}")
+                                        sdf_list.append(sdf_b)
+                                    except Exception as e_inner:
+                                        logger.debug(f"[Helper] Batch {b} failed: {e_inner}, using zeros")
+                                        sdf_list.append(torch.zeros(1, points_b.shape[0], 1, device=device))
 
-            # ============================================================
-            # FALLBACK: Return zero grid with clear warning
-            # ============================================================
-            if sdf_values is None:
-                logger.warning(
-                    "[Helper] All SDF extraction methods failed, using zero grid. "
-                    "This is expected in early training before object geometry is initialized. "
-                    f"Attempted methods: forward_sdf, shape_net, forward, implicit_network on node '{object_node.node_id}'"
+                                if len(sdf_list) == B:
+                                    sdf_values = torch.cat(sdf_list, dim=0)
+                                    logger.debug(f"[Helper] METHOD 4 SUCCESS: Per-batch query: {sdf_values.shape}")
+
+                    except Exception as e:
+                        logger.debug(f"[Helper] METHOD 4 FAILED: render_core: {e}")
+                        import traceback
+                        logger.debug(f"[Helper] Traceback: {traceback.format_exc()}")
+
+                # FALLBACK: Return zero grid
+                if sdf_values is None:
+                    logger.warning(
+                        "[Helper] All SDF extraction methods failed, using zero grid. "
+                        "This is expected in early training before object geometry is initialized. "
+                        f"Attempted methods: forward_sdf, shape_net, forward, implicit_network on node '{object_node.node_id}'"
+                    )
+                    return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+
+            # Step 5: Reshape to (B, 1, H, H, H) format
+            if sdf_values.dim() == 2:
+                sdf_values = sdf_values.unsqueeze(-1)
+            if sdf_values.shape[-1] != 1:
+                sdf_values = sdf_values[..., :1]
+
+            object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(0, 4, 1, 2, 3)
+
+            # Step 6: Validate extracted SDF
+            sdf_std = object_sdf.std()
+            sdf_mean = object_sdf.mean()
+
+            if sdf_std < 1e-6:
+                logger.debug(
+                    f"[Helper] Degenerate SDF detected (std={sdf_std:.6f}, mean={sdf_mean:.6f}). "
+                    f"Object geometry may not be initialized yet."
                 )
-                return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+            else:
+                logger.debug(
+                    f"[Helper] Valid SDF extracted: shape={object_sdf.shape}, "
+                    f"std={sdf_std:.4f}, mean={sdf_mean:.4f}, "
+                    f"range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
+                )
 
-        # Step 5: Reshape to (B, 1, H, H, H) format
-        # Ensure correct shape [B, H^3, 1], then gridify
-        if sdf_values.dim() == 2:
-            sdf_values = sdf_values.unsqueeze(-1)
-        if sdf_values.shape[-1] != 1:
-            sdf_values = sdf_values[..., :1]  # Only first channel if needed
-        object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(0, 4, 1, 2, 3)
+            return object_sdf.detach()
 
-        # ================================================================
-        # Step 6: Validate extracted SDF (warn if degenerate)
-        # ================================================================
-        sdf_std = object_sdf.std()
-        sdf_mean = object_sdf.mean()
+        finally:  # ✅ CRITICAL: This ALWAYS executes, even on exception
+            # Restore gradient mode
+            torch.set_grad_enabled(original_grad_mode)
 
-        if sdf_std < 1e-6:
-            logger.debug(
-                f"[Helper] Degenerate SDF detected (std={sdf_std:.6f}, mean={sdf_mean:.6f}). "
-                f"Object geometry may not be initialized yet."
-            )
-        else:
-            logger.debug(
-                f"[Helper] Valid SDF extracted: shape={object_sdf.shape}, "
-                f"std={sdf_std:.4f}, mean={sdf_mean:.4f}, "
-                f"range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
-            )
+            # Clear cache after expensive operation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        return object_sdf
+        return object_sdf.detach()
 
     # ====================================================================
     # PHASE 4: Mesh Extraction Helper Methods
@@ -3103,64 +3447,100 @@ class HOLD(pl.LightningModule):
                 logger.error(f"[Epoch {current_epoch}] Epoch-end cache clearing failed: {e}")
 
         # ================================================================
-        # FIX 1: Clear Phase 5 temporal history at epoch boundaries
+        # FIX 1 ENHANCED: Clear Phase 5 temporal history (UNCONDITIONAL)
         # ================================================================
         if hasattr(self, 'temporal_module') and self.temporal_module is not None:
-            is_phase5_active = (
-                hasattr(self, 'phase5_start_iter') and
-                self.global_step >= self.phase5_start_iter
+            # ✅ NEW: Log detection status ALWAYS
+            phase5_start = getattr(self, 'phase5_start_iter', None)
+            logger.info(
+                f"[Epoch {current_epoch}] Temporal module status:\n"
+                f"  - Module exists: True\n"
+                f"  - Phase 5 start iter: {phase5_start}\n"
+                f"  - Current global step: {self.global_step}\n"
+                f"  - Would clear: {phase5_start is not None and self.global_step >= phase5_start}"
             )
 
-            if is_phase5_active:
-                logger.info(f"[Epoch {current_epoch}] Phase 5 active - clearing temporal history...")
+            # ✅ CHANGE: Clear UNCONDITIONALLY if epoch >= 20 (when Phase 5 could be active)
+            # Original version only cleared if global_step >= phase5_start_iter
+            # But step counter might be wrong, so use epoch as backup
+            should_clear = False
 
-                if self._diagnostic_enabled and hasattr(self, 'temporal_diagnostic'):
-                    mem_info_before = self.temporal_diagnostic.log_temporal_state(
-                        self.temporal_module,
-                        epoch=current_epoch,
-                        step=self.global_step,
-                        tag="[BEFORE EPOCH CLEANUP]"
+            # Method 1: Check step (original)
+            if phase5_start is not None and self.global_step >= phase5_start:
+                should_clear = True
+                logger.info(f"[Epoch {current_epoch}] Clearing temporal (step-based): step {self.global_step} >= {phase5_start}")
+
+            # Method 2: Check epoch (backup - Phase 5 starts at step 1100 = epoch 20)
+            elif current_epoch >= 20:
+                should_clear = True
+                logger.info(f"[Epoch {current_epoch}] Clearing temporal (epoch-based): epoch {current_epoch} >= 20")
+
+            # ✅ EMERGENCY: Clear EVERY epoch if memory is high (> 15 GB)
+            if torch.cuda.is_available():
+                mem_allocated = torch.cuda.memory_allocated() / 1024**2
+                if mem_allocated > 15000:  # 15 GB
+                    should_clear = True
+                    logger.warning(
+                        f"[Epoch {current_epoch}] ⚠️  Forcing temporal clear due to high memory: "
+                        f"{mem_allocated:.0f} MB"
                     )
 
-                    if current_epoch % 5 == 0 and len(self.temporal_diagnostic.snapshots) >= 2:
-                        try:
-                            report = self.temporal_diagnostic.generate_leak_report()
-                            logger.info("\n" + report)
-                        except Exception as e:
-                            logger.warning(f"[Diagnostic] Could not generate leak report: {e}")
+            if should_clear:
+                logger.info(f"[Epoch {current_epoch}] Phase 5 cleanup starting...")
 
+                # Get stats before cleanup
+                if hasattr(self.temporal_module, 'get_memory_stats'):
+                    stats_before = self.temporal_module.get_memory_stats()
+                    logger.info(
+                        f"[Epoch {current_epoch}] Temporal state BEFORE cleanup:\n"
+                        f"  - Sequences: {stats_before['num_sequences']}\n"
+                        f"  - Total frames: {stats_before['total_frames']}\n"
+                        f"  - Memory: {stats_before['estimated_memory_mb']:.2f} MB"
+                    )
+
+                # Clear history
                 self.temporal_module.clear_epoch_history()
 
-                if self._diagnostic_enabled and hasattr(self, 'temporal_diagnostic'):
-                    mem_info_after = self.temporal_diagnostic.log_temporal_state(
-                        self.temporal_module,
-                        epoch=current_epoch,
-                        step=self.global_step,
-                        tag="[AFTER EPOCH CLEANUP]"
-                    )
-
-                    if mem_info_after.get('sequence_count', 0) > 0:
+                # Verify cleanup worked
+                if hasattr(self.temporal_module, 'get_memory_stats'):
+                    stats_after = self.temporal_module.get_memory_stats()
+                    if stats_after['num_sequences'] > 0:
                         logger.error(
                             f"[Epoch {current_epoch}] ❌ Cleanup FAILED! "
-                            f"Still have {mem_info_after['sequence_count']} sequences"
+                            f"Still have {stats_after['num_sequences']} sequences"
                         )
+                        # Force nuclear option
                         logger.info(f"[Epoch {current_epoch}] Forcing full history reset...")
-                        self.temporal_module.reset_history()
+                        self.temporal_module.reset_history(sequence_id=None)
+
+                        # Triple-check
+                        stats_final = self.temporal_module.get_memory_stats()
+                        if stats_final['num_sequences'] > 0:
+                            logger.critical(
+                                f"[Epoch {current_epoch}] ❌❌ CRITICAL: Reset also failed! "
+                                f"Still have {stats_final['num_sequences']} sequences. "
+                                f"Memory leak confirmed."
+                            )
                     else:
                         logger.info(
-                            f"[Epoch {current_epoch}] ✅ Cleanup successful - "
-                            f"all sequences cleared"
+                            f"[Epoch {current_epoch}] ✅ Temporal cleanup successful\n"
+                            f"  - Sequences: {stats_after['num_sequences']}\n"
+                            f"  - Memory freed: {stats_before.get('estimated_memory_mb', 0) - stats_after.get('estimated_memory_mb', 0):.2f} MB"
                         )
 
+                # Additional CUDA cleanup after temporal clearing
                 if torch.cuda.is_available():
-                    mem_mb = torch.cuda.memory_allocated() / 1024**2
-                    logger.info(f"[Epoch {current_epoch}] GPU memory after temporal cleanup: {mem_mb:.2f} MB")
+                    torch.cuda.synchronize()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                    mem_after = torch.cuda.memory_allocated() / 1024**2
+                    logger.info(f"[Epoch {current_epoch}] GPU memory after temporal cleanup: {mem_after:.2f} MB")
             else:
-                if current_epoch >= 15:
-                    logger.info(
-                        f"[Epoch {current_epoch}] Phase 5 not yet active "
-                        f"(step {self.global_step} < {getattr(self, 'phase5_start_iter', 'N/A')})"
-                    )
+                logger.info(
+                    f"[Epoch {current_epoch}] Temporal cleanup skipped "
+                    f"(not yet active or memory OK)"
+                )
 
         # ================================================================
         # FIX 2: Clear Phase 4 contact caches if they exist
@@ -3490,9 +3870,22 @@ class HOLD(pl.LightningModule):
         batch["current_epoch"] = self.current_epoch
         batch["global_step"] = self.global_step
 
+        # ================================================================
+        # CRITICAL FIX: Get parameters from nodes and add to batch
+        # ================================================================
         for node in self.model.nodes.values():
-            params = node.params(batch["idx"])
-            batch.update(params)
+            params = node.params(batch["idx"])  # Returns dict with all parameters
+
+            # params already contains full_pose, betas, etc.
+            # Use dict methods to avoid xdict's duplicate key check
+            for key, value in params.items():
+                if key in batch:
+                    # Key already exists, use underlying dict to overwrite
+                    dict.__setitem__(batch, key, value)
+                else:
+                    # New key, can use normal assignment
+                    batch[key] = value
+        # ================================================================
 
         output = xdict()
         if not self.args.no_vis:

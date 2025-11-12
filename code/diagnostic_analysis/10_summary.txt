@@ -1,0 +1,30 @@
+Total lines in log:
+2229405 ../production_training.log
+
+Loss Composition occurrences:
+81
+
+Phase transition occurrences:
+0
+
+Step numbers present:
+Step 810
+Step 820
+Step 830
+Step 840
+Step 850
+Step 860
+Step 870
+Step 880
+Step 890
+Step 90
+Step 900
+Step 910
+Step 920
+Step 930
+Step 940
+Step 950
+Step 960
+Step 970
+Step 980
+Step 990

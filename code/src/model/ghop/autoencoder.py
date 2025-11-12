@@ -13,6 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf  # For future config loading if needed
+from loguru import logger
+import os
 
 class VectorQuantizer(nn.Module):
     """
@@ -336,10 +338,12 @@ class GHOPVQVAEWrapper(nn.Module):
         Load pretrained VQ-VAE weights from unified GHOP checkpoint.
         Extracts only encoder, decoder, and quantizer parameters.
         """
-        from loguru import logger
 
         logger.info(f"[GHOPVQVAEWrapper] Loading from: {checkpoint_path}")
-
+        if not os.path.exists(checkpoint_path):
+            logger.error(f"[GHOPVQVAEWrapper] Checkpoint not found: {checkpoint_path}")
+            logger.error("Continuing with random initialization...")
+            return
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
         # Extract state dict

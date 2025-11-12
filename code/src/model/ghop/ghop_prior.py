@@ -423,7 +423,7 @@ class TwoStageTrainingManager:
         weights = self.get_stage_weights(iteration)
         device = object_sdf.device
 
-        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        total_loss = torch.tensor(0.0, device=device, requires_grad=False)
 
         losses = {}
         info = {
@@ -465,7 +465,7 @@ class TwoStageTrainingManager:
 
             except Exception as e:
                 print(f"Warning: SDS loss computation failed: {e}")
-                losses['sds'] = torch.tensor(0.0, device=device, requires_grad=True)
+                losses['sds'] = torch.tensor(0.0, device=device, requires_grad=False)
                 info['sds_error'] = str(e)
 
         # ================================================================

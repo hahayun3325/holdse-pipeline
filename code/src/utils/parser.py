@@ -69,7 +69,7 @@ def parser_args():
         help="Resume training from checkpoint and keep logging in the same comet exp",
     )
     parser.add_argument(
-        "--eval_every_epoch", type=int, default=6, help="Eval every k epochs"
+        "--eval_every_epoch", type=int, default=5, help="Eval every k epochs"
     )
     parser.add_argument("--tempo_len", type=int, default=2000)
     parser.add_argument("--dump_eval_meshes", action="store_true")

@@ -1,0 +1,42 @@
+==========================================
+INTRINSICS INVESTIGATION REPORT
+==========================================
+
+1. Dataset intrinsics file format:
+
+2. ImageDataset intrinsics loading:
+            out["intrinsics_all"] = self.intrinsics_all
+            out["extrinsics_all"] = self.extrinsics_all
+            out["scale_mats"] = self.scale_mats
+            out["world_mats"] = self.world_mats
+            out["img_paths"] = self.img_paths
+            out["mask_paths"] = self.mask_paths
+            out["img_size"] = self.img_size
+            out["n_images"] = self.n_images
+            out["params"] = self.params
+            out["scale"] = self.scale
+
+--
+            "intrinsics": self.intrinsics_all[idx],
+            "extrinsics": self.extrinsics_all[idx],
+            "im_path": self.img_paths[idx],
+
+3. Image resize locations:
+
+4. Intrinsics scaling search:
+
+5. Focal length adjustments:
+src/datasets/utils.py:    fx = intrinsics[:, 0, 0]
+src/datasets/utils.py:        / fx.unsqueeze(-1)
+
+6. Model intrinsics usage:
+860:        # Extract camera intrinsics
+862:        if hasattr(dataset, 'intrinsics_all'):
+864:            K = dataset.intrinsics_all[0]
+865:        elif hasattr(dataset, 'intrinsics'):
+867:            K = dataset.intrinsics[0]
+870:            logger.warning("[save_misc] No intrinsics found, using identity")
+1096:        list_fields = ['c2w', 'intrinsics', 'hA', 'right.betas']
+1274:            'intrinsics',
+
+==========================================

@@ -1,0 +1,157 @@
+Extracting debugging information from render_full_output.txt...
+Generated: Tue Oct 28 06:33:48 PM CDT 2025
+======================================================================
+
+=== 1. CHECKPOINT LOADING ===
+CHECKPOINT LOADING
+======================================================================
+Using test dataset configuration (single-frame TestDataset)
+Running on these images:
+[0 1 2]
+
+✅ Dataset loaded:
+  Class: TestDataset
+  Total samples: 3
+  ✅ Confirmed: Single-frame dataset (TestDataset)
+======================================================================
+
+Using checkpoint from --infer_ckpt:
+  ../deployment/hoi4d_phase5_v1.0/hoi4d_phase5_v1.0.ckpt
+
+✓ Checkpoint verified:
+  File size: 166.0 MB
+
+Loading checkpoint...
+  Loaded 1498 parameters
+
+Checking for GHOP key remapping...
+  Found 77 VQ-VAE keys + 364 U-Net keys
+  Remapping to ghop_* prefixes...
+  ✓ Remapped 441 keys
+
+
+=== 2. GHOP KEY REMAPPING ===
+  Loaded 1498 parameters
+
+Checking for GHOP key remapping...
+  Found 77 VQ-VAE keys + 364 U-Net keys
+  Remapping to ghop_* prefixes...
+  ✓ Remapped 441 keys
+
+Loading state dict into model...
+
+❌ WARNING: 77 GHOP keys missing!
+    vqvae.encoder.conv_in.weight
+    vqvae.encoder.conv_in.bias
+    vqvae.encoder.down.0.0.norm1.weight
+    vqvae.encoder.down.0.0.norm1.bias
+    vqvae.encoder.down.0.0.conv1.weight
+✓ Model loaded and set to eval mode
+======================================================================
+
+
+=== 3. STATE DICT LOAD RESULT ===
+Loading state dict into model...
+
+❌ WARNING: 77 GHOP keys missing!
+    vqvae.encoder.conv_in.weight
+    vqvae.encoder.conv_in.bias
+    vqvae.encoder.down.0.0.norm1.weight
+    vqvae.encoder.down.0.0.norm1.bias
+    vqvae.encoder.down.0.0.conv1.weight
+✓ Model loaded and set to eval mode
+======================================================================
+
+
+=== 4. GHOP COMPONENT STATUS ===
+2025-10-28 18:23:54.401 | INFO     | src.hold.hold:__init__:220 -   VQ-VAE components: 321 parameters
+2025-10-28 18:23:54.401 | INFO     | src.hold.hold:__init__:221 -   U-Net components: 1046 parameters
+2025-10-28 18:23:54.832 | INFO     | src.model.ghop.autoencoder:_load_checkpoint:381 -   Extracted VQ-VAE parameters: 325
+2025-10-28 18:23:55.102 | INFO     | src.model.ghop.diffusion:_load_checkpoint:532 -   Extracted non-VQ-VAE parameters: 745
+❌ WARNING: 77 GHOP keys missing!
+
+=== 5. ERRORS AND WARNINGS ===
+2025-10-28 18:23:54.833 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:432 - Failed to load VQ-VAE weights: Error(s) in loading state_dict for GHOPVQVAEWrapper:
+2025-10-28 18:23:54.833 | ERROR    | src.model.ghop.autoencoder:_load_checkpoint:433 - Continuing with random initialization...
+2025-10-28 18:23:55.114 | WARNING  | src.model.ghop.diffusion:_load_checkpoint:559 - ⚠️  No matching keys found - using random initialization
+
+=== 6. MODEL INFERENCE OUTPUT ===
+DEBUG: pts_fp32.dim() = 3
+DEBUG: verts_fp32.dim() = 3
+
+[DEBUG] inference_step() output keys:
+  bg_rgb_only: shape=torch.Size([65536, 3]), device=cpu
+  category: type=<class 'list'>
+  current_epoch: type=<class 'int'>
+  extrinsics: shape=torch.Size([1, 4, 4]), device=cuda:0
+  fg_rgb.vis: shape=torch.Size([65536, 3]), device=cpu
+  global_step: type=<class 'int'>
+  gt.mask: shape=torch.Size([1, 65536]), device=cuda:0
+  gt.rgb: shape=torch.Size([1, 65536, 3]), device=cuda:0
+  idx: shape=torch.Size([1]), device=cuda:0
+  im_path: type=<class 'list'>
+  img_size: type=<class 'list'>
+  instance_map: shape=torch.Size([65536]), device=cpu
+  intrinsics: shape=torch.Size([1, 4, 4]), device=cuda:0
+  mask_prob: shape=torch.Size([65536, 1]), device=cpu
+  normal: shape=torch.Size([65536, 3]), device=cpu
+  object.fg_rgb.vis: shape=torch.Size([65536, 3]), device=cpu
+  object.global_orient: shape=torch.Size([1, 3]), device=cuda:0
+  object.mask_prob: shape=torch.Size([65536, 1]), device=cpu
+  object.normal: shape=torch.Size([65536, 3]), device=cpu
+  object.params: shape=torch.Size([1, 7]), device=cuda:0
+  object.transl: shape=torch.Size([1, 3]), device=cuda:0
+  object_category: type=<class 'list'>
+  pixel_per_batch: shape=torch.Size([1]), device=cuda:0
+  rgb: shape=torch.Size([65536, 3]), device=cpu
+  right.betas: shape=torch.Size([1, 10]), device=cuda:0
+  right.fg_rgb.vis: shape=torch.Size([65536, 3]), device=cpu
+  right.full_pose: shape=torch.Size([1, 48]), device=cuda:0
+  right.global_orient: shape=torch.Size([1, 3]), device=cuda:0
+  right.mask_prob: shape=torch.Size([65536, 1]), device=cpu
+  right.normal: shape=torch.Size([65536, 3]), device=cpu
+  right.params: shape=torch.Size([1, 62]), device=cuda:0
+  right.pose: shape=torch.Size([1, 45]), device=cuda:0
+  right.transl: shape=torch.Size([1, 3]), device=cuda:0
+  text_metadata: type=<class 'dict'>
+  text_prompt: type=<class 'list'>
+
+=== 7. RGB FRAME EXTRACTION ===
+[DEBUG] Extracted full_frame:
+  rgb: shape=torch.Size([256, 256, 3])
+  normal: shape=torch.Size([256, 256, 3])
+  mask_prob: shape=torch.Size([65536, 1])
+
+
+  0%|          | 0/128 [00:00<?, ?it/s][A
+Rendering:   0%|          | 0/128 [00:00<?, ?it/s][A2025-10-28 18:23:57.210 | INFO     | src.model.mano.server:forward:82 - [MANO Server] ========== FORWARD CALL ==========
+2025-10-28 18:23:57.210 | INFO     | src.model.mano.server:forward:83 - [MANO Server] Input shapes:
+
+=== 8. RENDERING SUMMARY ===
+✅ Rendering complete!
+   Total frames rendered: 3
+   Output directory: logs/6aaaf5002/test_full_render
+
+📊 Output summary:
+   RGB images: 3
+   Normal maps: 3
+   Meshes: 0
+
+✅ All 3 frames rendered successfully!
+
+=== 9. RGB KEY CHECK ===
+✓ RGB key found in model output
+  bg_rgb_only: shape=torch.Size([65536, 3]), device=cpu
+  fg_rgb.vis: shape=torch.Size([65536, 3]), device=cpu
+  gt.rgb: shape=torch.Size([1, 65536, 3]), device=cuda:0
+  object.fg_rgb.vis: shape=torch.Size([65536, 3]), device=cpu
+  rgb: shape=torch.Size([65536, 3]), device=cpu
+
+=== 10. SHAPE NETWORK WARNINGS ===
+Total 'input_cond dim' warnings: 1152
+
+=== 11. RENDERING EXECUTION ===
+✓ Rendering loop completed
+
+======================================================================
+Analysis complete. Check render_debug_analysis.txt for details.
