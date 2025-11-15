@@ -87,6 +87,11 @@ class ObjectNode(Node):
         cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)
         ray_dirs = ray_dirs.reshape(-1, 3)
 
+        # ✅ NEW DEBUG 1
+        print(f"[ObjectNode.sample_points] After get_camera_params:")
+        print(f"  ray_dirs has_nan: {torch.isnan(ray_dirs).any().item()}")
+        print(f"  cam_loc has_nan: {torch.isnan(cam_loc).any().item()}")
+
         # ================================================================
         # ✅ FIX: Create deform_info with correct variable names
         # ================================================================
@@ -115,8 +120,22 @@ class ObjectNode(Node):
             deform_info,
         )
 
+        # ✅ NEW DEBUG 2
+        print(f"[ObjectNode.sample_points] After ray_sampler.get_z_vals:")
+        print(f"  z_vals has_nan: {torch.isnan(z_vals).any().item()}")
+        if torch.isnan(z_vals).any():
+            print(f"  ❌ z_vals is NaN from ray sampler!")
+            z_vals = torch.nan_to_num(z_vals, nan=1.0)
+
         # Compute sample points
         points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
+
+        # ✅ NEW DEBUG 3
+        print(f"[ObjectNode.sample_points] After computing points:")
+        print(f"  points has_nan: {torch.isnan(points).any().item()}")
+        if torch.isnan(points).any():
+            print(f"  ❌ points is NaN!")
+            points = torch.nan_to_num(points, nan=0.0)
 
         pose = cond["pose"]
 

@@ -1315,6 +1315,19 @@ class HOLD(pl.LightningModule):
         # COMPUTE BASE LOSSES
         # ================================================================
         loss_output = self.loss(batch, model_outputs)
+        # Example: log base and extra losses if present
+        rgb_loss = loss_output.get("loss/rgb", None)
+        contact_loss = loss_output.get("contact_loss", None)
+        ghop_loss = loss_output.get("ghop_loss", None)
+
+        if (self.global_step % 50) == 0:
+            logger.debug(
+                f"[LOSS COMPONENTS] step={self.global_step} "
+                f"rgb={float(rgb_loss) if rgb_loss is not None else 'NA'} "
+                f"ghop={float(ghop_loss) if ghop_loss is not None else 'NA'} "
+                f"contact={float(contact_loss) if contact_loss is not None else 'NA'}"
+            )
+
         if should_profile:
             self.memory_profiler.checkpoint("after_loss")
 
@@ -1990,7 +2003,14 @@ class HOLD(pl.LightningModule):
         if "loss" not in loss_output:
             logger.error(
                 f"[Step {self.global_step}] CRITICAL: loss_output has no 'loss' key! Keys: {list(loss_output.keys())}")
-            loss_output["loss"] = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
+            # Instead of unconditionally zeroing:
+            if "loss" not in loss_output or not torch.isfinite(loss_output["loss"]):
+                logger.warning(
+                    f"[Step {self.global_step}] loss_output['loss'] missing or non-finite. "
+                    "Setting loss to zero for this batch."
+                )
+                loss_output["loss"] = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
+            # In all cases, final_loss uses loss_output["loss"]
             final_loss = loss_output["loss"]
 
         # Ensure loss has requires_grad
@@ -2082,18 +2102,22 @@ class HOLD(pl.LightningModule):
 
             # Return dummy loss for PyTorch Lightning
             dummy_loss = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=False)
-            return dummy_loss
+            return {"loss": dummy_loss}
 
         # ================================================================
         # GHOP FIX: Manual optimization to prevent double backward
         # ================================================================
-        final_loss = loss_output['loss']
-
+        final_loss = loss_output["loss"]
         if torch.isnan(final_loss) or torch.isinf(final_loss):
             logger.warning(
-                f"[Step {self.global_step}] Loss is NaN/Inf. Skipping optimization."
+                f"[Step {self.global_step}] final_loss is NaN/Inf. "
+                "Skipping optimization for this batch."
             )
-            return torch.tensor(1e-4, device=final_loss.device, requires_grad=False)
+            # Preserve the idea of “no learning on bad step”:
+            # - Do not call backward/step.
+            # - Return a zero loss tensor (so Lightning's machinery still works).
+            safe_zero = torch.tensor(0.0, device=final_loss.device, requires_grad=False)
+            return {"loss": safe_zero}
 
         # Get optimizer
         opt = self.optimizers()
@@ -2261,58 +2285,34 @@ class HOLD(pl.LightningModule):
             )
             logger.info(msg)
 
-        # Log
-        self.log('train/loss', final_loss.detach().item(), prog_bar=True)
+        # ----------------------------------------------------------------------
+        # Loss diagnostics & logging  (THIS IS YOUR CANONICAL BLOCK)
+        # ----------------------------------------------------------------------
+        if (self.global_step % 50 == 0) or (batch_idx % 200 == 0):
+            rgb_val = loss_output.get("loss/rgb", None)
+            sds_val = loss_output.get("loss/sds", None)
+            contact_val = loss_output.get("loss/contact", None)
+            temporal_val = loss_output.get("loss/temporal", None)
 
-        for key, value in loss_output.items():
-            if isinstance(value, torch.Tensor) and key != 'loss':
-                self.log(f'train/{key}', value.detach().item(), prog_bar=False)
+            def fmt(x):
+                return f"{x.item():.6f}" if x is not None and torch.is_tensor(x) else "None"
 
-        return {'loss': final_loss.detach()}
-
-        # ================================================================
-        # DIAGNOSTIC (MUST BE BEFORE RETURN)
-        # ================================================================
-        if (self._diagnostic_enabled and is_phase5_active and
-                self.global_step % 100 == 0):
-
-            if hasattr(self, 'temporal_module') and self.temporal_module is not None:
-                mem_info = self.temporal_diagnostic.log_temporal_state(
-                    self.temporal_module,
-                    epoch=self.current_epoch,
-                    step=self.global_step,
-                    tag="[PERIODIC CHECK]"
-                )
-
-        # Detailed memory report every 200 steps
-        if self.global_step % 200 == 0 and torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024 ** 2
-            reserved = torch.cuda.memory_reserved() / 1024 ** 2
-            peak = torch.cuda.max_memory_allocated() / 1024 ** 2
-
-            msg = (
-                f"\n{'=' * 70}\n"
-                f"[Training Step {self.global_step}] Memory Status\n"
-                f"  Allocated: {allocated:.2f} MB\n"
-                f"  Reserved:  {reserved:.2f} MB\n"
-                f"  Peak:      {peak:.2f} MB\n"
-                f"{'=' * 70}\n"
+            logger.debug(
+                f"[Loss Debug] step={self.global_step} "
+                f"RGB={fmt(rgb_val)} SDS={fmt(sds_val)} "
+                f"Contact={fmt(contact_val)} Temporal={fmt(temporal_val)} "
+                f"TOTAL={final_loss.item():.6f}"
             )
-            logger.info(msg)
 
-        # Log
+        # Log to Lightning metrics
         self.log('train/loss', final_loss.detach().item(), prog_bar=True)
-
         for key, value in loss_output.items():
             if isinstance(value, torch.Tensor) and key != 'loss':
                 self.log(f'train/{key}', value.detach().item(), prog_bar=False)
 
-        # After computing each loss
-        print(f"[Loss Debug] RGB: {rgb_loss.item():.6f}")
-        print(f"[Loss Debug] SDS: {sds_loss.item():.6f}")
-        print(f"[Loss Debug] Contact: {contact_loss.item():.6f}")
-        print(f"[Loss Debug] Temporal: {temporal_loss.item():.6f}")
-        print(f"[Loss Debug] TOTAL: {total_loss.item():.6f}")
+        # Explicit per-step scalar loss logging
+        logger.debug(f"[TRAIN STEP] step={self.global_step} loss={final_loss.item():.6f}")
+
         return {'loss': final_loss.detach()}
 
     # ====================================================================
@@ -3313,8 +3313,8 @@ class HOLD(pl.LightningModule):
             try:
                 # Convert to scalars for logging if needed
                 avg_loss = torch.stack([x['loss'] for x in outputs]).mean().item()
-                logger.debug(f"[Epoch {current_epoch}] Avg loss: {avg_loss:.6f}")
-
+                logger.debug(f"[Epoch {current_epoch}] Avg loss: {avg_loss:.6f} "
+                             f"(num_steps={len(outputs)})")
                 # Clear the list
                 outputs.clear()
                 logger.debug(f"[Epoch {current_epoch}] Cleared outputs collection")

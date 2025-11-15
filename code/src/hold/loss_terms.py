@@ -12,13 +12,58 @@ from src.utils.const import SEGM_IDS
 
 # L1 reconstruction loss for RGB values
 def get_rgb_loss(rgb_values, rgb_gt, valid_pix, scores):
+    """
+    L1 reconstruction loss for RGB values with robust score broadcasting.
+    Args:
+        rgb_values: Predicted RGB, shape [N, 3] or [B*N, 3]
+        rgb_gt:     Ground-truth RGB, same shape as rgb_values
+        valid_pix:  Boolean or {0,1} mask over pixels, shape [N]
+        scores:     Per-entity scores (e.g., per-frame or per-sample), any shape
+    Returns:
+        Scalar RGB loss.
+    """
     # Clamp RGB to [0, 1] range (fix for loss > 1.0 bug)
     rgb_values = torch.clamp(rgb_values, 0, 1)
+
+    # Base L1 loss with per-pixel validity mask
+    # l1_loss is reduction="none", so this is [N, 3]
     rgb_loss = l1_loss(rgb_values, rgb_gt) * valid_pix[:, None]
-    num_pix = rgb_loss.shape[0] // scores.shape[0]
-    scores = scores[:, None].repeat(1, num_pix).view(-1, 1)
-    rgb_loss = rgb_loss * scores
+
+    # Flatten scores to 1D for consistent handling
+    scores_flat = scores.reshape(-1)  # shape [B]
+    num_scores = scores_flat.shape[0]
+    num_pix_total = rgb_loss.shape[0]
+
+    if num_scores <= 0:
+        # No scores: just return masked L1
+        return (rgb_loss.sum() / (valid_pix.sum() + 1e-6))
+
+    # Ideal case: each score applies to an equal block of pixels
+    # i.e. N == num_scores * num_pix_per_score
+    if num_pix_total % num_scores != 0:
+        # Non-divisible: truncate to the largest multiple to avoid shape mismatch
+        num_pix_per_score = num_pix_total // num_scores
+        new_N = num_pix_per_score * num_scores
+        # Only log once per run ideally, but for now warn each time
+        print(
+            f"[get_rgb_loss] ⚠️ Size mismatch: N={num_pix_total}, "
+            f"scores={num_scores}. Truncating to N={new_N}."
+        )
+        rgb_loss = rgb_loss[:new_N]
+        valid_pix = valid_pix[:new_N]
+        num_pix_total = new_N
+
+    # Now N is divisible by num_scores
+    num_pix_per_score = num_pix_total // num_scores
+    # Expand scores so each score is repeated over its pixel block
+    scores_expanded = scores_flat[:, None].repeat(1, num_pix_per_score).view(-1, 1)  # [N, 1]
+
+    # Apply scores
+    rgb_loss = rgb_loss * scores_expanded  # [N, 3] * [N, 1]
+
+    # Normalize by number of valid pixels
     rgb_loss = rgb_loss.sum() / (valid_pix.sum() + 1e-6)
+    print(f"[get_rgb_loss DEBUG] rgb_loss.sum()={rgb_loss.sum().item():.6f}, valid_pix.sum()={valid_pix.sum().item():.6f}")
     return rgb_loss
 
 

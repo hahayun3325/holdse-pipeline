@@ -9,6 +9,7 @@ from tqdm import tqdm
 import numpy as np
 import cv2
 import argparse
+import traceback
 
 sys.path.insert(0, '.')
 sys.path.insert(0, '../common')
@@ -18,10 +19,55 @@ from src.hold.hold import HOLD
 from src.datasets.utils import create_dataset
 from thing import thing2dev
 from omegaconf import OmegaConf
+from torch.utils.data import DataLoader, Subset
 
-def render_checkpoint(checkpoint_path, config_path, output_dir, num_frames=3):
+def convert_batch_to_tensors(batch):
+    """Convert batch data from numpy to torch tensors."""
+    if isinstance(batch, dict):
+        converted = {}
+        for key, value in batch.items():
+            if isinstance(value, np.ndarray):
+                converted[key] = torch.from_numpy(value)
+            elif isinstance(value, (np.int64, np.int32, np.int16, np.int8)):
+                converted[key] = torch.tensor(value, dtype=torch.long)
+            elif isinstance(value, (np.float64, np.float32, np.float16)):
+                converted[key] = torch.tensor(value, dtype=torch.float32)
+            elif isinstance(value, dict):
+                converted[key] = convert_batch_to_tensors(value)
+            elif isinstance(value, list):
+                converted[key] = [convert_batch_to_tensors(item) if isinstance(item, dict) else item for item in value]
+            else:
+                converted[key] = value
+        return converted
+    elif isinstance(batch, np.ndarray):
+        return torch.from_numpy(batch)
+    elif isinstance(batch, (np.int64, np.int32, np.int16, np.int8)):
+        return torch.tensor(batch, dtype=torch.long)
+    elif isinstance(batch, (np.float64, np.float32, np.float16)):
+        return torch.tensor(batch, dtype=torch.float32)
+    else:
+        return batch
+
+def ensure_batch_dimension(batch):
+    """Ensure all tensors in batch have a batch dimension."""
+    if isinstance(batch, dict):
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                # Check if tensor is a scalar (0-dimensional)
+                if value.ndim == 0:
+                    batch[key] = value.unsqueeze(0)  # Add batch dimension
+                # Check if it's missing batch dimension for specific fields
+                elif key == 'idx' and value.shape == torch.Size([]):
+                    batch[key] = value.unsqueeze(0)
+            elif isinstance(value, dict):
+                batch[key] = ensure_batch_dimension(value)
+    return batch
+
+def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=None):
     """Render validation frames from a checkpoint."""
-    
+
+    if frame_indices is None:
+        frame_indices = [0, 1, 2]  # Default frames
     # ✅ LOAD CHECKPOINT FIRST
     ckpt = torch.load(checkpoint_path, map_location='cpu')
 
@@ -89,63 +135,82 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, num_frames=3):
 
     # Create dataset
     val_config = opt.dataset.val if hasattr(opt.dataset, 'val') else opt.dataset.valid
-    val_dataset = create_dataset(val_config, args)
+    full_dataset = create_dataset(val_config, args)
     
-    # Create output directory
+    # Extract the underlying dataset
+    if hasattr(full_dataset, 'dataset'):
+        base_dataset = full_dataset.dataset
+    else:
+        base_dataset = full_dataset
+
+    # Create a subset with specific frame indices
+    subset_dataset = Subset(base_dataset, frame_indices)
+
+    # Wrap in DataLoader
+    subset_loader = DataLoader(subset_dataset, batch_size=1, shuffle=False)
+
+    # Create output directories
     (output_dir / 'rgb').mkdir(parents=True, exist_ok=True)
     (output_dir / 'normal').mkdir(parents=True, exist_ok=True)
 
-    # Render frames
     rgb_stats = []
-    
-    for frame_idx, batch in enumerate(tqdm(val_dataset, desc=f"Rendering epoch {epoch}", leave=False)):
-        if frame_idx >= num_frames:
-            break
 
-        with torch.no_grad():
-            batch_cuda = thing2dev(batch, 'cuda')
-            output = model.validation_step(batch_cuda)
-            
-            # Clean NaN if present
-            if 'rgb' in output:
-                rgb = output['rgb']
-                if torch.isnan(rgb).any():
-                    print(f"  ⚠️  Warning: NaN detected in RGB, cleaning...")
-                    rgb = torch.nan_to_num(rgb, nan=0.0)
-                    output['rgb'] = rgb
-            
-            img_size = output['img_size']
-            H, W = img_size[0], img_size[1]
-            
-            # Save RGB
-            if 'rgb' in output:
-                rgb = output['rgb'].view(H, W, 3).cpu().numpy()
+    print(f"Rendering {len(frame_indices)} specific frames: {frame_indices}")
 
-                # Calculate statistics
-                rgb_stats.append({
-                    'mean': float(rgb.mean()),
-                    'std': float(rgb.std()),
-                    'min': float(rgb.min()),
-                    'max': float(rgb.max())
-                })
+    for i, batch in enumerate(tqdm(subset_loader, desc=f"Rendering epoch {epoch}")):
+        actual_frame_idx = frame_indices[i]
 
-                # Save image
-                rgb_uint8 = (rgb * 255).clip(0, 255).astype(np.uint8)
-                rgb_native = rgb_uint8  # Keep native resolution
+        try:
+            # Ensure all tensors have proper batch dimensions
+            batch = ensure_batch_dimension(batch)
 
-                output_path = output_dir / 'rgb' / f'frame_{frame_idx:03d}.png'
-                cv2.imwrite(str(output_path), cv2.cvtColor(rgb_native, cv2.COLOR_RGB2BGR))
+            with torch.no_grad():
+                batch_cuda = thing2dev(batch, 'cuda')
+                output = model.validation_step(batch_cuda)
 
-            # Save normal map for comparison
-            if 'normal' in output:
-                normal = output['normal'].view(H, W, 3).cpu().numpy()
-                normal = ((normal + 1) / 2 * 255).clip(0, 255).astype(np.uint8)
-                normal_resized = cv2.resize(normal, (512, 512))
+                # Clean NaN if present
+                if 'rgb' in output:
+                    rgb = output['rgb']
+                    if torch.isnan(rgb).any():
+                        print(f"  ⚠️  Warning: NaN detected in frame {actual_frame_idx}, cleaning...")
+                        rgb = torch.nan_to_num(rgb, nan=0.0)
+                        output['rgb'] = rgb
 
-                normal_path = output_dir / 'normal' / f'frame_{frame_idx:03d}.png'
-                cv2.imwrite(str(normal_path), cv2.cvtColor(normal_resized, cv2.COLOR_RGB2BGR))
+                img_size = output['img_size']
+                H, W = img_size[0], img_size[1]
 
-    # Calculate average statistics
+                # Save RGB
+                if 'rgb' in output:
+                    rgb = output['rgb'].view(H, W, 3).cpu().numpy()
+
+                    # Calculate statistics
+                    rgb_stats.append({
+                        'frame_idx': actual_frame_idx,
+                        'mean': float(rgb.mean()),
+                        'std': float(rgb.std()),
+                        'min': float(rgb.min()),
+                        'max': float(rgb.max())
+                    })
+
+                    # Save image
+                    rgb_uint8 = (rgb * 255).clip(0, 255).astype(np.uint8)
+                    output_path = output_dir / 'rgb' / f'frame_{actual_frame_idx:03d}.png'
+                    cv2.imwrite(str(output_path), cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2BGR))
+
+                # Save normal map
+                if 'normal' in output:
+                    normal = output['normal'].view(H, W, 3).cpu().numpy()
+                    normal = ((normal + 1) / 2 * 255).clip(0, 255).astype(np.uint8)
+                    normal_resized = cv2.resize(normal, (512, 512))
+                    normal_path = output_dir / 'normal' / f'frame_{actual_frame_idx:03d}.png'
+                    cv2.imwrite(str(normal_path), cv2.cvtColor(normal_resized, cv2.COLOR_RGB2BGR))
+
+        except Exception as e:
+            print(f"  ❌ Error rendering frame {actual_frame_idx}: {e}")
+            traceback.print_exc()
+            continue
+
+    # Calculate statistics
     if rgb_stats:
         avg_stats = {
             'mean': np.mean([s['mean'] for s in rgb_stats]),
@@ -153,11 +218,27 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, num_frames=3):
             'min': np.min([s['min'] for s in rgb_stats]),
             'max': np.max([s['max'] for s in rgb_stats]),
         }
+
+        # Print per-frame stats for orientation analysis
+        print(f"\nPer-Frame Statistics:")
+        for stat in rgb_stats:
+            print(f"  Frame {stat['frame_idx']:3d}: mean={stat['mean']:.4f}, std={stat['std']:.4f}")
+
         return epoch, avg_stats
 
     return epoch, None
 
 def main():
+    # argument parser
+    parser = argparse.ArgumentParser(description='Validate RGB rendering from checkpoints')
+    parser.add_argument('--frames', type=str, default='0,1,2',
+                        help='Comma-separated frame indices (e.g., 50,100,150,200,250)')
+    cmd_args = parser.parse_args()
+
+    # Parse frame indices
+    frame_indices = [int(x.strip()) for x in cmd_args.frames.split(',')]
+    print(f"Target frames: {frame_indices}")
+
     # Configuration
     config_path = 'confs/ghop_stage1_rgb_only.yaml' # Stage 1 Configuration File(Stage 2 and 3 use the same. Phase 3, 4, 5 have no influence on rendering process)
     # config_path = '/home/fredcui/Projects/hold-master/code/confs/general.yaml' # HOLD Officail Configuration
@@ -177,6 +258,7 @@ def main():
         # hold_bottle1_itw class
         ('logs/ab5edc20f/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
         # ('logs/75d213d30/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
+        # ('logs/98b18938c/checkpoints/last.ckpt', 21),  # Stage 2 Checkpoint with new text prompt
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)
@@ -204,7 +286,7 @@ def main():
         output_dir = base_output_dir / f'epoch_{expected_epoch:02d}'
 
         try:
-            epoch, stats = render_checkpoint(ckpt_path, config_path, output_dir, num_frames=3)
+            epoch, stats = render_checkpoint(ckpt_path, config_path, output_dir, frame_indices=frame_indices)
 
             if stats:
                 results[epoch] = stats
@@ -262,3 +344,8 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+'''
+To use the script:
+python scripts/render_validation_with_arg.py --frames 50,100,150,200,250
+'''

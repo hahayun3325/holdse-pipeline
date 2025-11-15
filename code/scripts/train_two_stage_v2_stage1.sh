@@ -32,11 +32,11 @@ echo ""
 # Train for 200 epochs
 python train.py \
     --config "$CONFIG" \
-    --case "hold_bottle2_itw" \
-    --num_epoch 100 \
+    --case "hold_ABF12_ho3d" \
+    --num_epoch 80 \
     --no-comet \
     --gpu_id 0 \
-    --no-pin-memory 2>&1 | tee logs/production_baseline_full_200epochs.log
+    --no-pin-memory 2>&1 | tee logs/production_baseline_full_1epochs.log
 
 if [ $? -eq 0 ]; then
     echo ""
@@ -66,7 +66,7 @@ echo ""
 #chmod +x scripts/train_two_stage_v2_stage1.sh
 #
 ## Run full two-stage training
-# ./scripts/train_two_stage_v2_stage1.sh 2>&1 | tee logs/full_training_hold_bottle1_itw_stage1_1to100_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/full_training_hold_bottle1_itw_stage1_1to100_*.log | grep --line-buffered "Avg loss"
+# ./scripts/train_two_stage_v2_stage1.sh 2>&1 | tee logs/full_training_hold_ABF12_ho3d_1to80_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/full_training_hold_ABF12_ho3d_1to80_*.log | grep --line-buffered "Avg loss"
 ## Monitor in another terminal
 #tail -f production_training.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"

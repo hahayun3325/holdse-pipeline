@@ -39,7 +39,13 @@ def render_color(
     dirs = ray_dirs.unsqueeze(1).repeat(1, num_samples, 1)  ## view dir
     view = -dirs.reshape(-1, 3)
     canonical_points = canonical_points.reshape(-1, 3)
-    assert canonical_points.shape[0] > 0, "assume at least one point in canonical space"
+
+    # ✅ FIXED DEBUG: Only check what exists before render_fg_rgb
+    print(f"[render_color] Before render_fg_rgb:")
+    print(f"  canonical_points has_nan: {torch.isnan(canonical_points).any().item()}")
+    print(f"  view has_nan: {torch.isnan(view).any().item()}")
+    print(f"  feature_vectors has_nan: {torch.isnan(feature_vectors).any().item()}")
+
     fg_rgb, fg_normal = volsdf_utils.render_fg_rgb(
         deformer,
         implicit_network,
@@ -52,6 +58,10 @@ def render_color(
         is_training=is_training,
         time_code=time_code,
     )
+
+    print(f"[render_color] After render_fg_rgb:")
+    print(f"  fg_rgb has_nan: {torch.isnan(fg_rgb).any().item()}")
+    print(f"  fg_normal has_nan: {torch.isnan(fg_normal).any().item()}")
 
     fg_rgb = fg_rgb.reshape(-1, num_samples, 3)
     fg_normal = fg_normal.reshape(-1, num_samples, 3)

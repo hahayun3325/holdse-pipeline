@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch
 
 import src.engine.volsdf_utils as volsdf_utils
 from src.engine.rendering import render_color
@@ -53,6 +54,26 @@ class Node(nn.Module):
             time_code = None
         sample_dict = self.sample_points(input)
 
+        # ✅ FIX: Guard against NaN sampled points
+        if torch.isnan(sample_dict['points']).any():
+            print(f"[Node.forward] ⚠️ sample_dict['points'] has NaN, replacing with zeros")
+            sample_dict['points'] = torch.nan_to_num(sample_dict['points'], nan=0.0)
+        if 'z_vals' in sample_dict and torch.isnan(sample_dict['z_vals']).any():
+            print(f"[Node.forward] ⚠️ sample_dict['z_vals'] has NaN, replacing with 1.0")
+            sample_dict['z_vals'] = torch.nan_to_num(sample_dict['z_vals'], nan=1.0)
+
+        # ✅ NEW DEBUG: Check inputs to sdf_func_with_deformer
+        print(f"\n[Node.forward] Before sdf_func_with_deformer:")
+        print(f"  sample_dict['points'] has_nan: {torch.isnan(sample_dict['points']).any().item()}")
+        if 'deform_info' in sample_dict and sample_dict['deform_info'] is not None:
+            # deform_info is typically a dict with 'tfs', 'cond', etc.
+            if isinstance(sample_dict['deform_info'], dict):
+                for k, v in sample_dict['deform_info'].items():
+                    if isinstance(v, torch.Tensor):
+                        print(f"  deform_info['{k}'] has_nan: {torch.isnan(v).any().item()}")
+            else:
+                print(f"  deform_info has_nan: {torch.isnan(sample_dict['deform_info']).any().item()}")
+
         # compute canonical SDF and features
         (
             sdf_output,
@@ -65,6 +86,17 @@ class Node(nn.Module):
             sample_dict["points"].reshape(-1, 3),
             sample_dict["deform_info"],
         )
+
+        # ✅ NEW DEBUG: Check immediately after sdf_func_with_deformer
+        print(f"\n[Node.forward] After sdf_func_with_deformer:")
+        print(f"  sdf_output has_nan: {torch.isnan(sdf_output).any().item()}")
+        print(f"  canonical_points has_nan: {torch.isnan(canonical_points).any().item()}")
+        print(f"  feature_vectors has_nan: {torch.isnan(feature_vectors).any().item()}")
+        if torch.isnan(canonical_points).any():
+            print(f"  ❌ canonical_points is NaN right after deformer!")
+            # Also check input points
+            print(f"  input points (sample_dict['points']) has_nan: {torch.isnan(sample_dict['points']).any().item()}")
+
         num_samples = sample_dict["z_vals"].shape[1]
         color, normal, semantics = self.render(
             sample_dict, num_samples, canonical_points, feature_vectors, time_code

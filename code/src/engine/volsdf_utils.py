@@ -241,10 +241,10 @@ def render_fg_rgb(
         # ================================================================
         print(f"\n[DIAGNOSTIC 3] After time_code concatenation:")
         print(f"  feature_vectors shape: {feature_vectors.shape}")
-        print(f"  Expected d_in from config: 48")
+        print(f"  Expected d_in from config: 288")
         print(f"  Actual dimension: {feature_vectors.shape[-1]}")
 
-        if feature_vectors.shape[-1] != 48:
+        if feature_vectors.shape[-1] != 288:
             print(f"  ⚠️  MISMATCH: {feature_vectors.shape[-1]} != 48")
 
     else:
@@ -280,20 +280,30 @@ def render_fg_rgb(
 def sdf_func_with_deformer(deformer, sdf_fn, training, x, deform_info):
     """SDF function with deformer - handles optional tfs."""
     cond = deform_info["cond"]
+    tfs = deform_info.get("tfs", None)
+    verts = deform_info.get("verts", None)
 
-    # ================================================================
-    # ✅ FIX: Make tfs optional (ObjectServer doesn't provide it)
-    # ================================================================
-    tfs = deform_info.get("tfs", None)  # Use .get() instead of direct access
+    # ✅ NEW DEBUG 1: Check inputs
+    print(f"\n[sdf_func_with_deformer] Inputs:")
+    print(f"  x has_nan: {torch.isnan(x).any().item()}")
 
-    if "verts" in deform_info:
-        verts = deform_info["verts"]
+    # Handle cond being a dict or tensor
+    if isinstance(cond, dict):
+        print(f"  cond is dict with keys: {list(cond.keys())}")
+        for k, v in cond.items():
+            if isinstance(v, torch.Tensor):
+                print(f"    cond['{k}'] has_nan: {torch.isnan(v).any().item()}")
+    elif isinstance(cond, torch.Tensor):
+        print(f"  cond has_nan: {torch.isnan(cond).any().item()}")
     else:
-        verts = None
+        print(f"  cond type: {type(cond)}")
 
-    # ================================================================
-    # ✅ FIX: Handle case when tfs is None
-    # ================================================================
+    if tfs is not None:
+        print(f"  tfs has_nan: {torch.isnan(tfs).any().item()}")
+        print(f"  tfs has_inf: {torch.isinf(tfs).any().item()}")
+    else:
+        print(f"  tfs: None (object node)")
+
     if tfs is not None:
         # Original path: use deformer with tfs
         num_images = tfs.shape[0]
@@ -301,17 +311,32 @@ def sdf_func_with_deformer(deformer, sdf_fn, training, x, deform_info):
         x_c, outlier_mask = deformer.forward(
             x, tfs, return_weights=False, inverse=True, verts=verts
         )
+
+        # ✅ NEW DEBUG 2: Check deformer output
+        print(f"\n[sdf_func_with_deformer] After deformer.forward(inverse=True):")
+        print(f"  x_c has_nan: {torch.isnan(x_c).any().item()}")
+        if torch.isnan(x_c).any():
+            print(f"  ❌ Deformer produced NaN canonical points!")
     else:
-        # No tfs available: skip deformation (use x directly as x_c)
+        # No tfs available: skip deformation
         x_c = x
-        # outlier_mask not needed
+        print(f"\n[sdf_func_with_deformer] No tfs, using x directly as x_c")
 
     # Continue with SDF computation
     output = sdf_fn(x_c, cond)
+
+    # ✅ NEW DEBUG 3: Check SDF network output
+    print(f"\n[sdf_func_with_deformer] After sdf_fn:")
+    print(f"  output has_nan: {torch.isnan(output).any().item()}")
+
     sdf = output[:, :, 0:1]
     feature = output[:, :, 1:]
-    # if not training:
-    #     sdf[outlier_mask] = 4. # set a large SDF value for outlier points
+
+    # ✅ NEW DEBUG 4: Check final outputs
+    print(f"  sdf has_nan: {torch.isnan(sdf).any().item()}")
+    print(f"  feature has_nan: {torch.isnan(feature).any().item()}")
+    print(f"  x_c (canonical_points) has_nan: {torch.isnan(x_c).any().item()}")
+
     return sdf, x_c, feature
 
 
@@ -364,34 +389,41 @@ def check_off_in_surface_points_cano_mesh(
 
 
 def density2weight(density_flat, z_vals, z_max):
-    density = density_flat.reshape(
-        -1, z_vals.shape[1]
-    )  # (batch_size * num_pixels) x N_samples
+    density = density_flat.reshape(-1, z_vals.shape[1])  # (num_rays, N_samples)
 
-    # included also the dist from the sphere intersection
-    dists = z_vals[:, 1:] - z_vals[:, :-1]  # (num_rays, num_samples - 1)
-    z_max_dists = (
-        z_max.unsqueeze(-1) - z_vals[:, -1:]
-    )  # (num_rays, 1), the last internval
-    dists = torch.cat([dists, z_max_dists], -1)  # (num_rays, num_samples)
+    # Distances between samples
+    dists = z_vals[:, 1:] - z_vals[:, :-1]              # (num_rays, N_samples-1)
+    z_max_dists = (z_max.unsqueeze(-1) - z_vals[:, -1:])# (num_rays, 1)
+    dists = torch.cat([dists, z_max_dists], dim=-1)     # (num_rays, N_samples)
+
+    # Ensure dists and density are non-negative and bounded
+    dists = torch.clamp(dists, min=0.0)
+    density = torch.clamp(density, min=0.0, max=1.0)
 
     # LOG SPACE
-    free_energy = dists * density
-    alpha = 1 - torch.exp(-free_energy)  # probability of it is not empty here
+    free_energy = dists * density                       # (num_rays, N_samples)
+    # Clamp free_energy to avoid overflow/underflow in exp
+    free_energy = torch.clamp(free_energy, min=-50.0, max=50.0)
+
+    alpha = 1.0 - torch.exp(-free_energy)               # probability occupied
 
     # add zero for CDF next step
-    shifted_free_energy = torch.cat(
-        [torch.zeros(dists.shape[0], 1).cuda(), free_energy], dim=-1
-    )  # add 0 for transperancy 1 at t_0
-    transmittance = torch.exp(
-        -torch.cumsum(shifted_free_energy, dim=-1)
-    )  # probability of everything is empty up to now
+    zeros = torch.zeros(dists.shape[0], 1, device=dists.device, dtype=dists.dtype)
+    shifted_free_energy = torch.cat([zeros, free_energy], dim=-1)
 
-    # fg transimittance: the first N-1 transittance
+    cum_fe = torch.cumsum(shifted_free_energy, dim=-1)
+    cum_fe = torch.clamp(cum_fe, min=-50.0, max=50.0)
+
+    transmittance = torch.exp(-cum_fe)
+    # Clamp and sanitize transmittance
+    transmittance = torch.clamp(transmittance, min=0.0, max=1.0)
+    transmittance = torch.nan_to_num(transmittance, nan=0.0, posinf=0.0, neginf=0.0)
+
     fg_transmittance = transmittance[:, :-1]
-    bg_weights = transmittance[
-        :, -1
-    ]  # factor to be multiplied with the bg volume rendering
+    bg_weights = transmittance[:, -1]                   # (num_rays,)
 
-    fg_weights = alpha * fg_transmittance  # probability of the ray hits something here
+    fg_weights = alpha * fg_transmittance               # (num_rays, N_samples)
+    fg_weights = torch.nan_to_num(fg_weights, nan=0.0, posinf=0.0, neginf=0.0)
+    bg_weights = torch.nan_to_num(bg_weights, nan=0.0, posinf=0.0, neginf=0.0)
+
     return fg_weights, bg_weights

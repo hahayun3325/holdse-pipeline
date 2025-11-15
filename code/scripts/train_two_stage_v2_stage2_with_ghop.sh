@@ -6,7 +6,7 @@ cd ~/Projects/holdse/code
 echo "========================================================================"
 echo "STAGE 2: GHOP SDS Temporal Refinement (FIXED)"
 echo "========================================================================"
-echo "  Stage 1 Checkpoint: logs/e0ad72ec8/checkpoints/last.ckpt"
+echo "  Stage 1 Checkpoint: logs/ab5edc20f/checkpoints/last.ckpt"
 echo "  GHOP Checkpoint: checkpoints/ghop/last.ckpt"
 echo "  Config: confs/ghop_stage2_temporal_only.yaml"
 echo "  Phases: RGB + Phase 3 (GHOP SDS)"
@@ -78,8 +78,7 @@ echo ""
 python train.py \
     --config confs/ghop_stage2_temporal_only.yaml \
     --case hold_bottle1_itw \
-    --use_ghop \
-    --num_epoch 30 \
+    --num_epoch 15 \
     --load_ckpt "$STAGE1_CKPT" \
     --no-comet \
     --gpu_id 0 \
@@ -122,7 +121,34 @@ fi
 
 
 #chmod +x scripts/train_two_stage_v2_stage2_with_ghop.sh
-#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/full_training_stage2_1to30_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/full_training_stage2_1to30_*.log | grep --line-buffered "Avg loss"
-#tail -f logs/full_training_stage2_1to30_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/full_training_stage2_1to15_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/full_training_stage2_1to15_*.log | grep --line-buffered "Avg loss"
+#tail -f logs/full_training_stage2_1to15_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi
+
+## Use HOLD dataset (hold_bottle1_itw/build/)
+## Enable GHOP SDS loss via config
+#python train.py \
+#    --case hold_bottle1_itw \
+#    --config confs/ghop_stage2_temporal_only.yaml \
+#    --load_ckpt logs/stage1.ckpt \
+#    --num_epoch 30
+#    # ❌ NO --use_ghop flag
+#
+## Result:
+## - Dataset: data/hold_bottle1_itw/build/ (295 frames, HOLD ImageDataset)
+## - GHOP SDS: Enabled (phase3.enabled: true in config)
+## - Training: Stage 2 refinement with SDS guidance
+
+## Use GHOP dataset (ghop_bottle_1/ghop_data → HOI4D)
+## Enable GHOP SDS loss via config
+#python train.py \
+#    --case ghop_bottle_1 \
+#    --config confs/ghop_stage2_temporal_only.yaml \
+#    --use_ghop \  # ← Selects GHOP dataset
+#    --num_epoch 30
+#
+## Result:
+## - Dataset: data/ghop_bottle_1/ghop_data/ (71 frames, HOI4D)
+## - GHOP SDS: Enabled (phase3.enabled: true)
+## - Training: Video sequence with temporal consistency

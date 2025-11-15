@@ -123,6 +123,12 @@ class Loss(nn.Module):
         # RGB reconstruction loss
         if rgb_gt is not None and "rgb" in model_outputs:
             nan_filter = ~torch.any(model_outputs["rgb"].isnan(), dim=1)
+
+            # ✅ NEW DEBUG LOGGING
+            print(f"[RGB LOSS DEBUG] Before nan_filter: rgb_pred shape={model_outputs['rgb'].shape}, rgb_gt shape={rgb_gt.shape}")
+            print(f"[RGB LOSS DEBUG] nan_filter sum={nan_filter.sum().item()} out of {nan_filter.shape[0]}")
+            print(f"[RGB LOSS DEBUG] valid_pix sum={valid_pix[nan_filter].sum().item()}")
+
             rgb_loss = loss_terms.get_rgb_loss(
                 model_outputs["rgb"][nan_filter],
                 rgb_gt[nan_filter],

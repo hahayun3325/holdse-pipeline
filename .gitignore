@@ -370,6 +370,55 @@ scripts/__pycache__/
 verify_*.log
 
 # ============================================================================
+# TRAINING RESULTS & EXPERIMENTAL OUTPUTS
+# ============================================================================
+# Training result directories
+ghop_production_chunked_results/
+hoi4d_results/
+*_results/
+*_output/
+results/
+output/
+
+# GPU monitoring and diagnostic logs
+gpu_monitor_*.csv
+gpu_memory_*.txt
+gpu_memory_*.log
+code/gpu_memory_*.txt
+code/gpu_monitor_*.csv
+
+# Training diagnostic files
+code/test_*.csv
+code/test_*.log
+code/test_*.logclear
+*.logclear
+
+# Experiment timestamped files
+*_20[0-9][0-9][0-1][0-9][0-3][0-9]_*.txt
+*_20[0-9][0-9][0-1][0-9][0-3][0-9]_*.csv
+*_20[0-9][0-9][0-1][0-9][0-3][0-9]_*.log
+
+# Training summaries and run logs
+TRAINING_SUMMARY_*.txt
+all_run_ids_*.txt
+current_run_id_*.txt
+chunked_training_*.txt
+
+# Comet.ml experiment data
+.comet/
+comet_logs/
+
+# Tensorboard logs
+tensorboard_logs/
+tb_logs/
+runs/
+
+# Checkpoint directories with timestamped names
+checkpoints_20*/
+models_20*/
+
+
+# ============================================================================
 # EXCEPTIONS (Files to INCLUDE despite above rules)
 # ============================================================================
 # Keep configuration files
@@ -398,3 +447,15 @@ verify_*.log
 # !data/lib/*.yaml
 \
 \\
+/code/logs_ghop_bottle_1/
+/code/logs_hold_bottle1_itw/
+/code/logs_saved/
+/code/rgb_validation_renders/
+/deployment/
+/code/logs_hold_ABF12_ho3d/
+/code/logs_hold_GSF13_ho3d/
+/code/logs_hold_bottle2_itw/
+/code/logs_hold_bottle2_itw_1/
+/code/logs_hold_bottle1_itw_stage1_epoch1/
+/code/logs_hold_bottle2_itw/
+/code/logs_ghop_bottle_1/

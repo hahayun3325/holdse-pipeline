@@ -120,11 +120,17 @@ class MANONode(Node):
         cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)
         ray_dirs = ray_dirs.reshape(-1, 3)
 
+        # ✅ NEW DEBUG 1: Check ray origins and directions
+        print(f"[MANONode.sample_points] After get_camera_params:")
+        print(f"  ray_dirs has_nan: {torch.isnan(ray_dirs).any().item()}")
+        print(f"  cam_loc has_nan: {torch.isnan(cam_loc).any().item()}")
+
         deform_info = {
             "cond": cond,
             "tfs": output["tfs"],
             "verts": output["verts"],
         }
+
         z_vals = self.ray_sampler.get_z_vals(
             volsdf_utils.sdf_func_with_deformer,
             self.deformer,
@@ -136,8 +142,25 @@ class MANONode(Node):
             deform_info,
         )
 
+        # ✅ NEW DEBUG 2: Check z_vals after ray sampler
+        print(f"[MANONode.sample_points] After ray_sampler.get_z_vals:")
+        print(f"  z_vals has_nan: {torch.isnan(z_vals).any().item()}")
+        if torch.isnan(z_vals).any():
+            print(f"  ❌ z_vals is NaN from ray sampler!")
+            # Apply fix
+            z_vals = torch.nan_to_num(z_vals, nan=1.0)
+
         # fg samples to points
         points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
+
+        # ✅ NEW DEBUG 3: Check final sampled points
+        print(f"[MANONode.sample_points] After computing points:")
+        print(f"  points has_nan: {torch.isnan(points).any().item()}")
+        if torch.isnan(points).any():
+            print(f"  ❌ points is NaN after cam_loc + z_vals * ray_dirs!")
+            # Apply fix
+            points = torch.nan_to_num(points, nan=0.0)
+
         out = {}
         out["idx"] = input["idx"]
         out["output"] = output

@@ -324,11 +324,28 @@ def volumetric_render(factors, is_training):
     fg_weights, bg_weights = volsdf_utils.density2weight(
         factors["density"], factors["z_vals"], factors["z_max"]
     )
+
+    # ✅ NEW DEBUG 1: Check fg_weights right after density2weight
+    print(f"[FG WEIGHTS DEBUG] has_nan: {torch.isnan(fg_weights).any().item()}, "
+          f"min: {fg_weights.min().item():.6f}, max: {fg_weights.max().item():.6f}, "
+          f"sum: {fg_weights.sum().item():.6f}, mean: {fg_weights.mean().item():.6f}")
+
     color = factors["color"]
     normal = factors["normal"]
     semantics = factors["semantics"]
     depth = factors["z_vals"][:, :, None]
+
+    # ✅ NEW DEBUG 2: Check color (rendering network output) before integration
+    print(f"[COLOR DEBUG] has_nan: {torch.isnan(color).any().item()}, "
+          f"min: {color.min().item():.6f}, max: {color.max().item():.6f}")
+
     fg_rgb = integrate(color, fg_weights)
+
+    # ✅ NEW DEBUG 3: Check fg_rgb after integration
+    print(f"[FG RGB DEBUG] has_nan: {torch.isnan(fg_rgb).any().item()}, "
+          f"min: {fg_rgb.min().item() if not torch.isnan(fg_rgb).all() else float('nan'):.6f}, "
+          f"max: {fg_rgb.max().item() if not torch.isnan(fg_rgb).all() else float('nan'):.6f}")
+
     fg_mask = integrate(torch.ones_like(color)[:, :, :1], fg_weights)
     fg_normal = integrate(normal, fg_weights)
     fg_depth = integrate(depth, fg_weights)

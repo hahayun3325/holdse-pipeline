@@ -105,15 +105,20 @@ class RenderingNet(nn.Module):
         feature_vectors,
         frame_latent_code=None,
     ):
-        # ✅ FIX: Add None checks to debug prints
-        print(f"\n[RENDER NET FORWARD] Raw inputs:")
-        print(f"  points: {points.shape if points is not None else 'None'}")
-        print(f"  normals: {normals.shape if normals is not None else 'None'}")
-        print(f"  view_dirs: {view_dirs.shape if view_dirs is not None else 'None'}")
-        print(f"  body_pose: {body_pose.shape if body_pose is not None else 'None'}")
-        print(f"  feature_vectors: {feature_vectors.shape if feature_vectors is not None else 'None'}")
-        print(f"  frame_latent_code: {frame_latent_code.shape if frame_latent_code is not None else 'None'}")
-        print(f"  mode: {self.mode}")
+        # ✅ NEW DEBUG: Check all inputs for NaN before processing
+        print(f"\n[RENDER NET INPUT NaN CHECK]")
+        if points is not None:
+            print(f"  points has_nan: {torch.isnan(points).any().item()}")
+        if normals is not None:
+            print(f"  normals has_nan: {torch.isnan(normals).any().item()}")
+        if view_dirs is not None:
+            print(f"  view_dirs has_nan: {torch.isnan(view_dirs).any().item()}")
+        if body_pose is not None:
+            print(f"  body_pose has_nan: {torch.isnan(body_pose).any().item()}")
+        if feature_vectors is not None:
+            print(f"  feature_vectors has_nan: {torch.isnan(feature_vectors).any().item()}")
+        if frame_latent_code is not None:
+            print(f"  frame_latent_code has_nan: {torch.isnan(frame_latent_code).any().item()}")
 
         if self.embedder_obj is not None:
             if self.mode == "nerf_frame_encoding":
@@ -263,12 +268,38 @@ class RenderingNet(nn.Module):
         else:
             raise NotImplementedError
 
+        # After constructing rendering_input, add:
+        print(f"\n[RENDER NET] rendering_input constructed:")
+        print(f"  shape: {rendering_input.shape}")
+        print(f"  has_nan: {torch.isnan(rendering_input).any().item()}")
+        if torch.isnan(rendering_input).any():
+            print(f"  ❌ rendering_input contains NaN before first layer!")
+
         x = rendering_input
         for l in range(0, self.num_layers - 1):
             lin = getattr(self, "lin" + str(l))
             x = lin(x)
+
+            # ✅ NEW DEBUG: Check for NaN after each layer
+            if torch.isnan(x).any():
+                print(f"  ❌ NaN detected after lin{l}: shape={x.shape}")
+
             if l < self.num_layers - 2:
                 x = self.relu(x)
+
+                # ✅ NEW DEBUG: Check for NaN after ReLU
+                if torch.isnan(x).any():
+                    print(f"  ❌ NaN detected after relu{l}: shape={x.shape}")
+
         x = self.sigmoid(x)
+
+        # ✅ NEW DEBUG: Check final output
+        print(f"\n[RENDER NET OUTPUT]")
+        print(f"  shape: {x.shape}")
+        print(f"  has_nan: {torch.isnan(x).any().item()}")
+        if not torch.isnan(x).any():
+            print(f"  min: {x.min().item():.6f}, max: {x.max().item():.6f}")
+        else:
+            print(f"  ❌ Final output contains NaN!")
 
         return x

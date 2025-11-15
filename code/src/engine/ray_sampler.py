@@ -349,6 +349,16 @@ class ErrorBoundSampler(RaySampler):
         #     z_vals = (z_vals, z_vals_inverse_sphere)
 
         # return z_vals, z_samples_eik
+
+        # ✅ NEW DEBUG & FIX: Check and sanitize z_vals before returning
+        if torch.isnan(z_samples).any() or torch.isinf(z_samples).any():
+            print(f"[ErrorBoundSampler] ❌ z_vals has NaN/Inf before returning!")
+            print(f"  z_samples min: {z_samples[~torch.isnan(z_samples)].min().item() if (~torch.isnan(z_samples)).any() else 'all NaN'}")
+            print(f"  z_samples max: {z_samples[~torch.isnan(z_samples)].max().item() if (~torch.isnan(z_samples)).any() else 'all NaN'}")
+            print(f"  near: {self.uniform_sampler.near}, far: {self.uniform_sampler.far}")
+            # Replace NaN/Inf with safe fallback
+            z_samples = torch.nan_to_num(z_samples, nan=1.0, posinf=self.uniform_sampler.far, neginf=self.uniform_sampler.near)
+
         return z_vals
 
     def get_error_bound(self, beta, density_fn, sdf, z_vals, dists, d_star):

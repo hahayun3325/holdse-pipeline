@@ -96,75 +96,128 @@ def validate_phase4_config(opt, model):
 
 def create_dataset_with_ghop_support(dataset_config, args):
     """
-    Create dataset with GHOP HOI4D support.
+    Create dataset with GHOP HOI4D/HO3D support.
 
-    This function replaces the hardcoded ImageDataset creation
-    to support both HOLD (single images) and GHOP HOI4D (video sequences).
+    Dataset selection logic:
+    - If --use_ghop flag: Load from data/{case}/ghop_data/
+    - If no flag: Load from data/{case}/build/
+
+    This allows the same case to support both HOLD and GHOP modes:
+    - hold_bottle1_itw (no flag) → HOLD single-image
+    - hold_bottle1_itw --use_ghop → GHOP video (if ghop_data exists)
 
     Args:
         dataset_config: Dataset configuration from YAML
         args: Command-line arguments
 
     Returns:
-        Dataset instance (ImageDataset or GHOPHOIDataset)
+        Dataset instance (ImageDataset, TempoDataset, or GHOPHOIDataset)
     """
     from src.datasets.utils import create_dataset as create_image_dataset
 
     # ================================================================
-    # STEP 1: Check dataset type from config
+    # STEP 1: Check dataset selection via command-line flag
     # ================================================================
     dataset_type = dataset_config.get('type', 'train')
 
-    # Check for GHOP-specific markers in config
-    use_ghop = (
-        (hasattr(args, 'use_ghop') and args.use_ghop) or
+    # ✅ PRIMARY: Use --use_ghop flag to determine dataset type
+    use_ghop_flag = hasattr(args, 'use_ghop') and args.use_ghop
+
+    # Also check config for explicit override (optional)
+    explicit_ghop_config = (
         dataset_config.get('dataset_type', '') == 'ghop_hoi' or
+        dataset_config.get('dataset_type', '') == 'ghop_ho3d' or
         dataset_config.get('is_video', False)
-        # Removed: 'ghop' in args.case.lower()
     )
 
+    # Final decision: flag takes precedence, then config
+    use_ghop = use_ghop_flag or explicit_ghop_config
+
+    logger.info(f"[Dataset Selection] --use_ghop flag: {use_ghop_flag}")
+    logger.info(f"[Dataset Selection] Config override: {explicit_ghop_config}")
+    logger.info(f"[Dataset Selection] Final decision: {'GHOP' if use_ghop else 'HOLD'}")
+
     # ================================================================
-    # STEP 2: Create appropriate dataset
+    # STEP 2: Determine data path based on dataset type
+    # ================================================================
+    case_path = os.path.join("./data", args.case)
+
+    if use_ghop:
+        # ✅ GHOP: Use ghop_data symlink
+        data_path = os.path.join(case_path, "ghop_data")
+
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(
+                f"GHOP dataset requested (--use_ghop) but ghop_data not found:\n"
+                f"  Expected: {data_path}\n"
+                f"  Case: {args.case}\n\n"
+                f"To use GHOP dataset:\n"
+                f"  1. Create symlink: ln -s /path/to/HOI4D_clip/Object_1 {data_path}\n"
+                f"  2. Or remove --use_ghop flag to use HOLD dataset\n"
+            )
+
+        # Resolve symlink to actual location
+        if os.path.islink(data_path):
+            data_path = os.path.realpath(data_path)
+            logger.info(f"[Dataset Path] Symlink resolved: {data_path}")
+        else:
+            logger.info(f"[Dataset Path] Direct path: {data_path}")
+
+    else:
+        # ✅ HOLD: Use build directory
+        data_path = os.path.join(case_path, "build")
+
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(
+                f"HOLD dataset requested (no --use_ghop) but build/ not found:\n"
+                f"  Expected: {data_path}\n"
+                f"  Case: {args.case}\n\n"
+                f"To use HOLD dataset:\n"
+                f"  1. Ensure data/{args.case}/build/ exists with processed data\n"
+                f"  2. Or add --use_ghop flag to use GHOP dataset (if available)\n"
+            )
+
+        logger.info(f"[Dataset Path] HOLD build: {data_path}")
+
+    # ================================================================
+    # STEP 3: Create GHOP dataset (HOI4D/HO3D video sequences)
     # ================================================================
     if use_ghop:
         logger.info("=" * 70)
-        logger.info("CREATING GHOP HOI4D VIDEO DATASET")
+        logger.info("CREATING GHOP VIDEO DATASET (HOI4D/HO3D)")
         logger.info("=" * 70)
 
-        # Extract GHOP data directory from args.case
-        # Expected: args.case = 'ghop_bottle_1'
-        # Maps to: ~/Projects/ghop/data/HOI4D_clip/Bottle_1
-        case_name = args.case.lower()
-
-        # Parse object name from case (e.g., 'ghop_bottle_1' -> 'Bottle_1')
-        if 'ghop_' in case_name:
-            obj_name = case_name.replace('ghop_', '')
-            # Convert back to title case (bottle_1 -> Bottle_1)
-            obj_name = '_'.join(word.capitalize() for word in obj_name.split('_'))
+        # Detect source dataset from path
+        if 'HOI4D' in data_path or 'hoi4d' in data_path.lower():
+            source_dataset = 'HOI4D'
+        elif 'HO3D' in data_path or 'ho3d' in data_path.lower():
+            source_dataset = 'HO3D'
         else:
-            obj_name = 'Bottle_1'  # Default fallback
-
-        # Build GHOP data path
-        ghop_root = os.path.expanduser('~/Projects/ghop/data/HOI4D_clip')
-        data_dir = os.path.join(ghop_root, obj_name)
+            source_dataset = 'Unknown'
 
         logger.info(f"GHOP Configuration:")
         logger.info(f"  Case name: {args.case}")
-        logger.info(f"  Object name: {obj_name}")
-        logger.info(f"  Data directory: {data_dir}")
+        logger.info(f"  Source dataset: {source_dataset}")
+        logger.info(f"  Data directory: {data_path}")
         logger.info(f"  Split: {dataset_type}")
 
-        # Verify directory exists
-        if not os.path.exists(data_dir):
+        # Verify required files
+        required_files = ['cameras_hoi.npz', 'hands.npz']
+        missing_files = [f for f in required_files if not os.path.exists(os.path.join(data_path, f))]
+
+        if missing_files:
             raise FileNotFoundError(
-                f"GHOP data directory not found: {data_dir}\n"
-                f"Expected structure: ~/Projects/ghop/data/HOI4D_clip/{obj_name}/\n"
-                f"Please ensure GHOP HOI4D dataset is extracted correctly."
+                f"GHOP dataset incomplete: {data_path}\n"
+                f"Missing files: {missing_files}\n"
+                f"Expected structure:\n"
+                f"  - cameras_hoi.npz (camera poses and intrinsics)\n"
+                f"  - hands.npz (hand articulation parameters)\n"
+                f"Please verify dataset extraction."
             )
 
-        # Create GHOP HOI4D dataset
+        # Create GHOP dataset
         dataset = GHOPHOIDataset(
-            data_dir=data_dir,
+            data_dir=data_path,
             split=dataset_type,  # 'train' or 'val'
             args=args
         )
@@ -173,35 +226,36 @@ def create_dataset_with_ghop_support(dataset_config, args):
         logger.info(f"  Total frames: {dataset.n_frames}")
         logger.info(f"  Frame pairs: {len(dataset)}")
         logger.info(f"  Category: {dataset.category}")
+        logger.info(f"  Source: {source_dataset}")
 
-        # ✅ CRITICAL: Verify temporal fields present
+        # Verify temporal fields
         sample = dataset[0]
         if 'hA_n' in sample and 'c2w_n' in sample:
-            logger.info(f"  ✅ Temporal fields: hA_n, c2w_n present")
-            logger.info(f"  ✅ Phase 5 will ACTIVATE")
+            logger.info(f"  ✅ Temporal fields present (hA_n, c2w_n)")
+            logger.info(f"  ✅ Phase 5 temporal consistency will ACTIVATE")
         else:
             logger.warning(f"  ⚠️  Temporal fields missing!")
             logger.warning(f"  ⚠️  Phase 5 will SKIP")
 
         logger.info("=" * 70)
         return dataset
+
+    # ================================================================
+    # STEP 4: Create HOLD dataset (single-image reconstruction)
+    # ================================================================
     else:
-        # ================================================================
-        # HOLD Single-Image Dataset
-        # ================================================================
         logger.info("=" * 70)
         logger.info("CREATING HOLD SINGLE-IMAGE DATASET")
         logger.info("=" * 70)
 
-        # ❌ OLD CODE (returns DataLoader):
-        # dataset = create_image_dataset(dataset_config, args)
+        logger.info(f"  Case: {args.case}")
+        logger.info(f"  Build path: {data_path}")
 
-        # ✅ NEW CODE (returns Dataset directly):
         # Determine dataset class based on split type
         if dataset_type == "train":
             from src.datasets.tempo_dataset import TempoDataset
             dataset = TempoDataset(args)
-            logger.info(f"  Dataset class: TempoDataset")
+            logger.info(f"  Dataset class: TempoDataset (wraps ImageDataset)")
         elif dataset_type == "val":
             from src.datasets.eval_datasets import ValDataset
             dataset = ValDataset(args)
@@ -212,7 +266,7 @@ def create_dataset_with_ghop_support(dataset_config, args):
         logger.info(f"✓ HOLD dataset created:")
         logger.info(f"  Total samples: {len(dataset)}")
 
-        # ✅ CRITICAL: Verify RGB ground truth is present
+        # Verify RGB ground truth
         sample = dataset[0]
         has_rgb = 'gt.rgb' in sample
 
@@ -220,12 +274,24 @@ def create_dataset_with_ghop_support(dataset_config, args):
             logger.info(f"  ✅ Has gt.rgb: {sample['gt.rgb'].shape}")
         else:
             logger.warning(f"  ⚠️  Missing gt.rgb - RGB loss will fail!")
-            logger.warning(f"     Batch keys: {list(sample.keys())}")
 
-        logger.info(f"  ⚠️  Phase 5 temporal will SKIP (no video data)")
+        # Check for text metadata (ImageDataset feature)
+        if hasattr(dataset, 'text_metadata'):
+            logger.info(f"  ✅ Text metadata: {dataset.category}")
+            prompt = dataset.get_text_prompt('detailed')
+            logger.info(f"     Detailed prompt: {prompt[:60]}...")
+        elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'text_metadata'):
+            # TempoDataset wraps ImageDataset
+            logger.info(f"  ✅ Text metadata: {dataset.dataset.category}")
+            prompt = dataset.dataset.get_text_prompt('detailed')
+            logger.info(f"     Detailed prompt: {prompt[:60]}...")
+        else:
+            logger.warning(f"  ⚠️  No text metadata found")
+
+        logger.info(f"  ⚠️  Phase 5 temporal will SKIP (single images, no temporal pairs)")
         logger.info("=" * 70)
 
-        return dataset  # ← Returns Dataset object (not DataLoader)
+        return dataset
 
 def main():
     # ================================================================
