@@ -78,7 +78,7 @@ echo ""
 python train.py \
     --config confs/ghop_stage2_temporal_only.yaml \
     --case hold_bottle1_itw \
-    --num_epoch 15 \
+    --num_epoch 20 \
     --load_ckpt "$STAGE1_CKPT" \
     --no-comet \
     --gpu_id 0 \
@@ -121,9 +121,9 @@ fi
 
 
 #chmod +x scripts/train_two_stage_v2_stage2_with_ghop.sh
-#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/full_training_stage2_1to15_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/full_training_stage2_1to15_*.log | grep --line-buffered "Avg loss"
-#tail -f logs/full_training_stage2_1to15_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/full_training_stage2_1to20_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/full_training_stage2_1to20_*.log | grep --line-buffered "Avg loss"
+#tail -f logs/full_training_stage2_1to1_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi
 
 ## Use HOLD dataset (hold_bottle1_itw/build/)

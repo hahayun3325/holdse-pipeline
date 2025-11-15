@@ -256,9 +256,10 @@ def main():
         # ('logs/e0ad72ec8/checkpoints/last.ckpt', 1), # Stage 3 Checkpoint
         # ('logs/61a9dc41c/checkpoints/last.ckpt', 2),
         # hold_bottle1_itw class
-        ('logs/ab5edc20f/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
+        # ('logs/ab5edc20f/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
         # ('logs/75d213d30/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
         # ('logs/98b18938c/checkpoints/last.ckpt', 21),  # Stage 2 Checkpoint with new text prompt
+        ('logs/4d248833e/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint with refined SDF calculation(1 epoch test)
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)

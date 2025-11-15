@@ -325,19 +325,10 @@ def volumetric_render(factors, is_training):
         factors["density"], factors["z_vals"], factors["z_max"]
     )
 
-    # ✅ NEW DEBUG 1: Check fg_weights right after density2weight
-    print(f"[FG WEIGHTS DEBUG] has_nan: {torch.isnan(fg_weights).any().item()}, "
-          f"min: {fg_weights.min().item():.6f}, max: {fg_weights.max().item():.6f}, "
-          f"sum: {fg_weights.sum().item():.6f}, mean: {fg_weights.mean().item():.6f}")
-
     color = factors["color"]
     normal = factors["normal"]
     semantics = factors["semantics"]
     depth = factors["z_vals"][:, :, None]
-
-    # ✅ NEW DEBUG 2: Check color (rendering network output) before integration
-    print(f"[COLOR DEBUG] has_nan: {torch.isnan(color).any().item()}, "
-          f"min: {color.min().item():.6f}, max: {color.max().item():.6f}")
 
     fg_rgb = integrate(color, fg_weights)
 

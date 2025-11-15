@@ -210,12 +210,6 @@ class RenderingNet(nn.Module):
             )
             num_dim = body_pose.shape[1]
 
-            # ✅ DEBUG 6: Print pose processing
-            print(f"\n[RENDER NET FORWARD] Pose processing:")
-            print(f"  num_images: {num_images}")
-            print(f"  num_points: {num_points}")
-            print(f"  body_pose before lin_pose: {body_pose.shape}")
-
             if num_dim > 0 and self.cond_dim > 0:
                 # Normal case: MANO has pose (45D), has linear layer
                 body_pose = self.lin_pose(body_pose)
@@ -246,19 +240,6 @@ class RenderingNet(nn.Module):
                 [points, normals, body_pose, feature_vectors], dim=-1
             )
 
-            # ✅ DEBUG 7: Print concatenation result
-            print(f"\n[RENDER NET FORWARD] Concatenation breakdown:")
-            print(f"  points: {points.shape[-1]}D")
-            print(f"  normals: {normals.shape[-1]}D")
-            print(f"  body_pose: {body_pose.shape[-1]}D")
-            print(f"  feature_vectors: {feature_vectors.shape[-1]}D")
-            print(f"  rendering_input: {rendering_input.shape}")
-            print(f"  Total dims: {points.shape[-1]} + {normals.shape[-1]} + {body_pose.shape[-1]} + {feature_vectors.shape[-1]} = {rendering_input.shape[-1]}")
-
-            # ✅ DEBUG 8: Compare with lin0 expectation
-            print(f"\n[RENDER NET FORWARD] Dimension check:")
-            print(f"  rendering_input actual: {rendering_input.shape[-1]}D")
-            print(f"  lin0 expects: {self.lin0.weight.shape[1]}D")
             if rendering_input.shape[-1] != self.lin0.weight.shape[1]:
                 print(f"  ❌ MISMATCH! Difference: {self.lin0.weight.shape[1] - rendering_input.shape[-1]}")
             else:

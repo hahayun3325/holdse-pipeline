@@ -155,6 +155,10 @@ class ErrorBoundSampler(RaySampler):
         ).sum(-1)
         beta = torch.sqrt(bound)
 
+        # # ✅ DIAGNOSTIC: Check initial beta
+        # if torch.isnan(beta).any() or torch.isinf(beta).any():
+        #     print(f"[DIAG] Initial beta has NaN/Inf")
+
         total_iters, not_converge = 0, True
 
         # VolSDF Algorithm 1
@@ -175,6 +179,11 @@ class ErrorBoundSampler(RaySampler):
                     points_flat,
                     deform_info,
                 )[0]
+                # # ✅ DIAGNOSTIC 4: Check SDF
+                # if torch.isnan(samples_sdf).any():
+                #     print(f"[DIAG] Iteration {total_iters}: samples_sdf has {torch.isnan(samples_sdf).sum().item()} NaN values")
+                # ✅ FIX: Replace NaN SDF with a large positive value (far from surface)
+                samples_sdf = torch.nan_to_num(samples_sdf, nan=10.0)
             implicit_network.train()
             if samples_idx is not None:
                 sdf_merge = torch.cat(
@@ -199,6 +208,17 @@ class ErrorBoundSampler(RaySampler):
             d_star[second_cond] = c[second_cond].to(d_star.dtype)
             s = (a + b + c) / 2.0
             area_before_sqrt = s * (s - a) * (s - b) * (s - c)
+            # ✅ FIX 1: Clamp to prevent sqrt(negative)
+            area_before_sqrt = torch.clamp(area_before_sqrt, min=0.0)
+
+            # # ✅ DIAGNOSTIC 5: Check negative area (should now be zero)
+            # if (area_before_sqrt < 0).any():
+            #     print(f"[DIAG] Iteration {total_iters}: area_before_sqrt has {(area_before_sqrt < 0).sum().item()} negative values AFTER clamp")
+            #
+            # # ✅ DIAGNOSTIC 6: Check d_star
+            # if torch.isnan(d_star).any():
+            #     print(f"[DIAG] Iteration {total_iters}: d_star has NaN")
+
             mask = ~first_cond & ~second_cond & (b + c - a > 0)
             d_star[mask] = ((2.0 * torch.sqrt(area_before_sqrt[mask])) / (a[mask])).to(d_star.dtype)
             d_star = (
@@ -208,6 +228,11 @@ class ErrorBoundSampler(RaySampler):
             curr_error = self.get_error_bound(
                 beta0, density_fn, sdf, z_vals, dists, d_star
             )
+
+            # # ✅ DIAGNOSTIC 7: Check error bound
+            # if torch.isnan(curr_error).any():
+            #     print(f"[DIAG] Iteration {total_iters}: curr_error has NaN")
+
             beta[curr_error <= self.eps] = beta0
             beta_min, beta_max = beta0.unsqueeze(0).repeat(z_vals.shape[0]), beta
             for j in range(self.beta_iters):
@@ -221,6 +246,11 @@ class ErrorBoundSampler(RaySampler):
 
             # Upsample more points
             density = density_fn(sdf.reshape(z_vals.shape), beta=beta.unsqueeze(-1))
+
+            # # ✅ DIAGNOSTIC 8: Check density
+            # if torch.isnan(density).any():
+            #     print(f"[DIAG] Iteration {total_iters}: density has NaN")
+
 
             dists = torch.cat(
                 [
@@ -352,6 +382,7 @@ class ErrorBoundSampler(RaySampler):
 
         # ✅ NEW DEBUG & FIX: Check and sanitize z_vals before returning
         if torch.isnan(z_samples).any() or torch.isinf(z_samples).any():
+            # print(f"[DIAG] Final z_samples has NaN after {total_iters} iterations")
             print(f"[ErrorBoundSampler] ❌ z_vals has NaN/Inf before returning!")
             print(f"  z_samples min: {z_samples[~torch.isnan(z_samples)].min().item() if (~torch.isnan(z_samples)).any() else 'all NaN'}")
             print(f"  z_samples max: {z_samples[~torch.isnan(z_samples)].max().item() if (~torch.isnan(z_samples)).any() else 'all NaN'}")
