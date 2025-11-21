@@ -1,0 +1,168 @@
+# ================================================================
+# HOLDSE Production Configuration - Full HOLD Baseline
+# No Phase 3/4/5 - Pure HOLD reconstruction at production scale
+# ================================================================
+
+#defaults:
+#  - sanity_check_fast  # Inherit base settings, then override
+
+# ================================================================
+# PHASES: All disabled for baseline establishment
+# ================================================================
+phase3:
+  enabled: false
+
+phase4:
+  enabled: false
+
+phase5:
+  enabled: false
+
+# ================================================================
+# LOSS CONFIGURATION: Production weights
+# ================================================================
+loss:
+  w_rgb: 1.0
+  w_mask: 0.1
+  w_eikonal: 1.0          # Strengthened for geometry
+  w_smooth: 0.005
+  w_contact: 0.0          # Disabled (Phase 4 off)
+  w_temporal: 0.0         # Disabled (Phase 5 off)
+  rgb_loss_type: "l1"
+
+# ================================================================
+# TRAINING: Production schedule
+# ================================================================
+training:
+  num_epochs: 50
+  max_steps: -1
+  eval_every_epoch: 5
+  log_every: 10
+  gradient_clip: 1.0
+
+# ================================================================
+# DATASET: Production batch size with parallel loading
+# ================================================================
+dataset:
+  train:
+    type: "train"
+    batch_size: 4
+    drop_last: false
+    shuffle: true
+    num_workers: 4
+    prefetch_factor: 2
+    pixel_per_batch: 2048
+
+  valid:
+    type: "val"
+    enabled: true
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    num_workers: 2
+    pixel_per_batch: 512
+
+# ================================================================
+# MODEL: PRODUCTION SCALE (matching HOLD general.yaml)
+# ================================================================
+model:
+  implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256]
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: pose
+
+  rendering_network:
+    feature_vector_size: 256
+    mode: pose
+    d_in: 270
+    d_out: 3
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    weight_norm: true
+    multires_view: 0
+    time_code_dim: 32
+    d_implicit_features: 256
+
+  bg_implicit_network:
+    feature_vector_size: 256
+    d_in: 4
+    d_out: 1
+    dims: [256, 256, 256]
+    init: none
+    bias: 0.0
+    skip_in: []
+    weight_norm: true
+    multires: 10
+    cond: frame
+    dim_frame_encoding: 32
+
+  bg_rendering_network:
+    feature_vector_size: 256
+    mode: nerf_frame_encoding
+    d_in: 259
+    d_out: 3
+    dims: [128]
+    weight_norm: true
+    multires_view: 4
+    multires_xyz: 42
+    dim_frame_encoding: 32
+
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  ray_sampler:
+    near: 0.0
+    N_samples: 64
+    N_samples_eval: 128
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 10
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+    add_tiny: 1.0e-06
+
+  sdf_bounding_sphere: 1.0
+
+# ================================================================
+# LOGGING: Production frequency
+# ================================================================
+logging:
+  log_images_every: 100
+  log_mesh_every: 500
+  log_to_file: true
+  verbose: false
+
+# ================================================================
+# VALIDATION: Enabled with memory management
+# ================================================================
+validation:
+  enabled: true
+  resolution: 64
+  chunk_size: 1024
+  clear_cache_interval: 5
+  num_samples_per_ray: 16
+
+# ================================================================
+# OPTIMIZER: Production learning rate
+# ================================================================
+optimizer:
+  lr: 0.0005
+  type: "adam"
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+# ================================================================
+# EXPERIMENT METADATA
+# ================================================================
+experiment:
+  name: 'holdse_production_full_baseline'
+  description: 'Full HOLD baseline - 50 epochs, production architecture'

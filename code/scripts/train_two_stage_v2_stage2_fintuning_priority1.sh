@@ -6,7 +6,7 @@ cd ~/Projects/holdse/code
 echo "========================================================================"
 echo "STAGE 2: GHOP SDS Temporal Refinement (FIXED)"
 echo "========================================================================"
-echo "  Stage 1 Checkpoint: logs/140dc5c18/checkpoints/last.ckpt"
+echo "  Stage 1 Checkpoint: logs/ab5edc20f/checkpoints/last.ckpt"
 echo "  GHOP Checkpoint: checkpoints/ghop/last.ckpt"
 echo "  Config: confs/ghop_stage2_temporal_only.yaml"
 echo "  Phases: RGB + Phase 3 (GHOP SDS)"
@@ -16,7 +16,7 @@ echo ""
 # ================================================================
 # Verification: Stage 1 Checkpoint
 # ================================================================
-STAGE1_CKPT="logs/140dc5c18/checkpoints/last.ckpt"
+STAGE1_CKPT="logs/ab5edc20f/checkpoints/last.ckpt"
 
 if [ ! -f "$STAGE1_CKPT" ]; then
     echo "❌ ERROR: Stage 1 checkpoint not found at $STAGE1_CKPT"
@@ -75,14 +75,20 @@ echo ""
 echo "Starting Stage 2 training..."
 echo ""
 
-python train.py \
-    --config confs/ghop_stage2_temporal_only.yaml \
-    --case hold_MC1_ho3d \
-    --num_epoch 30 \
-    --load_ckpt "$STAGE1_CKPT" \
-    --no-comet \
-    --gpu_id 0 \
-    --no-pin-memory
+for CONFIG in confs/stage2_tuned_runA.yaml confs/stage2_tuned_runB.yaml confs/stage2_tuned_runC.yaml; do
+    RUN_NAME=$(basename "$CONFIG" .yaml)
+    echo "Training $RUN_NAME..."
+
+    python train.py \
+        --config "$CONFIG" \
+        --case hold_bottle1_itw \
+        --num_epoch 16 \
+        --load_ckpt "$STAGE1_CKPT" \
+        --no-comet \
+        --gpu_id 0 \
+        --no-pin-memory \
+        2>&1 | tee logs/${RUN_NAME}_$(date +%Y%m%d_%H%M%S).log
+done
 
 # ================================================================
 # Post-Training: Save Final Checkpoint
@@ -119,10 +125,10 @@ else
 fi
 
 
-#chmod +x scripts/train_two_stage_v2_stage2_with_ghop.sh
-#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/stage2_1to30_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/stage2_1to30_*.log | grep --line-buffered "Avg loss"
-#tail -f logs/stage2_1to30_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+#chmod +x scripts/train_two_stage_v2_stage2_fintuning_priority1.sh
+#./scripts/train_two_stage_v2_stage2_fintuning_priority1.sh 2>&1 | tee logs/stage2_16e_finetuning1_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage2_16e_finetuning1_*.log | grep --line-buffered "Avg loss"
+#tail -f logs/stage2_16e_finetuning1_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi
 
 ## Use HOLD dataset (hold_bottle1_itw/build/)

@@ -616,10 +616,48 @@ def main():
 
     # Checkpoint loading
     ckpt_path = None if args.ckpt_p == "" else args.ckpt_p
+    # ============================================================================
+    # Resume training: Use --infer_ckpt to restore full training state
+    # ============================================================================
+    if args.infer_ckpt != "":
+        print(f"\n{'=' * 70}")
+        print("RESUME TRAINING: Restoring full training state")
+        print(f"{'=' * 70}")
+        print(f"  Checkpoint: {args.infer_ckpt}")
+
+        # Verify checkpoint exists
+        if not os.path.exists(args.infer_ckpt):
+            raise FileNotFoundError(f"Checkpoint not found: {args.infer_ckpt}")
+
+        # Load and display info
+        ckpt_info = torch.load(args.infer_ckpt, map_location='cpu')
+        current_epoch = ckpt_info.get('epoch', -1)
+        global_step = ckpt_info.get('global_step', 0)
+
+        print(f"  Checkpoint epoch: {current_epoch}")
+        print(f"  Global step: {global_step}")
+        print(f"  Contains optimizer: {'optimizer_states' in ckpt_info}")
+        print(f"  Contains LR scheduler: {'lr_schedulers' in ckpt_info}")
+
+        # Validate epoch range
+        if current_epoch >= args.num_epoch:
+            print(f"\n  ⚠️  WARNING: Checkpoint at epoch {current_epoch} >= target {args.num_epoch}")
+            print(f"      Training will complete immediately.")
+            print(f"      Increase --num_epoch to continue (e.g., --num_epoch {current_epoch + 10})")
+        else:
+            print(f"\n  ✓ Will resume from epoch {current_epoch + 1} to {args.num_epoch}")
+
+        # ✅ KEY: Set ckpt_path for trainer.fit() WITHOUT loading weights
+        ckpt_path = args.infer_ckpt
+        print(f"{'=' * 70}\n")
+
     if args.load_ckpt != "":
         # ================================================================
         # ✅ CRITICAL: Load checkpoint with memory defragmentation
         # ================================================================
+        print(f"\n{'='*70}")
+        print("TRANSFER LEARNING: Loading model weights only")  # ← Add this
+        print(f"{'='*70}")  # ← Add this
         print(f"\nLoading checkpoint with defragmentation: {args.load_ckpt}")
 
         # Step 1: Load checkpoint to CPU
@@ -652,7 +690,9 @@ def main():
             print(f"  GPU memory after load: {mem_after:.1f} MB")
             print(f"  Memory allocated: {mem_after - mem_before:.1f} MB")
 
-        print("✅ Checkpoint loaded with defragmentation\n")
+        print("✅ Checkpoint loaded with defragmentation")
+        print("✅ Training will start from epoch 0")  # ← Add this
+        print(f"{'='*70}\n")  # ← Add this
         ckpt_path = None
 
     if args.load_pose != "":

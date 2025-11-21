@@ -20,7 +20,7 @@ from src.utils.const import SEGM_IDS
 
 
 def load_data(full_seq_name):
-    from smplx import MANO
+    from src.utils.external.body_models import MANO
 
     # load in opencv format
     seq_name = full_seq_name.split("_")[1]
@@ -29,6 +29,8 @@ def load_data(full_seq_name):
     human_model = MANO(
         "../code/body_models", is_rhand=True, flat_hand_mean=False, use_pca=False
     ).to(device)
+    # Use HOLD's MANO wrapper which has get_T_hip method
+    # human_model = build_mano_aa(True, flat_hand=False).to(device)
 
     data = torch.load(f"../generator/assets/ho3d_v3/processed/{seq_name}.pt")
     mano_layer = build_mano_aa(True, flat_hand=False)

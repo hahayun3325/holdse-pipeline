@@ -90,14 +90,12 @@ echo ""
 # Run Stage 3 training
 python train.py \
     --config confs/ghop_stage3_full_pipeline.yaml \
-    --case ghop_bottle_1 \
-    --use_ghop \
+    --case hold_MC1_ho3d \
     --num_epoch 30 \
     --load_ckpt logs/stage2_final.ckpt \
     --no-comet \
     --gpu_id 0 \
-    --no-pin-memory \
-    2>&1 | tee logs/stage3_full_pipeline_$(date +%Y%m%d_%H%M%S).log
+    --no-pin-memory
 
 # ================================================================
 # Post-Training: Save and Report
@@ -151,7 +149,7 @@ else
 fi
 
 #chmod +x scripts/train_two_stage_v2_stage3.sh
-# ./scripts/train_two_stage_v2_stage3.sh 2>&1 | tee logs/full_training_stage3_1to30_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/full_training_stage3_1to30_*.log | grep --line-buffered "Avg loss"
-# tail -f logs/full_training_stage3_1to30_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+# ./scripts/train_two_stage_v2_stage3.sh 2>&1 | tee logs/stage3_1to30_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage3_1to30_*.log | grep --line-buffered "Avg loss"
+# tail -f logs/stage3_1to30_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi

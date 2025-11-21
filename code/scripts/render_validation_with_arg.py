@@ -63,7 +63,7 @@ def ensure_batch_dimension(batch):
                 batch[key] = ensure_batch_dimension(value)
     return batch
 
-def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=None):
+def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=None, downsample=1):
     """Render validation frames from a checkpoint."""
 
     if frame_indices is None:
@@ -90,13 +90,13 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=No
     
     # Setup args
     class Args:
-        case = 'hold_bottle1_itw'
+        case = 'hold_MC1_ho3d'
         n_images = 71  # Placeholder, will be overwritten
         num_sample = 2048
         infer_ckpt = checkpoint_path
         ckpt_p = checkpoint_path
         no_vis = False
-        render_downsample = 2
+        render_downsample = downsample
         freeze_pose = False
         experiment = 'rgb_validation'
         log_every = 10
@@ -158,7 +158,16 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=No
     print(f"Rendering {len(frame_indices)} specific frames: {frame_indices}")
 
     for i, batch in enumerate(tqdm(subset_loader, desc=f"Rendering epoch {epoch}")):
-        actual_frame_idx = frame_indices[i]
+        # NEW: Extract the actual frame index from batch metadata
+        if 'idx' in batch:
+            actual_frame_idx = int(batch['idx'].item() if torch.is_tensor(batch['idx']) else batch['idx'])
+            print(f"  Dataset position {frame_indices[i]} → Actual frame {actual_frame_idx}")
+        elif 'frame_id' in batch:
+            actual_frame_idx = int(batch['frame_id'].item() if torch.is_tensor(batch['frame_id']) else batch['frame_id'])
+            print(f"  Dataset position {frame_indices[i]} → Actual frame {actual_frame_idx}")
+        else:
+            actual_frame_idx = frame_indices[i]
+            print(f"  Warning: No 'idx' or 'frame_id' found in batch, using input index {actual_frame_idx}")
 
         try:
             # Ensure all tensors have proper batch dimensions
@@ -233,14 +242,18 @@ def main():
     parser = argparse.ArgumentParser(description='Validate RGB rendering from checkpoints')
     parser.add_argument('--frames', type=str, default='0,1,2',
                         help='Comma-separated frame indices (e.g., 50,100,150,200,250)')
+    parser.add_argument('--downsample', type=int, default=1,  # ← NEW
+                        help='Render downsample factor (1=full 640x480, 2=half 320x240)')
     cmd_args = parser.parse_args()
 
     # Parse frame indices
     frame_indices = [int(x.strip()) for x in cmd_args.frames.split(',')]
     print(f"Target frames: {frame_indices}")
+    print(f"Render downsample: {cmd_args.downsample}")  # ← NEW
 
     # Configuration
-    config_path = 'confs/ghop_stage1_rgb_only.yaml' # Stage 1 Configuration File(Stage 2 and 3 use the same. Phase 3, 4, 5 have no influence on rendering process)
+    config_path = 'confs/stage1_hold_MC1_ho3d.yaml' # Case hold_MC1_ho3d Stage 1 Configuration File
+    # config_path = 'confs/ghop_stage1_rgb_only.yaml' # Case hold_bottle1_itw Stage 1 Configuration File(Stage 2 and 3 use the same. Phase 3, 4, 5 have no influence on rendering process)
     # config_path = '/home/fredcui/Projects/hold-master/code/confs/general.yaml' # HOLD Officail Configuration
     base_output_dir = Path('rgb_validation_renders')
 
@@ -259,7 +272,20 @@ def main():
         # ('logs/ab5edc20f/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
         # ('logs/75d213d30/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
         # ('logs/98b18938c/checkpoints/last.ckpt', 21),  # Stage 2 Checkpoint with new text prompt
-        ('logs/4d248833e/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint with refined SDF calculation(1 epoch test)
+        # ('logs/4d248833e/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint with refined SDF calculation(1 epoch test)
+        # ('logs/20d1ec1e8/checkpoints/last.ckpt', 23),  # Stage 2 Checkpoint with refined SDF calculation(20 epoch test)
+        # ('logs/b3b7ca677/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint with refined SDF calculation(16 epoch test) Run A
+        # ('logs/f70ec4323/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint with refined SDF calculation(20 epoch test) Run A
+        # ('logs/4848a499d/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint with refined SDF calculation(25 epoch test) Run A
+        # ('logs/a249430cb/checkpoints/last.ckpt', 25),
+        # Stage 2 Checkpoint with refined SDF calculation(16 epoch test) Run B
+        # ('logs/2abee7631/checkpoints/last.ckpt', 26),
+        # Stage 2 Checkpoint with refined SDF calculation(16 epoch test) Run C
+        # ('logs/07080837c/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
+        # hold_MC1_ho3d case
+        # ('logs/140dc5c18/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
+        # ('logs/4fa8bb20d/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
+        ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)
@@ -287,7 +313,7 @@ def main():
         output_dir = base_output_dir / f'epoch_{expected_epoch:02d}'
 
         try:
-            epoch, stats = render_checkpoint(ckpt_path, config_path, output_dir, frame_indices=frame_indices)
+            epoch, stats = render_checkpoint(ckpt_path, config_path, output_dir, frame_indices=frame_indices, downsample=cmd_args.downsample)
 
             if stats:
                 results[epoch] = stats
@@ -349,4 +375,8 @@ if __name__ == '__main__':
 '''
 To use the script:
 python scripts/render_validation_with_arg.py --frames 50,100,150,200,250
+# Full resolution (640×480)
+python scripts/render_validation_with_arg.py --frames 0,50,100 --downsample 1
+# Half resolution (320×240) - faster for testing
+python scripts/render_validation_with_arg.py --frames 0,50,100 --downsample 2
 '''
