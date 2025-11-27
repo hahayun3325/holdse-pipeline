@@ -353,58 +353,69 @@ class TwoStageTrainingManager:
         print(f"  - Stage 1 (SDS): 0-{sds_iters} iterations, max weight: {max_sds_weight}")
         print(f"  - Stage 2 (Contact): {sds_iters}-{self.total_iters} iterations, max weight: {max_contact_weight}")
 
+    # def get_stage_weights(self, iteration):
+    #     """
+    #     Returns loss weights for current training stage.
+    #
+    #     Args:
+    #         iteration: Global training step
+    #
+    #     Returns:
+    #         Dict with 'sds_weight', 'contact_weight', 'stage', 'progress'
+    #     """
+    #     if iteration < self.sds_iters:
+    #         # Stage 1: Ramp up SDS from 0 to max_sds_weight
+    #         progress = iteration / self.sds_iters
+    #         sds_weight = self.max_sds_weight * progress
+    #
+    #         return {
+    #             'sds_weight': sds_weight,
+    #             'contact_weight': 0.0,
+    #             'stage': 'sds',
+    #             'progress': progress,
+    #             'stage_iter': iteration,
+    #             'total_stage_iters': self.sds_iters
+    #         }
+    #
+    #     elif iteration < self.total_iters:
+    #         # Stage 2: Reduce SDS, introduce contact
+    #         stage_iter = iteration - self.sds_iters
+    #         contact_progress = stage_iter / self.contact_iters
+    #
+    #         # Gradually reduce SDS weight and increase contact weight
+    #         sds_weight = self.max_sds_weight * 0.2  # Keep 20% of SDS for stability
+    #         contact_weight = self.max_contact_weight * contact_progress
+    #
+    #         return {
+    #             'sds_weight': sds_weight,
+    #             'contact_weight': contact_weight,
+    #             'stage': 'contact',
+    #             'progress': contact_progress,
+    #             'stage_iter': stage_iter,
+    #             'total_stage_iters': self.contact_iters
+    #         }
+    #
+    #     else:
+    #         # Stage 3: Contact only (post-training)
+    #         return {
+    #             'sds_weight': 0.0,
+    #             'contact_weight': self.max_contact_weight,
+    #             'stage': 'contact_only',
+    #             'progress': 1.0,
+    #             'stage_iter': iteration - self.total_iters,
+    #             'total_stage_iters': float('inf')
+    #         }
+
     def get_stage_weights(self, iteration):
-        """
-        Returns loss weights for current training stage.
-
-        Args:
-            iteration: Global training step
-
-        Returns:
-            Dict with 'sds_weight', 'contact_weight', 'stage', 'progress'
-        """
-        if iteration < self.sds_iters:
-            # Stage 1: Ramp up SDS from 0 to max_sds_weight
-            progress = iteration / self.sds_iters
-            sds_weight = self.max_sds_weight * progress
-
-            return {
-                'sds_weight': sds_weight,
-                'contact_weight': 0.0,
-                'stage': 'sds',
-                'progress': progress,
-                'stage_iter': iteration,
-                'total_stage_iters': self.sds_iters
-            }
-
-        elif iteration < self.total_iters:
-            # Stage 2: Reduce SDS, introduce contact
-            stage_iter = iteration - self.sds_iters
-            contact_progress = stage_iter / self.contact_iters
-
-            # Gradually reduce SDS weight and increase contact weight
-            sds_weight = self.max_sds_weight * 0.2  # Keep 20% of SDS for stability
-            contact_weight = self.max_contact_weight * contact_progress
-
-            return {
-                'sds_weight': sds_weight,
-                'contact_weight': contact_weight,
-                'stage': 'contact',
-                'progress': contact_progress,
-                'stage_iter': stage_iter,
-                'total_stage_iters': self.contact_iters
-            }
-
-        else:
-            # Stage 3: Contact only (post-training)
-            return {
-                'sds_weight': 0.0,
-                'contact_weight': self.max_contact_weight,
-                'stage': 'contact_only',
-                'progress': 1.0,
-                'stage_iter': iteration - self.total_iters,
-                'total_stage_iters': float('inf')
-            }
+        """Return constant SDS weight (phase scheduling handled in HOLD)."""
+        return {
+            'sds_weight': self.max_sds_weight,  # Use full weight
+            'contact_weight': 0.0,              # Phase 4 handles contact
+            'stage': 'sds',
+            'progress': 1.0,
+            'stage_iter': iteration,            # Add this for logging
+            'total_stage_iters': self.sds_iters # Add this for logging
+        }
 
     def compute_losses(self, object_sdf, hand_params, text_prompts, iteration):
         """
@@ -454,11 +465,11 @@ class TwoStageTrainingManager:
                 # CRITICAL FIX: Pass hand_params directly (not hand_pose)
                 # SDSLoss.compute_sds_loss will handle dict/tensor conversion
                 # ============================================================
-                sds_loss, sds_info = self.sds_loss.compute_sds_loss(
+                sds_loss, sds_info = self.sds_loss.compute(
                     obj_sdf=object_sdf,
-                    hand_params=hand_params,  # ✅ Pass full hand_params dict
-                    text_prompt=text_prompts[0] if len(text_prompts) == 1 else text_prompts,
-                    weight=weights['sds_weight']
+                    hand_params=hand_params,
+                    object_category=text_prompts[0] if len(text_prompts) == 1 else text_prompts,
+                    iteration=iteration  # ← CRITICAL: Add this parameter!
                 )
                 losses['sds'] = sds_loss
                 info.update({f'sds_{k}': v for k, v in sds_info.items()})

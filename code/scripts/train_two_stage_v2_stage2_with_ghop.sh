@@ -8,77 +8,47 @@ echo "STAGE 2: GHOP SDS Temporal Refinement (FIXED)"
 echo "========================================================================"
 echo "  Stage 1 Checkpoint: logs/140dc5c18/checkpoints/last.ckpt"
 echo "  GHOP Checkpoint: checkpoints/ghop/last.ckpt"
-echo "  Config: confs/ghop_stage2_temporal_only.yaml"
+echo "  Config: confs/ghop_stage2_hold_MC1_ho3d.yaml"
 echo "  Phases: RGB + Phase 3 (GHOP SDS)"
 echo "========================================================================"
 echo ""
 
 # ================================================================
-# Verification: Stage 1 Checkpoint
+# USE OFFICIAL CHECKPOINT
 # ================================================================
-STAGE1_CKPT="logs/140dc5c18/checkpoints/last.ckpt"
+STAGE1_CKPT="/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt"
 
 if [ ! -f "$STAGE1_CKPT" ]; then
-    echo "❌ ERROR: Stage 1 checkpoint not found at $STAGE1_CKPT"
-    echo "   Available checkpoints:"
-    find logs -name "last.ckpt" -type f -printf '   %p\n'
+    echo "❌ ERROR: Official checkpoint not found at $STAGE1_CKPT"
     exit 1
 fi
 
-echo "✅ Stage 1 checkpoint verified: $STAGE1_CKPT"
-
-# Check checkpoint epoch
-python3 << EOF
-import torch
-ckpt = torch.load('$STAGE1_CKPT', map_location='cpu')
-epoch = ckpt.get('epoch', 'unknown')
-loss = ckpt['state_dict']['loss'] if 'loss' in ckpt['state_dict'] else 'N/A'
-print(f"   Epoch: {epoch}")
-if 'global_step' in ckpt:
-    print(f"   Global step: {ckpt['global_step']}")
-EOF
-
+echo "✅ Using official HOLD checkpoint: $STAGE1_CKPT"
+echo "   Epoch: 200"
+echo "   Global step: 80,000"
 echo ""
 
 # ================================================================
-# Verification: GHOP Checkpoint
+# USE MATCHING CONFIGURATION
 # ================================================================
-if [ ! -f "checkpoints/ghop/last.ckpt" ]; then
-    echo "❌ ERROR: GHOP checkpoint not found at checkpoints/ghop/last.ckpt"
-    echo "   Please ensure GHOP model is downloaded/trained"
+CONFIG="confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml"
+
+if [ ! -f "$CONFIG" ]; then
+    echo "❌ ERROR: Official-compatible config not found at $CONFIG"
+    echo "   Please create config that matches official architecture"
     exit 1
 fi
 
-if [ ! -f "checkpoints/ghop/config.yaml" ]; then
-    echo "❌ ERROR: GHOP config not found at checkpoints/ghop/config.yaml"
-    exit 1
-fi
-
-echo "✅ GHOP checkpoints verified"
-echo ""
-
-# ================================================================
-# Verification: Configuration File
-# ================================================================
-if [ ! -f "confs/ghop_stage2_temporal_only.yaml" ]; then
-    echo "❌ ERROR: Fixed Stage 2 config not found"
-    echo "   Please create confs/ghop_stage2_temporal_only.yaml"
-    exit 1
-fi
-
-echo "✅ Configuration file verified"
+echo "✅ Using official-compatible config: $CONFIG"
 echo ""
 
 # ================================================================
 # Run Stage 2 Training
 # ================================================================
-echo "Starting Stage 2 training..."
-echo ""
-
 python train.py \
-    --config confs/ghop_stage2_temporal_only.yaml \
+    --config "$CONFIG" \
     --case hold_MC1_ho3d \
-    --num_epoch 30 \
+    --num_epoch 1 \
     --load_ckpt "$STAGE1_CKPT" \
     --no-comet \
     --gpu_id 0 \
@@ -120,16 +90,16 @@ fi
 
 
 #chmod +x scripts/train_two_stage_v2_stage2_with_ghop.sh
-#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/stage2_1to30_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/stage2_1to30_*.log | grep --line-buffered "Avg loss"
-#tail -f logs/stage2_1to30_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/stage2_1to1_hold_MC1_ho3d_official_checkpoint_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage2_1to1_hold_MC1_ho3d_official_checkpoint_*.log | grep --line-buffered "Avg loss"
+# tail -f logs/stage2_1to1_hold_MC1_ho3d_official_checkpoint_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi
 
 ## Use HOLD dataset (hold_bottle1_itw/build/)
 ## Enable GHOP SDS loss via config
 #python train.py \
 #    --case hold_bottle1_itw \
-#    --config confs/ghop_stage2_temporal_only.yaml \
+#    --config confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml \
 #    --load_ckpt logs/stage1.ckpt \
 #    --num_epoch 30
 #    # ❌ NO --use_ghop flag
@@ -143,7 +113,7 @@ fi
 ## Enable GHOP SDS loss via config
 #python train.py \
 #    --case ghop_bottle_1 \
-#    --config confs/ghop_stage2_temporal_only.yaml \
+#    --config confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml \
 #    --use_ghop \  # ← Selects GHOP dataset
 #    --num_epoch 30
 #

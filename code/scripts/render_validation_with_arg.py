@@ -285,7 +285,8 @@ def main():
         # hold_MC1_ho3d case
         # ('logs/140dc5c18/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
         # ('logs/4fa8bb20d/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
-        ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
+        # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
+        ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)

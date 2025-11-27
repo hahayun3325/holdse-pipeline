@@ -135,7 +135,7 @@ fi
 ## Enable GHOP SDS loss via config
 #python train.py \
 #    --case hold_bottle1_itw \
-#    --config confs/ghop_stage2_temporal_only.yaml \
+#    --config confs/ghop_stage2_hold_MC1_ho3d.yaml \
 #    --load_ckpt logs/stage1.ckpt \
 #    --num_epoch 30
 #    # ❌ NO --use_ghop flag
@@ -149,7 +149,7 @@ fi
 ## Enable GHOP SDS loss via config
 #python train.py \
 #    --case ghop_bottle_1 \
-#    --config confs/ghop_stage2_temporal_only.yaml \
+#    --config confs/ghop_stage2_hold_MC1_ho3d.yaml \
 #    --use_ghop \  # ← Selects GHOP dataset
 #    --num_epoch 30
 #

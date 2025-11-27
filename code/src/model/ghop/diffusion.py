@@ -194,19 +194,21 @@ class SpatialTransformer3D(nn.Module):
         # Layer norm
         self.norm = nn.GroupNorm(32, channels)
 
-        # Self-attention (simplified)
+        # Self-attention
         self.attn = nn.MultiheadAttention(
             embed_dim=channels,
             num_heads=num_heads,
             batch_first=True
         )
 
-        # Cross-attention to text context (placeholder)
+        # Cross-attention projections
+        self.query_proj = nn.Linear(channels, context_dim)      # ← ADD THIS: channels → 768
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=channels,
+            embed_dim=context_dim,  # 768
             num_heads=num_heads,
             batch_first=True
         )
+        self.output_proj = nn.Linear(context_dim, channels)     # ← RENAME from context_proj
 
         # Feed-forward
         self.ff = nn.Sequential(
@@ -224,27 +226,48 @@ class SpatialTransformer3D(nn.Module):
             out: (B, C, D, H, W)
         """
         B, C, D, H, W = x.shape
+        print(f"[ST DEBUG] Input: B={B}, C={C}, D={D}, H={H}, W={W}")  # ADD
 
-        # Reshape to sequence: (B, C, D, H, W) -> (B, D*H*W, C)
-        x_flat = x.view(B, C, -1).transpose(1, 2)
+        # Reshape to sequence
+        x_flat = x.view(B, C, -1).transpose(1, 2)  # (B, D*H*W, C=channels)
+
+        # Add this check:
+        tokens = D * H * W
+        print(f"[ST DEBUG] tokens calculated: {tokens}, x_flat.shape[1]: {x_flat.shape[1]}")
 
         # Self-attention
         x_norm = self.norm(x).view(B, C, -1).transpose(1, 2)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
         x_flat = x_flat + attn_out
 
-        # Cross-attention to context (if provided)
+        # Cross-attention to context
         if context is not None:
-            # Project context to match channels
-            # Note: In full implementation, add a learned projection layer
-            cross_out, _ = self.cross_attn(x_flat, context, context)
+            # Project query from channels to context_dim (768)
+            query_768 = self.query_proj(x_flat)  # (B, D*H*W, channels) → (B, D*H*W, 768)
+
+            # Cross-attention in 768-dim space
+            cross_out, _ = self.cross_attn(query_768, context, context)  # All 768-dim
+
+            # Project output back to channels
+            cross_out = self.output_proj(cross_out)  # (B, D*H*W, 768) → (B, D*H*W, channels)
+
             x_flat = x_flat + cross_out
 
         # Feed-forward
         x_flat = x_flat + self.ff(x_flat)
 
-        # Reshape back
-        out = x_flat.transpose(1, 2).view(B, C, D, H, W)
+        # Before final reshape, verify x_flat is the right shape:
+        print(f"[ST DEBUG] Before final reshape: x_flat.shape={x_flat.shape}")
+        print(f"[ST DEBUG] Expected: ({B}, {tokens}, {C})")
+
+        out = x_flat.transpose(1, 2)  # (B, D*H*W, C) → (B, C, D*H*W)
+        print(f"[ST DEBUG] After transpose: out.shape={out.shape}")
+
+        out = out.view(B, C, D, H, W)
+        print(f"[ST DEBUG] After view: out.shape={out.shape}")
+
+        if out.ndim != 5:
+            raise RuntimeError(f"SpatialTransformer output has {out.ndim} dims, expected 5!")
 
         return out
 
@@ -387,13 +410,21 @@ class GHOP3DUNet(nn.Module):
         t_emb = timestep_embedding(timesteps, self.model_channels)
         emb = self.time_embed(t_emb)
 
+        # ADD THIS AT START:
+        print(f"[UNET DEBUG] ==== FORWARD START ====")
+        print(f"[UNET DEBUG] Input x: {x.shape}")
+        print(f"[UNET DEBUG] Context: {context.shape if context is not None else None}")
+        print(f"[UNET DEBUG] Timesteps: {timesteps.shape}")
+
         # ================================================================
         # Encoder pass with skip connections
         # ================================================================
         hs = []
         h = x
 
-        for module_list in self.input_blocks:
+        for i, module_list in enumerate(self.input_blocks):  # ADD enumerate
+            # ADD THIS:
+            print(f"[UNET DEBUG] --- Encoder block {i}: h.shape={h.shape} ---")
             if isinstance(module_list, nn.Conv3d):
                 h = module_list(h)
             else:
@@ -401,38 +432,95 @@ class GHOP3DUNet(nn.Module):
                     if isinstance(layer, ResBlock3D):
                         h = layer(h, emb)
                     elif isinstance(layer, SpatialTransformer3D):
+                        # ADD THIS:
+                        print(f"[UNET DEBUG] Before ST (encoder): h.shape={h.shape}")
                         h = layer(h, context)
+                        print(f"[UNET DEBUG] After ST (encoder): h.shape={h.shape}")
                     elif isinstance(layer, Downsample3D):
                         h = layer(h)
+
+            # ADD THIS:
+            print(f"[UNET DEBUG] Appending to hs: h.shape={h.shape}, h.ndim={h.ndim}")
             hs.append(h)
 
         # ================================================================
         # Middle block
         # ================================================================
+        print(f"[UNET DEBUG] === Middle block START: h.shape={h.shape} ===")  # Already there
+
         for i, layer in enumerate(self.middle_block):
+            print(f"[UNET DEBUG] Middle layer {i} ({type(layer).__name__}): input h.shape={h.shape}")  # ADD
+
             if isinstance(layer, ResBlock3D):
                 h = layer(h, emb)
             elif isinstance(layer, SpatialTransformer3D):
+                print(f"[UNET DEBUG] Before ST (middle): h.shape={h.shape}")
                 h = layer(h, context)
+                print(f"[UNET DEBUG] After ST (middle): h.shape={h.shape}")
+
+            print(f"[UNET DEBUG] Middle layer {i} output: h.shape={h.shape}, h.ndim={h.ndim}")  # ADD
+
+            # ADD THIS ASSERTION:
+            if h.ndim != 5:
+                raise RuntimeError(f"Middle layer {i} ({type(layer).__name__}) produced {h.ndim}D tensor! Shape: {h.shape}")
+        # ADD THIS NEW DEBUG LINE HERE - AFTER middle block loop:
+        print(f"[UNET DEBUG] === Middle block END: h.shape={h.shape}, h.ndim={h.ndim} ===")
+        print(f"[UNET DEBUG] About to enter decoder with h.shape={h.shape}")
 
         # ================================================================
         # Decoder pass with skip connections
         # ================================================================
-        for module_list in self.output_blocks:
-            # Concatenate skip connection
+        print(f"[UNET DEBUG] === Starting decoder: h.shape={h.shape}, len(hs)={len(hs)} ===")  # ADD
+
+        for i, module_list in enumerate(self.output_blocks):
+            skip = hs[-1]
+
+            # ADD THIS BEFORE CONCATENATION:
+            # If spatial dimensions don't match, interpolate skip to match h
+            if h.shape[2:] != skip.shape[2:]:
+                import torch.nn.functional as F
+                print(f"[UNET DEBUG] !!! SPATIAL MISMATCH at decoder block {i}")
+                print(f"[UNET DEBUG]     h spatial: {h.shape[2:]}, skip spatial: {skip.shape[2:]}")
+
+                # Interpolate skip connection to match h's spatial size
+                skip = F.interpolate(
+                    skip,
+                    size=h.shape[2:],  # Target spatial size (D, H, W)
+                    mode='trilinear',
+                    align_corners=False
+                )
+                print(f"[UNET DEBUG]     After interpolation: {skip.shape}")
+
+                # Replace the top of skip stack with interpolated version
+                hs[-1] = skip
+
+            # Now concatenation will work
             h = torch.cat([h, hs.pop()], dim=1)
+
+            # ADD THIS AFTER CONCATENATION:
+            print(f"[UNET DEBUG] After cat: h.shape={h.shape}")
 
             for layer in module_list:
                 if isinstance(layer, ResBlock3D):
                     h = layer(h, emb)
                 elif isinstance(layer, SpatialTransformer3D):
+                    # ADD THIS:
+                    print(f"[UNET DEBUG] Before ST (decoder): h.shape={h.shape}")
                     h = layer(h, context)
+                    print(f"[UNET DEBUG] After ST (decoder): h.shape={h.shape}")
                 elif isinstance(layer, Upsample3D):
                     h = layer(h)
 
-        # Final projection
-        return self.out(h)
+        # ADD THIS AT END:
+        print(f"[UNET DEBUG] Before final projection: h.shape={h.shape}")
 
+        # Final projection
+        result = self.out(h)
+
+        # ADD THIS:
+        print(f"[UNET DEBUG] ==== FORWARD END: result.shape={result.shape} ====")
+
+        return result
 
 # ============================================================================
 # PHASE 3: Inference Wrapper

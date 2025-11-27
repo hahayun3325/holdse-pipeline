@@ -240,7 +240,7 @@ fi
 #- Typical epochs: 80-120
 #
 #Stage 2 Script:
-#- Config: confs/ghop_stage2_temporal_only.yaml
+#- Config: confs/ghop_stage2_hold_MC1_ho3d.yaml
 #- Case: hold_bottle1_itw
 #- Dataset: HOLD with GHOP SDS
 #- Typical epochs: 20-30

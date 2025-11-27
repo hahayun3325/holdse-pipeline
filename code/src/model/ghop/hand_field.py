@@ -17,7 +17,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+import logging
 
+logger = logging.getLogger(__name__)
 # Try importing jutils
 try:
     from jutils import hand_utils, mesh_utils
@@ -87,53 +89,70 @@ class HandSkeletalField(nn.Module):
 
             try:
                 # ============================================================
-                # Approach 1: Try hand_wrapper (most common in HOLD)
+                # Approach 1: Try MANO layer directly (BEST - no extra params needed)
                 # ============================================================
-                if hasattr(self.mano_server, 'hand_wrapper'):
-                    # HOLD's hand_wrapper signature: hand_wrapper(verts, thetas)
-                    # verts=None means compute from pose
-                    _, joints = self.mano_server.hand_wrapper(None, full_pose)
-
-                    logger.debug(f"[HandSkeletalField] ✓ Joints via hand_wrapper: {joints.shape}")
-
-                # ============================================================
-                # Approach 2: Try direct forward call
-                # ============================================================
-                elif hasattr(self.mano_server, 'forward'):
-                    output = self.mano_server(full_pose, hand_shape)
-
-                    if isinstance(output, dict):
-                        joints = output.get('joints') or output.get('J')
-                    elif isinstance(output, tuple):
-                        # Usually (vertices, joints)
-                        joints = output[1] if len(output) > 1 else output[0]
-                    else:
-                        joints = output
-
-                    logger.debug(f"[HandSkeletalField] ✓ Joints via forward: {joints.shape}")
-
-                # ============================================================
-                # Approach 3: Try MANO layer directly
-                # ============================================================
-                elif hasattr(self.mano_server, 'mano_layer'):
-                    mano_layer = self.mano_server.mano_layer
+                if hasattr(self.mano_server, 'mano_layer') or hasattr(self.mano_server, 'human_layer'):
+                    mano_layer = getattr(self.mano_server, 'mano_layer', None) or self.mano_server.human_layer
 
                     # Extract pose components
                     if full_pose.shape[-1] == 48:
-                        hand_pose_only = full_pose[:, 3:]  # Skip global orient
+                        global_orient = full_pose[:, :3]   # First 3: global orientation
+                        hand_pose_only = full_pose[:, 3:]  # Rest: hand pose
                     else:
+                        global_orient = torch.zeros(B, 3, device=device)
                         hand_pose_only = full_pose
 
-                    _, joints = mano_layer(
-                        th_pose_coeffs=hand_pose_only,
-                        th_betas=hand_shape
+                    # Call MANO layer
+                    output = mano_layer(
+                        global_orient=global_orient,
+                        hand_pose=hand_pose_only,
+                        betas=hand_shape if hand_shape is not None else torch.zeros(B, 10, device=device),
+                        return_verts=True
                     )
 
+                    # Extract joints
+                    joints = output.joints if hasattr(output, 'joints') else output[1]
                     logger.debug(f"[HandSkeletalField] ✓ Joints via mano_layer: {joints.shape}")
+
+                # ============================================================
+                # Approach 2: Try forward_param (needs dict construction)
+                # ============================================================
+                elif hasattr(self.mano_server, 'forward_param'):
+                    # Construct param dict
+                    from src.utils.params import ParamsDict  # May need adjustment
+                    param_dict = {
+                        'global_orient': full_pose[:, :3] if full_pose.shape[-1] == 48 else torch.zeros(B, 3, device=device),
+                        'pose': full_pose[:, 3:] if full_pose.shape[-1] == 48 else full_pose,
+                        'betas': hand_shape if hand_shape is not None else torch.zeros(B, 10, device=device),
+                        'transl': torch.zeros(B, 3, device=device),
+                        'scene_scale': torch.ones(B, device=device)
+                    }
+
+                    output = self.mano_server.forward_param(param_dict)
+                    joints = output.get('joints') or output.get('J')
+                    logger.debug(f"[HandSkeletalField] ✓ Joints via forward_param: {joints.shape}")
+
+                # ============================================================
+                # Approach 3: Try full forward (needs all 5 params)
+                # ============================================================
+                elif hasattr(self.mano_server, 'forward'):
+                    # Construct missing parameters
+                    scene_scale = torch.ones(B, device=device)
+                    transl = torch.zeros(B, 3, device=device)
+
+                    output = self.mano_server.forward(
+                        scene_scale=scene_scale,
+                        transl=transl,
+                        thetas=full_pose,
+                        betas=hand_shape if hand_shape is not None else torch.zeros(B, 10, device=device)
+                    )
+
+                    joints = output.get('joints') or output.get('J')
+                    logger.debug(f"[HandSkeletalField] ✓ Joints via forward: {joints.shape}")
 
                 else:
                     raise AttributeError(
-                        "MANO server has no recognized method: hand_wrapper, forward, or mano_layer"
+                        "MANO server has no recognized method: mano_layer, human_layer, forward_param, or forward"
                     )
 
             except Exception as e:
@@ -170,7 +189,12 @@ class HandSkeletalField(nn.Module):
 
         # Create 3D coordinate grid
         lin = torch.linspace(-spatial_lim, spatial_lim, H, device=device)
-        grid_x, grid_y, grid_z = torch.meshgrid(lin, lin, lin, indexing='ij')
+        if hasattr(torch, '__version__') and tuple(int(x) for x in torch.__version__.split('.')[:2]) >= (1, 10):
+            # PyTorch >= 1.10: Use indexing parameter
+            grid_x, grid_y, grid_z = torch.meshgrid(lin, lin, lin, indexing='ij')
+        else:
+            # PyTorch < 1.10: No indexing parameter (defaults to 'ij')
+            grid_x, grid_y, grid_z = torch.meshgrid(lin, lin, lin)
         grid = torch.stack([grid_x, grid_y, grid_z], dim=-1)  # (H, H, H, 3)
         grid = grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # (B, H, H, H, 3)
 
@@ -370,7 +394,7 @@ class HandFieldBuilder(nn.Module):
 
         # Compute skeletal distance field
         hand_field = self.field_computer(
-            hand_pose=hand_pose,
+            hand_params=hand_pose,  # ✅ Match expected parameter name
             resolution=self.resolution,
             spatial_lim=self.lim,
             rtn_wrist=False  # Return 15 channels

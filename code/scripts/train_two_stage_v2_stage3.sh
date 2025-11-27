@@ -92,11 +92,11 @@ python train.py \
     --config confs/ghop_stage3_full_pipeline.yaml \
     --case hold_MC1_ho3d \
     --num_epoch 30 \
-    --load_ckpt logs/stage2_final.ckpt \
+    --load_ckpt logs/140dc5c18/checkpoints/last.ckpt \
     --no-comet \
     --gpu_id 0 \
     --no-pin-memory
-
+# logs/140dc5c18/checkpoints/last.ckpt stage 1 checkpoint
 # ================================================================
 # Post-Training: Save and Report
 # ================================================================
@@ -149,7 +149,7 @@ else
 fi
 
 #chmod +x scripts/train_two_stage_v2_stage3.sh
-# ./scripts/train_two_stage_v2_stage3.sh 2>&1 | tee logs/stage3_1to30_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/stage3_1to30_*.log | grep --line-buffered "Avg loss"
-# tail -f logs/stage3_1to30_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+# ./scripts/train_two_stage_v2_stage3.sh 2>&1 | tee logs/stage3_1to30_s1ckpt_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage3_1to30_s1ckpt*.log | grep --line-buffered "Avg loss"
+# tail -f logs/stage3_1to30_s1ckpt*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi

@@ -174,7 +174,7 @@ class HOLD(pl.LightningModule):
                 from src.model.ghop.autoencoder import GHOPVQVAEWrapper
                 from src.model.ghop.diffusion import GHOP3DUNetWrapper
                 from src.model.ghop.hand_field import HandFieldBuilder
-                from src.model.ghop.ghop_loss import SDSLoss
+                from src.model.ghop.ghop_loss import GHOPSDSLoss
                 from src.model.ghop.ghop_prior import TwoStageTrainingManager
 
                 # Get device
@@ -313,17 +313,18 @@ class HOLD(pl.LightningModule):
                 # ============================================================
                 # Initialize SDS Loss Module
                 # ============================================================
-                logger.info("Initializing SDS Loss Module...")
-                self.sds_loss = SDSLoss(
+                logger.info("Initializing GHOP SDS Loss Module...")
+                self.sds_loss = GHOPSDSLoss(
                     vqvae_wrapper=self.vqvae,
                     unet_wrapper=self.unet,
                     hand_field_builder=self.hand_field_builder,
+                    sds_weight=phase3_cfg.get('w_sds', 10.0),
                     guidance_scale=phase3_cfg.sds.get('guidance_scale', 4.0),
-                    min_step_ratio=phase3_cfg.sds.get('min_step_ratio', 0.02),
-                    max_step_ratio=phase3_cfg.sds.get('max_step_ratio', 0.98),
-                    diffusion_steps=phase3_cfg.sds.get('diffusion_steps', 1000)
+                    start_iter=phase3_cfg.get('phase3_start_iter', 0),
+                    end_iter=phase3_cfg.get('phase3_end_iter', 99999),
+                    device='cuda'
                 )
-                logger.info("✓ SDS Loss Module initialized")
+                logger.info(f"✓ GHOP SDS Loss Module initialized (iterations: {self.sds_loss.start_iter} to {self.sds_loss.end_iter})")
 
                 # ============================================================
                 # Initialize Two-Stage Training Manager
@@ -429,6 +430,7 @@ class HOLD(pl.LightningModule):
             self.warmup_iters = phase3_cfg.get('warmup_iters', 0)
             self.sds_iters = phase3_cfg.get('sds_iters', 500)
             self.w_sds = phase3_cfg.get('w_sds', 5000.0)
+            self.grid_resolution = phase3_cfg.get('grid_resolution', 24)
 
             self.phase3_enabled = True
             self.ghop_enabled = True
@@ -1408,164 +1410,169 @@ class HOLD(pl.LightningModule):
 
             if should_compute_ghop:
                 logger.debug(f"[GHOP] ✅ Computing SDS loss at step {self.global_step}")
-            try:
-                # ============================================================
-                # STEP 1: Extract hand parameters with validation
-                # ============================================================
-                logger.debug(f"[Phase 3] Extracting hand params at step {self.global_step}")
+                try:
+                    # ============================================================
+                    # STEP 1: Extract hand parameters with validation
+                    # ============================================================
+                    logger.debug(f"[Phase 3] Extracting hand params at step {self.global_step}")
 
-                hand_params = self._extract_hand_params_from_batch(batch)
+                    hand_params = self._extract_hand_params_from_batch(batch)
 
-                # Validate extraction result
-                if hand_params is None or 'pose' not in hand_params:
-                    logger.warning(
-                        f"[Phase 3] hand_params extraction failed at step {self.global_step}. "
-                        f"Result: {type(hand_params)}. Skipping GHOP."
-                    )
-                    raise ValueError("hand_params extraction failed")
+                    # Validate extraction result
+                    if hand_params is None or 'pose' not in hand_params:
+                        logger.warning(
+                            f"[Phase 3] hand_params extraction failed at step {self.global_step}. "
+                            f"Result: {type(hand_params)}. Skipping GHOP."
+                        )
+                        raise ValueError("hand_params extraction failed")
 
-                # Validate pose shape
-                hand_pose = hand_params['pose']
-                if hand_pose.shape[-1] not in [45, 48]:
-                    logger.error(
-                        f"[Phase 3] Invalid hand pose shape: {hand_pose.shape}. "
-                        f"Expected [..., 45] or [..., 48]. Skipping GHOP."
-                    )
-                    raise ValueError(f"Invalid hand pose shape: {hand_pose.shape}")
+                    # Validate pose shape
+                    hand_pose = hand_params['pose']
+                    if hand_pose.shape[-1] not in [45, 48]:
+                        logger.error(
+                            f"[Phase 3] Invalid hand pose shape: {hand_pose.shape}. "
+                            f"Expected [..., 45] or [..., 48]. Skipping GHOP."
+                        )
+                        raise ValueError(f"Invalid hand pose shape: {hand_pose.shape}")
 
-                logger.debug(f"[Phase 3] ✓ Hand params valid: pose={hand_pose.shape}")
+                    logger.debug(f"[Phase 3] ✓ Hand params valid: pose={hand_pose.shape}")
 
-                # ============================================================
-                # STEP 2: Extract object SDF
-                # ============================================================
-                object_sdf = self._extract_sdf_grid_from_nodes(batch)
-
-                # Validate SDF
-                if object_sdf is None or object_sdf.numel() == 0:
-                    logger.warning(
-                        f"[Phase 3] object_sdf extraction failed at step {self.global_step}. "
-                        f"Shape: {object_sdf.shape if object_sdf is not None else None}. "
-                        f"Skipping GHOP."
-                    )
-                    raise ValueError("object_sdf extraction failed")
-
-                # Check for degenerate SDF (all zeros)
-                sdf_std = object_sdf.std()
-                if sdf_std < 1e-6:
-                    logger.warning(
-                        f"[Phase 3] object_sdf is degenerate (std={sdf_std:.6f}). "
-                        f"This may indicate initialization issues."
+                    # ============================================================
+                    # STEP 2: Extract object SDF
+                    # ============================================================
+                    object_sdf = self._extract_sdf_grid_from_nodes(
+                        batch,
+                        resolution=self.grid_resolution
                     )
 
-                logger.debug(
-                    f"[Phase 3] ✓ Object SDF valid: shape={object_sdf.shape}, "
-                    f"std={sdf_std:.4f}, range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
-                )
+                    # Validate SDF
+                    if object_sdf is None or object_sdf.numel() == 0:
+                        logger.warning(
+                            f"[Phase 3] object_sdf extraction failed at step {self.global_step}. "
+                            f"Shape: {object_sdf.shape if object_sdf is not None else None}. "
+                            f"Skipping GHOP."
+                        )
+                        raise ValueError("object_sdf extraction failed")
 
-                # ============================================================
-                # STEP 3: Get text prompt
-                # ============================================================
-                category = batch.get('category', batch.get('object_category', 'Object'))
-                if isinstance(category, (list, tuple)):
-                    category = category[0]
+                    # Check for degenerate SDF (all zeros)
+                    sdf_std = object_sdf.std()
+                    if sdf_std < 1e-6:
+                        logger.warning(
+                            f"[Phase 3] object_sdf is degenerate (std={sdf_std:.6f}). "
+                            f"This may indicate initialization issues."
+                        )
 
-                text_prompt = f"a hand grasping a {category}"
-
-                # ============================================================
-                # STEP 4: Compute SDS loss via ghop_manager
-                # ============================================================
-                logger.debug(f"[Phase 3] Computing SDS via ghop_manager at step {self.global_step}")
-
-                # ✅ REMOVED: Lines that extracted hand_pose_tensor
-                # The manager expects the full hand_params dict
-
-                # Prepare text prompts list
-                if isinstance(hand_params, dict):
-                    B = hand_params['pose'].shape[0]  # ✅ FIXED: Get batch size from dict
-                else:
-                    B = hand_params.shape[0]  # ✅ Fallback for tensor input
-
-                text_prompts = [text_prompt] * B
-
-                # Call ghop_manager with correct signature
-                ghop_losses, ghop_info = self.ghop_manager.compute_losses(
-                    object_sdf=object_sdf,        # [B, 1, 64, 64, 64]
-                    hand_params=hand_params,      # ✅ FIXED: Pass dict directly
-                    text_prompts=text_prompts,    # List[str]
-                    iteration=self.global_step    # int
-                )
-
-                # ============================================================
-                # STEP 5: Apply Phase 5 dynamic weighting if enabled
-                # ============================================================
-                if self.phase5_enabled:
-                    sds_weight = loss_weights['sds']
-                else:
-                    sds_weight = 1.0
-
-                # ============================================================
-                # STEP 6: Add GHOP losses to total loss
-                # ============================================================
-                # GHOP FIX: Conditional detach to prevent double backward
-                # Only detach if Phase 4 or Phase 5 are also active (multiple loss graphs)
-                phase4_active = (
-                        hasattr(self, 'phase4_enabled') and
-                        self.phase4_enabled and
-                        self.contact_start_iter <= self.global_step < self.contact_end_iter
-                )
-                phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
-                                 self.global_step >= self.phase5_start_iter)
-
-                # Always detach GHOP loss to ensure consistent graph structure across all phases
-                weighted_ghop_detached = weighted_ghop.detach()
-                loss_output['loss'] = loss_output['loss'] + weighted_ghop_detached
-                logger.debug(f"[Phase 3] Detached GHOP loss (consistent strategy)")
-                loss_output['ghop_loss'] = weighted_ghop_detached
-
-                # ============================================================
-                # STEP 7: Log GHOP metrics
-                # ============================================================
-                stage_map = {'sds': 1, 'contact': 2, 'contact_only': 3, 'unknown': 0}
-                stage_numeric = stage_map.get(ghop_info.get('stage', 'unknown'), 0)
-
-                self.log('ghop/stage_numeric', float(stage_numeric), prog_bar=False)
-                self.log('ghop/stage_progress', ghop_info.get('stage_progress', 0.0), prog_bar=True)
-                self.log('ghop/total_loss', weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else float(weighted_ghop), prog_bar=True)
-
-                # Log SDS-specific metrics
-                if 'sds' in ghop_losses:
-                    sds_value = ghop_losses['sds']
-                    if isinstance(sds_value, torch.Tensor):
-                        self.log('ghop/sds_loss', sds_value.item(), prog_bar=True)
-
-                # Console logging
-                if self.global_step % self.log_ghop_every == 0:
-                    logger.info(
-                        f"\n[Phase 3 - Step {self.global_step}] GHOP SDS:\n"
-                        f"  Stage:            {ghop_info.get('stage', 'unknown')}\n"
-                        f"  Stage progress:   {ghop_info.get('stage_progress', 0.0):.3f}\n"
-                        f"  Total loss:       {weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else weighted_ghop:.4f}\n"
-                        f"  SDS weight:       {sds_weight:.3f}"
+                    logger.debug(
+                        f"[Phase 3] ✓ Object SDF valid: shape={object_sdf.shape}, "
+                        f"std={sdf_std:.4f}, range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
                     )
 
-                logger.debug(f"[Phase 3] ✓ GHOP losses added to total loss")
+                    # ============================================================
+                    # STEP 3: Get text prompt
+                    # ============================================================
+                    category = batch.get('category', batch.get('object_category', 'Object'))
+                    if isinstance(category, (list, tuple)):
+                        category = category[0]
 
-            except ValueError as e:
-                # Expected extraction failures
-                logger.warning(f"[GHOP] ❌ Extraction failed at step {self.global_step}: {e}")
-                ghop_info["error"] = str(e)
-                zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
-                loss_output["ghop_loss"] = zero_loss
+                    text_prompt = f"a hand grasping a {category}"
 
-            except Exception as e:
-                # Unexpected errors
-                logger.error(f"[GHOP] ❌ CRITICAL ERROR at step {self.global_step}: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                ghop_info["error"] = str(e)
-                zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
-                loss_output["ghop_loss"] = zero_loss
+                    # ============================================================
+                    # STEP 4: Compute SDS loss via ghop_manager
+                    # ============================================================
+                    logger.debug(f"[Phase 3] Computing SDS via ghop_manager at step {self.global_step}")
 
+                    # ✅ REMOVED: Lines that extracted hand_pose_tensor
+                    # The manager expects the full hand_params dict
+
+                    # Prepare text prompts list
+                    if isinstance(hand_params, dict):
+                        B = hand_params['pose'].shape[0]  # ✅ FIXED: Get batch size from dict
+                    else:
+                        B = hand_params.shape[0]  # ✅ Fallback for tensor input
+
+                    text_prompts = [text_prompt] * B
+
+                    # Call ghop_manager with correct signature
+                    ghop_losses, ghop_info = self.ghop_manager.compute_losses(
+                        object_sdf=object_sdf,        # [B, 1, 64, 64, 64]
+                        hand_params=hand_params,      # ✅ FIXED: Pass dict directly
+                        text_prompts=text_prompts,    # List[str]
+                        iteration=self.global_step    # int
+                    )
+
+                    # ============================================================
+                    # STEP 5: Apply Phase 5 dynamic weighting if enabled
+                    # ============================================================
+                    if self.phase5_enabled:
+                        sds_weight = loss_weights['sds']
+                    else:
+                        sds_weight = 1.0
+
+                    weighted_ghop = ghop_losses['sds'] * sds_weight
+                    logger.debug(f"[PHASE 3 DEBUG] weighted_ghop = {ghop_losses['sds']} * {sds_weight} = {weighted_ghop}")
+
+                    # ============================================================
+                    # STEP 6: Add GHOP losses to total loss
+                    # ============================================================
+                    # GHOP FIX: Conditional detach to prevent double backward
+                    # Only detach if Phase 4 or Phase 5 are also active (multiple loss graphs)
+                    phase4_active = (
+                            hasattr(self, 'phase4_enabled') and
+                            self.phase4_enabled and
+                            self.contact_start_iter <= self.global_step < self.contact_end_iter
+                    )
+                    phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
+                                     self.global_step >= self.phase5_start_iter)
+
+                    # Always detach GHOP loss to ensure consistent graph structure across all phases
+                    weighted_ghop_detached = weighted_ghop.detach()
+                    loss_output['loss'] = loss_output['loss'] + weighted_ghop_detached
+                    logger.debug(f"[Phase 3] Detached GHOP loss (consistent strategy)")
+                    loss_output['ghop_loss'] = weighted_ghop_detached
+
+                    # ============================================================
+                    # STEP 7: Log GHOP metrics
+                    # ============================================================
+                    stage_map = {'sds': 1, 'contact': 2, 'contact_only': 3, 'unknown': 0}
+                    stage_numeric = stage_map.get(ghop_info.get('stage', 'unknown'), 0)
+
+                    self.log('ghop/stage_numeric', float(stage_numeric), prog_bar=False)
+                    self.log('ghop/stage_progress', ghop_info.get('stage_progress', 0.0), prog_bar=True)
+                    self.log('ghop/total_loss', weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else float(weighted_ghop), prog_bar=True)
+
+                    # Log SDS-specific metrics
+                    if 'sds' in ghop_losses:
+                        sds_value = ghop_losses['sds']
+                        if isinstance(sds_value, torch.Tensor):
+                            self.log('ghop/sds_loss', sds_value.item(), prog_bar=True)
+
+                    # Console logging
+                    if self.global_step % self.log_ghop_every == 0:
+                        logger.info(
+                            f"\n[Phase 3 - Step {self.global_step}] GHOP SDS:\n"
+                            f"  Stage:            {ghop_info.get('stage', 'unknown')}\n"
+                            f"  Stage progress:   {ghop_info.get('stage_progress', 0.0):.3f}\n"
+                            f"  Total loss:       {weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else weighted_ghop:.4f}\n"
+                            f"  SDS weight:       {sds_weight:.3f}"
+                        )
+
+                    logger.debug(f"[Phase 3] ✓ GHOP losses added to total loss")
+
+                except ValueError as e:
+                    # Expected extraction failures
+                    logger.warning(f"[GHOP] ❌ Extraction failed at step {self.global_step}: {e}")
+                    ghop_info["error"] = str(e)
+                    zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+                    loss_output["ghop_loss"] = zero_loss
+
+                except Exception as e:
+                    # Unexpected errors
+                    logger.error(f"[GHOP] ❌ CRITICAL ERROR at step {self.global_step}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    ghop_info["error"] = str(e)
+                    zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+                    loss_output["ghop_loss"] = zero_loss
         else:
             # Log why GHOP was skipped
             if self.global_step % 50 == 0:
@@ -1576,6 +1583,7 @@ class HOLD(pl.LightningModule):
 
             zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
             loss_output["ghop_loss"] = zero_loss
+
         if should_profile and self.phase3_enabled:
             self.memory_profiler.checkpoint("after_ghop")
 
@@ -1642,7 +1650,7 @@ class HOLD(pl.LightningModule):
                 # Compute contact loss with adaptive or fixed zones
                 # ============================================================
                 batch_size = hand_verts.shape[0]
-                total_contact_loss = 0.0
+                total_contact_loss = torch.tensor(0.0, device=self.device)  # No requires_grad for accumulator
                 num_valid_samples = 0
 
                 contact_metrics_accum = {
@@ -1681,18 +1689,18 @@ class HOLD(pl.LightningModule):
                                 hand_faces=h_faces,           # [F, 3]
                                 obj_verts=o_verts,            # ✓ [V_obj, 3] no unsqueeze
                                 obj_faces=o_faces,            # [F_obj, 3]
-                                contact_zones=zones_b         # [K] or None
+                                contact_zones=zones_b,         # [K] or None
                             )
                         # Method 2: Standard forward (vertex-only, no faces)
                         else:
                             contact_loss_b, contact_metrics_b = self.contact_refiner(
-                                hand_verts=h_verts,           # [778, 3]
-                                obj_verts=o_verts,            # [V_obj, 3]
-                                weightpen=100.0,
-                                weightmiss=10.0
-                            )
+                                hand_verts=h_verts,  # [778, 3]
+                                hand_faces=h_faces,  # [1538, 3]
+                                obj_verts=o_verts,   # [V_obj, 3]
+                                obj_faces=o_faces    # [F_obj, 3]
+                            )  # ✅ FIX: Added faces back (required by forward)
 
-                        total_contact_loss += contact_loss_b
+                        total_contact_loss = total_contact_loss + contact_loss_b
                         num_valid_samples += 1
 
                         # Accumulate metrics
@@ -1714,6 +1722,9 @@ class HOLD(pl.LightningModule):
                         (self.global_step - self.contact_start_iter) / self.contact_warmup_iters,
                         1.0
                     )
+                    # Calculate weighted contact loss
+                    base_weight = torch.tensor(self.w_contact * contact_progress, device=self.device)  # Ensure tensor
+                    weighted_contact_loss = (total_contact_loss / max(num_valid_samples, 1)) * base_weight  # Ensure tensor
 
                     # Apply Phase 5 dynamic weighting if enabled
                     # CONTACT FIX: Conditional detach to prevent double backward
@@ -1765,7 +1776,7 @@ class HOLD(pl.LightningModule):
         # ====================================================================
         # PHASE 2: Backward Compatibility
         # ====================================================================
-        if self.phase2_enabled and self.hold_loss_module is not None:
+        if self.phase2_enabled and self.hold_loss_module is not None and not self.phase3_enabled:
             try:
                 object_node = None
 
@@ -2380,7 +2391,19 @@ class HOLD(pl.LightningModule):
                 # METHOD 1: server.forward_sdf (preferred)
                 if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
                     try:
-                        sdf_output = object_node.server.forward_sdf(grid_flat)
+                        idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                        if idx.ndim > 1:
+                            idx = idx.squeeze(-1)
+
+                        # Expand idx to match grid_flat points [B, H³]
+                        num_points = grid_flat.shape[1]
+                        idx_expanded = idx.unsqueeze(1).expand(-1, num_points)  # [B, H³]
+
+                        # Pass both points AND indices
+                        sdf_output = object_node.server.forward_sdf(
+                            grid_flat,  # [B, H³, 3] - spatial coordinates
+                            idx_expanded  # [B, H³] - frame indices for each point
+                        )
                         if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
                             sdf_values = sdf_output['sdf']
                         elif isinstance(sdf_output, torch.Tensor):
@@ -2458,8 +2481,8 @@ class HOLD(pl.LightningModule):
                         with torch.no_grad():
                             if hasattr(object_node, 'implicit_network'):
                                 # Get feature vector for this sample
-                                if hasattr(object_node, 'embedding'):
-                                    features = object_node.embedding(idx)  # [B, feature_dim]
+                                if hasattr(object_node, 'frame_latent_encoder'):
+                                    features = object_node.frame_latent_encoder(idx)  # [B, feature_dim]
                                 elif hasattr(object_node, 'feature_vector'):
                                     features = object_node.feature_vector.weight[idx]  # [B, feature_dim]
                                 else:
@@ -2477,7 +2500,16 @@ class HOLD(pl.LightningModule):
                                         input_b = points_b
 
                                     try:
-                                        output_b = object_node.implicit_network(input_b.unsqueeze(0))
+                                        # ✅ FIX: Create cond dict for implicit_network
+                                        # ImplicitNet expects: forward(input, cond) where cond[self.cond] = features
+                                        if features is not None:
+                                            # Use 'pose' as the conditioning key (standard for object networks)
+                                            cond = {'pose': feat_b}  # [feature_dim]
+                                        else:
+                                            # No features - use zeros as fallback
+                                            cond = {'pose': torch.zeros(32, device=device)}
+                                        
+                                        output_b = object_node.implicit_network(points_b.unsqueeze(0), cond)
 
                                         if isinstance(output_b, dict):
                                             sdf_b = output_b.get('sdf', output_b.get('model_out', output_b.get('output')))
@@ -2518,7 +2550,7 @@ class HOLD(pl.LightningModule):
             if sdf_values.shape[-1] != 1:
                 sdf_values = sdf_values[..., :1]
 
-            object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(0, 4, 1, 2, 3)
+            object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(0, 4, 1, 2, 3).contiguous()  # ✅ FIX: Ensure contiguous memory after permute
 
             # Step 6: Validate extracted SDF
             sdf_std = object_sdf.std()
@@ -2799,7 +2831,8 @@ class HOLD(pl.LightningModule):
         obj_faces_list = []
 
         for b in range(batch_size):
-            sdf_grid = object_sdf[b, 0].cpu().numpy()  # [H, H, H]
+            sdf_grid = object_sdf[b, 0].cpu().numpy().copy()  # ✅ FIX: Ensure contiguous memory  # [H, H, H]
+            logger.debug(f"[Stride Debug] sdf_grid strides: {sdf_grid.strides}, negative: {any(s < 0 for s in sdf_grid.strides)}")
 
             try:
                 # Apply Marching Cubes
@@ -2808,13 +2841,16 @@ class HOLD(pl.LightningModule):
                     level=0.0,
                     spacing=(3.0 / resolution, 3.0 / resolution, 3.0 / resolution)
                 )
+                # Debug: Check verts strides immediately after marching_cubes
+                logger.debug(f"[MC Debug] verts shape: {verts.shape}, strides: {verts.strides}, negative: {any(s < 0 for s in verts.strides)}")
+                logger.debug(f"[MC Debug] faces shape: {faces.shape}, strides: {faces.strides}")
 
                 # Shift to [-1.5, 1.5] coordinate system
                 verts = verts - 1.5
 
                 # Convert to tensors
                 obj_verts_list.append(torch.from_numpy(verts).float().to(object_sdf.device))
-                obj_faces_list.append(torch.from_numpy(faces).long().to(object_sdf.device))
+                obj_faces_list.append(torch.from_numpy(faces.copy()).long().to(object_sdf.device))  # ✅ FIX: faces has negative strides
 
                 logger.debug(f"[Phase 4] Extracted object mesh {b}: {verts.shape[0]} verts, {faces.shape[0]} faces")
 

@@ -1,4 +1,4 @@
-# Save as: confs/ghop_stage2_temporal_only.yaml
+# Save as: confs/ghop_stage2_hold_MC1_ho3d.yaml
 
 # ================================================================
 # STAGE 2: Temporal Consistency + GHOP SDS
@@ -22,16 +22,17 @@ phase3:
   phase3_start_iter: 0
   sds:
     diffusion_steps: 1000
-    guidance_scale: 4.0
+    guidance_scale: 3.0        # ← REDUCE from 4.0 for stability
     max_step_ratio: 0.98
     min_step_ratio: 0.02
     noise_schedule: linear
     prediction_respacing: 50
-  sds_iters: 1
+
+  sds_iters: 1                 # ✅ Keep (compute every step)
   spatial_lim: 1.5
   use_modular_init: true
-  w_sds: 100.0            # Start conservative, can increase
-  warmup_iters: 0
+  w_sds: 10.0                  # ← REDUCE from 100.0
+  warmup_iters: 500            # ← ADD warmup
 
 phase4:
   enabled: false          # Disable for Stage 2
@@ -140,7 +141,7 @@ model:
 
 # Optimizer Configuration
 optimizer:
-  lr: 0.00005                   # Lower LR for fine-tuning
+  lr: 0.0001                   # ← INCREASE from 0.00005
   type: "adam"
   weight_decay: 0.0
 

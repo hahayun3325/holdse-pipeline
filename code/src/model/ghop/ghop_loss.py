@@ -16,7 +16,7 @@ import numpy as np
 from src.model.ghop.ghop_prior import load_ghop_prior
 from loguru import logger
 import logging
-
+import traceback
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -164,7 +164,15 @@ class SDSLoss(nn.Module):
             mem_before_unet1 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
             logger.info(f"[SDS-MEMORY] Calling U-Net (conditional)...")
 
+            # ADD THIS DEBUG BEFORE U-NET:
+            logger.info(f"[SDS-SHAPE] z_t input shape: {z_t.shape}")
+            logger.info(f"[SDS-SHAPE] text_emb shape: {text_emb.shape}")
+
             eps_cond = self.unet.predict_noise(z_t, t, text_emb)
+
+            # ADD THIS DEBUG AFTER FIRST U-NET:
+            logger.info(f"[SDS-SHAPE] eps_cond output shape: {eps_cond.shape}")
+            logger.info(f"[SDS-SHAPE] Expected shape (same as z_t): {z_t.shape}")
 
             # ✅ LOG 7: After first U-Net call
             mem_after_unet1 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
@@ -176,21 +184,87 @@ class SDSLoss(nn.Module):
 
             eps_uncond = self.unet.predict_noise(z_t, t, torch.zeros_like(text_emb))
 
+            # ADD THIS DEBUG AFTER SECOND U-NET:
+            logger.info(f"[SDS-SHAPE] eps_uncond output shape: {eps_uncond.shape}")
+
             # ✅ LOG 9: After second U-Net call
             mem_after_unet2 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
             logger.info(f"[SDS-MEMORY] After U-Net call 2: {mem_after_unet2:.2f} MB (delta: +{mem_after_unet2 - mem_after_unet1:.2f} MB)")
 
             eps_theta = eps_uncond + self.guidance_scale * (eps_cond - eps_uncond)
 
+            # ADD THIS DEBUG AFTER GUIDANCE:
+            logger.info(f"[SDS-SHAPE] eps_theta (after guidance) shape: {eps_theta.shape}")
+
         # ✅ LOG 10: After guidance
         mem_after_guidance = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
         logger.info(f"[SDS-MEMORY] After guidance: {mem_after_guidance:.2f} MB")
 
+        # Then add the interpolation fix right here:
+        # IF SHAPES DON'T MATCH, FIX IT:
+        if eps_theta.shape != noise.shape:
+            logger.warning(f"[SDS-SHAPE] !!! MISMATCH DETECTED !!!")
+            logger.warning(f"[SDS-SHAPE]   eps_theta: {eps_theta.shape}")
+            logger.warning(f"[SDS-SHAPE]   noise:     {noise.shape}")
+
+            # Diagnostic logging (INFO level - we see these)
+            logger.info(f"[SDS-SHAPE] BEFORE FIX:")
+            logger.info(f"[SDS-SHAPE]   eps_theta.is_contiguous(): {eps_theta.is_contiguous()}")
+            logger.info(f"[SDS-SHAPE]   eps_theta.dtype: {eps_theta.dtype}")
+            logger.info(f"[SDS-SHAPE]   eps_theta.device: {eps_theta.device}")
+            logger.info(f"[SDS-SHAPE]   eps_theta.requires_grad: {eps_theta.requires_grad}")
+
+            logger.warning(f"[SDS-SHAPE] Attempting interpolation...")
+
+            try:
+                # CRITICAL FIX: Make contiguous
+                eps_theta = eps_theta.contiguous()
+                logger.info(f"[SDS-SHAPE] After .contiguous(): {eps_theta.is_contiguous()}")
+
+                # Perform interpolation
+                eps_theta = F.interpolate(
+                    eps_theta,
+                    size=tuple(noise.shape[2:]),
+                    mode='trilinear',
+                    align_corners=False
+                )
+
+                # THIS MESSAGE WILL PROVE SUCCESS
+                logger.warning(f"[SDS-SHAPE] ✓✓✓ INTERPOLATION SUCCESS ✓✓✓")
+                logger.info(f"[SDS-SHAPE] After interpolation: {eps_theta.shape}")
+
+            except Exception as e:
+                # GUARANTEED TO LOG (using WARNING level too)
+                logger.warning(f"[SDS-SHAPE] ✗✗✗ INTERPOLATION FAILED ✗✗✗")
+                logger.warning(f"[SDS-SHAPE] Exception: {type(e).__name__}: {str(e)}")
+                logger.error(f"[SDS-SHAPE] FULL ERROR DETAILS:")
+                logger.error(f"[SDS-SHAPE]   Type: {type(e).__name__}")
+                logger.error(f"[SDS-SHAPE]   Message: {str(e)}")
+
+                # Full traceback
+                import traceback
+                logger.error(f"[SDS-SHAPE] Traceback:")
+                for line in traceback.format_exc().split('\n'):
+                    if line.strip():
+                        logger.error(f"[SDS-SHAPE]   {line}")
+
+                # Re-raise so outer handler sees it
+                raise
+
+        # NOW the shapes should match:
         # ================================================================
         # Steps 6-9: SDS gradient computation (GHOP sd.py lines 102-115)
         # ================================================================
         # Weight function: w(t) = (1 - α̅_t)
         w_t = 1.0 - alpha_bar_t
+
+        # ✅ ADD THIS DEBUG LOGGING BLOCK HERE (AFTER w_t is defined):
+        logger.info(f"[SDS-SHAPE] === BEFORE GRAD COMPUTATION ===")
+        logger.info(f"[SDS-SHAPE] z_0 shape: {z_0.shape}")
+        logger.info(f"[SDS-SHAPE] noise shape: {noise.shape}")
+        logger.info(f"[SDS-SHAPE] eps_theta shape: {eps_theta.shape}")
+        logger.info(f"[SDS-SHAPE] w_t shape: {w_t.shape}")  # ✅ NOW SAFE
+        logger.info(f"[SDS-SHAPE] w_t value range: [{w_t.min():.4f}, {w_t.max():.4f}]")
 
         # Gradient approximation: ∇_z L_SDS = w(t) * (ε̂_θ - ε)
         grad = weight * w_t * (eps_theta - noise)
@@ -297,6 +371,7 @@ class SDSLoss(nn.Module):
                 'weight': weight
             }
             logger.warning(f"[SDSLoss] compute_sds_loss failed: {e}")
+            traceback.print_exc()  # ✅ This will dump the full Python traceback into the log
             return zero_loss, info
 
     def _get_text_embeddings(self, prompts, batch_size, device):
@@ -408,6 +483,20 @@ class GHOPSDSLoss:
         hand_shape=None,
         hand_trans=None
     ):
+        # ============================================================
+        # CRITICAL DIAGNOSTIC: Log iteration values
+        # ============================================================
+        should_apply_result = self.should_apply(iteration)
+
+        if not should_apply_result:
+            logger.warning(f"[GHOP-COMPUTE] ❌ REJECTED! Reason:")
+            if iteration < self.start_iter:
+                logger.warning(f"[GHOP-COMPUTE]   iteration ({iteration}) < start_iter ({self.start_iter})")
+            if self.end_iter is not None and iteration >= self.end_iter:
+                logger.warning(f"[GHOP-COMPUTE]   iteration ({iteration}) >= end_iter ({self.end_iter})")
+            logger.warning(f"[GHOP-COMPUTE] ======================================")
+            return 0.0, {'sds_loss': 0.0, 'applied': False}
+
         """
         Compute SDS loss for current HOLD state.
 
@@ -423,9 +512,6 @@ class GHOPSDSLoss:
             loss: Scalar tensor or 0 if not applied
             info: Dict with loss components
         """
-        if not self.should_apply(iteration):
-            return 0.0, {'sds_loss': 0.0, 'applied': False}
-
         # Prepare hand parameters dict
         B = obj_sdf.shape[0]
 
@@ -455,13 +541,17 @@ class GHOPSDSLoss:
         if self.sds_loss_module is not None:
             sds_loss, sds_info = self.sds_loss_module.forward(
                 object_sdf=obj_sdf,
-                hand_params=hand_params,  # ✅ Now correct
+                hand_params=hand_params,
                 text_prompts=text_prompts,
                 iteration=iteration,
                 weight=self.sds_weight
             )
+
+            logger.warning(f"[GHOP-COMPUTE] forward() returned: sds_loss={sds_loss}")
+
         # Legacy: Use ghop_prior
         else:
+            logger.warning(f"[GHOP-COMPUTE] Using Legacy ghop_prior.compute_sds_loss()")
             sds_loss, sds_info = self.ghop_prior.compute_sds_loss(
                 obj_sdf=obj_sdf,
                 hand_params=hand_params,  # ✅ Now correct
