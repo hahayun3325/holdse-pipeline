@@ -24,6 +24,30 @@ class ImageDataset(Dataset):
 
         self.params = out
 
+        # ============================================================
+        # NEW: Save original GT MANO parameters (unmodified)
+        # ============================================================
+        entities = data["entities"]
+        self.gt_params = {}
+
+        if "right" in entities:
+            right_data = entities["right"]
+            self.gt_params["right"] = {
+                "hand_poses": right_data.get("hand_poses"),    # (144, 48)
+                "hand_trans": right_data.get("hand_trans"),    # (144, 3)
+                "mean_shape": right_data.get("mean_shape"),    # (10,)
+            }
+            logger.info(f"[GT Data] Loaded right hand GT: poses={self.gt_params['right']['hand_poses'].shape}")
+
+        if "left" in entities:
+            left_data = entities["left"]
+            self.gt_params["left"] = {
+                "hand_poses": left_data.get("hand_poses"),
+                "hand_trans": left_data.get("hand_trans"),
+                "mean_shape": left_data.get("mean_shape"),
+            }
+            logger.info(f"[GT Data] Loaded left hand GT: poses={self.gt_params['left']['hand_poses'].shape}")
+
     def __init__(self, args):
         """
         Initialize dataset with text prompt support.
@@ -309,6 +333,23 @@ class ImageDataset(Dataset):
             "text_metadata": self.text_metadata,
         }
         batch.update(params)
+
+        # ============================================================
+        # NEW: Add GT MANO parameters to batch
+        # ============================================================
+        if hasattr(self, 'gt_params'):
+            for hand_name in ['right', 'left']:
+                if hand_name in self.gt_params:
+                    gt_data = self.gt_params[hand_name]
+
+                    # Add per-frame GT params
+                    batch[f'gt.{hand_name}.hand_pose'] = gt_data['hand_poses'][idx].astype(np.float32)
+                    batch[f'gt.{hand_name}.hand_trans'] = gt_data['hand_trans'][idx].astype(np.float32)
+
+                    # Shape is constant across frames
+                    if gt_data['mean_shape'] is not None:
+                        batch[f'gt.{hand_name}.hand_shape'] = gt_data['mean_shape'].astype(np.float32)
+
         return batch
 
     def setup_images(self):

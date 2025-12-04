@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from pytorch3d import ops
 
+_forward_call_stack = []
 
 class KNNDeformer:
     def __init__(
@@ -26,10 +27,11 @@ class KNNDeformer:
             [1, 3, body_specs.full_pose_dim, body_specs.shape_dim],
             dim=1,
         )
-        output = self.server(cano_scale, cano_transl, cano_thetas, cano_betas)
+        with torch.no_grad():  # ← ADD: Prevent gradient graph during init
+            output = self.server(cano_scale, cano_transl, cano_thetas, cano_betas)
         #  canonical vertices
-        self.verts = output["verts"]
-        self.skin_weights = output["skin_weights"]
+        self.verts = output["verts"].detach()
+        self.skin_weights = output["skin_weights"].detach()
 
     def forward(self, x, tfs, return_weights=True, inverse=False, verts=None):
         """
@@ -45,6 +47,16 @@ class KNNDeformer:
         else:
             use the given tfs
         """
+        import traceback
+        caller = traceback.extract_stack()[-2]
+        call_id = f"{caller.filename.split('/')[-1]}:{caller.lineno}"
+
+        global _forward_call_stack
+        _forward_call_stack.append(call_id)
+
+        print(f"\n🔍 [DEFORMER CALL #{len(_forward_call_stack)}] from {call_id}")
+        print(f"   inverse={inverse}, return_weights={return_weights}")
+
         assert len(x.shape) == 3
         assert len(tfs.shape) == 4
         assert x.shape[0] == tfs.shape[0]
@@ -148,7 +160,8 @@ class KNNDeformer:
         weights_k = torch.gather(skin_weights, 1, expanded_index)
 
         # Multiply weights by their respective confidences and sum along the K dimension
-        weights = (weights_k * weights_conf.unsqueeze(-1)).sum(dim=2).detach()
+        # weights = (weights_k * weights_conf.unsqueeze(-1)).sum(dim=2).detach()
+        weights = (weights_k * weights_conf.unsqueeze(-1)).sum(dim=2)
 
         distance_batch = distance_batch.min(dim=2).values
         outlier_mask = distance_batch > self.max_dist

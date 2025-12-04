@@ -54,11 +54,12 @@ class GenericServer(torch.nn.Module):
         )
 
         # forward to get verts and joints
-        output = self.forward(*self.cano_params, absolute=True)
-        self.verts_c = output["verts"]
-        self.joints_c = output["jnts"]
+        with torch.no_grad():  # ← ADD: Prevent gradient graph during init
+            output = self.forward(*self.cano_params, absolute=True)
+            self.verts_c = output["verts"].detach()
+            self.joints_c = output["jnts"].detach()
         # FIX: Compute inverse on CPU to avoid CUDA cuSPARSE issues
-        tfs = output["tfs"].squeeze(0)
+        tfs = output["tfs"].squeeze(0).detach()
         if tfs.is_cuda:
             # Move to CPU for safe inverse computation
             tfs_cpu = tfs.cpu()
@@ -145,7 +146,7 @@ class GenericServer(torch.nn.Module):
             transl.shape,
             dtype=transl.dtype,
             device=transl.device,
-            requires_grad=False
+            requires_grad=True
         )
 
         outputs = body_models.forward_layer(

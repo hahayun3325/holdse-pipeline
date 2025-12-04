@@ -206,12 +206,10 @@ if __name__ == '__main__':
 '''
 Examples:
   # Basic evaluation
-  python scripts/evaluate_predictions.py --predictions logs/MC1_predictions.pkl
+  python scripts/evaluate_predictions.py --predictions logs/evaluation_results/MC1_stage2_e30_SDS_predictions.pkl
 
   # With comparison to HOLD official
-  python scripts/evaluate_predictions.py \\
-      --predictions logs/MC1_predictions.pkl \\
-      --compare ~/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt.metric.json
+  python scripts/evaluate_predictions.py --predictions logs/evaluation_results/MC1_stage2_e30_SDS_predictions.pkl --compare ~/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt.metric.json
 
   # Custom output location
   python scripts/evaluate_predictions.py \\

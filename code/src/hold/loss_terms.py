@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 import common.torch_utils as torch_utils
-
+from src.model.mano.server import MANOServer
 
 eps = 1e-6
 l1_loss = nn.L1Loss(reduction="none")
@@ -273,3 +273,93 @@ def get_sds_loss(object_node, hand_pose, category, hold_loss_module, iteration):
         iteration=iteration
     )
     return loss_sds, sds_info
+
+
+def get_joint_supervision_loss(model_outputs, batch, hand_node_name='right'):
+    """Supervise predicted joints with ground truth MANO parameters.
+
+    Args:
+        model_outputs: Dict with predicted joint positions from model
+        batch: Dict with GT MANO parameters
+        hand_node_name: 'right' or 'left'
+
+    Returns:
+        Joint position loss (L2 distance in mm)
+    """
+    # Get predicted joints from model forward pass
+    pred_key = f'j3d.{hand_node_name}'
+    if pred_key not in model_outputs:
+        return torch.tensor(0.0)
+
+    pred_joints = model_outputs[pred_key]  # [B, 21, 3]
+
+    # Check if GT MANO params exist in batch
+    gt_pose_key = f'gt.{hand_node_name}.hand_pose'
+    gt_trans_key = f'gt.{hand_node_name}.hand_trans'
+    gt_shape_key = f'gt.{hand_node_name}.hand_shape'
+
+    if not all(k in batch for k in [gt_pose_key, gt_trans_key, gt_shape_key]):
+        return torch.tensor(0.0, device=pred_joints.device)
+
+    # Get GT MANO parameters from batch
+    gt_pose = batch[gt_pose_key]      # [B, 48]
+    gt_trans = batch[gt_trans_key]    # [B, 3]
+    gt_shape = batch[gt_shape_key]    # [B, 10] or [10]
+
+    # Convert to torch tensors if needed
+    if not isinstance(gt_pose, torch.Tensor):
+        gt_pose = torch.from_numpy(gt_pose).to(pred_joints.device)
+    if not isinstance(gt_trans, torch.Tensor):
+        gt_trans = torch.from_numpy(gt_trans).to(pred_joints.device)
+    if not isinstance(gt_shape, torch.Tensor):
+        gt_shape = torch.from_numpy(gt_shape).to(pred_joints.device)
+
+    # Ensure gt_shape is batched
+    if gt_shape.ndim == 1:
+        gt_shape = gt_shape.unsqueeze(0).expand(gt_pose.shape[0], -1)
+
+    # Import MANO layer (assuming it's available in model_outputs context)
+    # We need to compute GT joints by running GT params through MANO
+    # For now, return a placeholder until we wire up MANO access
+
+    # TODO: Get MANO layer from model and compute GT joints
+    # gt_joints = mano_layer(gt_pose, gt_shape, gt_trans)
+    # loss = torch.nn.functional.mse_loss(pred_joints, gt_joints)
+    # return loss * 1000.0  # Scale to mm
+
+    return torch.tensor(0.0, device=pred_joints.device)
+
+def get_joint_supervision_loss_v2(model_outputs, batch, hand_node_name='right'):
+    """Supervise predicted joints with pre-computed GT joints.
+
+    Args:
+        model_outputs: Dict with predicted joint positions
+        batch: Dict with pre-computed GT joint positions
+        hand_node_name: 'right' or 'left'
+
+    Returns:
+        Joint position loss (L2 distance in mm)
+    """
+    # Get predicted joints
+    pred_key = f'j3d.{hand_node_name}'
+    if pred_key not in model_outputs:
+        return torch.tensor(0.0)
+
+    pred_joints = model_outputs[pred_key]  # [B, 21, 3]
+
+    # Get GT joints (pre-computed in training loop)
+    gt_key = f'gt.j3d.{hand_node_name}'
+    if gt_key not in batch:
+        return torch.tensor(0.0, device=pred_joints.device)
+
+    gt_joints = batch[gt_key]  # [B, 21, 3]
+
+    # Ensure same shape
+    if pred_joints.shape != gt_joints.shape:
+        return torch.tensor(0.0, device=pred_joints.device)
+
+    # L2 loss on joint positions (in meters)
+    loss = torch.nn.functional.mse_loss(pred_joints, gt_joints)
+
+    # Scale to mm for interpretability
+    return loss * 1000.0

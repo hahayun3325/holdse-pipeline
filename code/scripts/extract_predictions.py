@@ -406,12 +406,12 @@ if __name__ == '__main__':
 chmod +x scripts/extract_predictions.py
 
 python scripts/extract_predictions.py \
-    --checkpoint logs/df6db3170/checkpoints/last.ckpt \
+    --checkpoint logs/e1c95c0d0/checkpoints/last.ckpt \
     --seq_name hold_MC1_ho3d \
-    --config confs/stage1_hold_MC1_ho3d.yaml \
-    --output logs/evaluation_results/MC1_stage1_e300_predictions.pkl \
-    2>&1 | tee logs/evaluation_results/MC1_stage1_extraction_debug.log
+    --config confs/stage1_hold_MC1_ho3d_8layer_implicit.yaml \
+    --output logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_predictions.pkl \
+    2>&1 | tee logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_debug.log
 
 # Monitor the progress in a separate terminal
-tail -f logs/evaluation_results/MC1_stage1_e300_extraction_debug.log | grep "Extracting:"
+tail -f logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_debug_fresh.log | grep "Extracting:"
 '''

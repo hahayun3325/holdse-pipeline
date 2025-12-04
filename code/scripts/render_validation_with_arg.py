@@ -252,7 +252,10 @@ def main():
     print(f"Render downsample: {cmd_args.downsample}")  # ← NEW
 
     # Configuration
-    config_path = 'confs/stage1_hold_MC1_ho3d.yaml' # Case hold_MC1_ho3d Stage 1 Configuration File
+    # config_path = 'confs/stage1_hold_MC1_ho3d.yaml' # Case hold_MC1_ho3d Stage 1 Configuration File
+    # config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet MANO Enabled Configuration File
+    config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit_official_match_fixed.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet MANO Enabled New Configuration File
+    # config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit_joint002.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet Joint Supervision Configuration File
     # config_path = 'confs/ghop_stage1_rgb_only.yaml' # Case hold_bottle1_itw Stage 1 Configuration File(Stage 2 and 3 use the same. Phase 3, 4, 5 have no influence on rendering process)
     # config_path = '/home/fredcui/Projects/hold-master/code/confs/general.yaml' # HOLD Officail Configuration
     base_output_dir = Path('rgb_validation_renders')
@@ -284,13 +287,22 @@ def main():
         # ('logs/07080837c/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # hold_MC1_ho3d case
         # ('logs/140dc5c18/checkpoints/last.ckpt', 1), # Stage 1 Checkpoint
+        # ('logs/e1c95c0d0/checkpoints/last.ckpt', 11), # Stage 1 Checkpoint 8-layer implicitnet 200 epochs
+        # ('logs/8d40bcd35/checkpoints/last.ckpt', 12), # Stage 1 Checkpoint 8-layer implicitnet MANO Enabled joint 0.01 supervision 20 epochs
+        # ('logs/d839b2738/checkpoints/last.ckpt', 13),  # Stage 1 Checkpoint 8-layer implicitnet 70-epoch MANO Enabled
+        # ('logs/6fc82956f/checkpoints/last.ckpt', 14),  # Stage 1 Checkpoint 8-layer implicitnet 70-epoch MANO Enabled New Config
+        # ('logs/a0419ab35/checkpoints/last.ckpt', 15), # Stage 1 Checkpoint 8-layer implicitnet 20-epoch MANO Updated
+        ('logs/7a34708ef/checkpoints/last.ckpt', 15), # Stage 1 Checkpoint 8-layer implicitnet 100-epoch MANO Updated
         # ('logs/4fa8bb20d/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
+        # ('logs/a0c32d3e8/checkpoints/last.ckpt', 21), # Stage 2 Checkpoint 15 epochs Refiend SDS
+        # ('logs/70d907fbb/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint 30 epochs Refiend SDS
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
-        ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
+        # ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)
-        # ('/home/fredcui/Projects/hold/code/logs/009c2e923/checkpoints/last.ckpt', 999),
+        # ('/home/fredcui/Projects/hold/code/logs/009c2e923/checkpoints/last.ckpt', 999), # hold_bottle1_itw
+        ('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 999), # hold_MC1_ho3d
     ]
 
     print("="*70)

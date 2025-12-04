@@ -2,7 +2,7 @@
 
 # ================================================================
 # STAGE 2: Temporal Consistency + GHOP SDS
-# Based on successful Stage 1 (100-epoch) checkpoint
+# Updated to match Stage 1 architecture fixes
 # ================================================================
 
 # Phase Configuration
@@ -49,11 +49,13 @@ dataset:
     shuffle: true
     num_workers: 4
     prefetch_factor: 2
+    pixel_per_batch: 2048  # ← Added to match Stage 1
 
   valid:
     type: "val"
     enabled: false        # Disable validation for faster training
     batch_size: 1
+    pixel_per_batch: 512  # ← Added to match Stage 1
 
 # Training Configuration
 training:
@@ -61,13 +63,16 @@ training:
   max_steps: -1
   eval_every_epoch: 999   # Skip evaluation during Stage 2
   log_every: 10
-  gradient_clip: 1.0      # Increase for GHOP SDS stability
+  gradient_clip: 1.0
+  mano_lr_multiplier: 0.1  # ← Match Stage 1 fix
+  supervise_joints: false   # ← Match Stage 1
+  joint_loss_weight: 0.0    # ← Match Stage 1
 
 # Loss Configuration
 loss:
   w_rgb: 1.0              # Keep RGB loss
   w_mask: 0.1
-  w_eikonal: 1.0
+  w_eikonal: 0.1  # ← Changed from 1.0 to match Stage 1
   w_smooth: 0.005
   w_temporal: 1.0         # Temporal consistency
   rgb_loss_type: "l1"
@@ -80,7 +85,7 @@ model:
     feature_vector_size: 256    # ✅ Match Stage 1
     d_in: 3
     d_out: 1
-    dims: [256, 256, 256, 256]  # ✅ Match Stage 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]  # ← Match Stage 1 (8 layers)
     init: geometry
     bias: 0.6
     skip_in: [4]                # ✅ Match Stage 1
@@ -93,7 +98,7 @@ model:
     mode: pose
     d_in: 270                   # ✅ Match Stage 1
     d_out: 3
-    dims: [256, 256, 256, 256, 256, 256, 256, 256]  # ✅ Match Stage 1
+    dims: [256, 256, 256, 256]  # ← Match Stage 1 (4 layers)
     weight_norm: true
     multires_view: 0            # ✅ Match Stage 1
     time_code_dim: 32
@@ -103,23 +108,24 @@ model:
     feature_vector_size: 256    # ✅ Match Stage 1
     d_in: 4
     d_out: 1
-    dims: [256, 256, 256]       # ✅ Match Stage 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]  # ← CHANGED: 8 layers (was 3)
     init: none
     bias: 0.0
-    skip_in: []
-    weight_norm: true
-    multires: 10                # ✅ Match Stage 1
+    skip_in: [4]  # ← CHANGED: Add skip connection (was [])
+    weight_norm: false  # ← CRITICAL FIX: Changed from true
+    multires: 10
     cond: frame
     dim_frame_encoding: 32
 
   bg_rendering_network:
-    feature_vector_size: 256    # ✅ Match Stage 1
+    feature_vector_size: 256
     mode: nerf_frame_encoding
     d_in: 259                   # ✅ Match Stage 1
     d_out: 3
-    dims: [128]                 # ✅ Match Stage 1
-    weight_norm: true
-    multires_view: 4            # ✅ Match Stage 1
+    dims: [128]
+    weight_norm: false  # ← CRITICAL FIX: Changed from true
+    multires_view: 4
+    multires_xyz: 42  # ← Match Stage 1 addition
     dim_frame_encoding: 32
 
   density:
@@ -136,14 +142,34 @@ model:
     beta_iters: 10
     max_total_iters: 5
     N_samples_inverse_sphere: 32
+    add_tiny: 1.0e-06  # ← Added to match Stage 1
 
-  sdf_bounding_sphere: 1.5      # ✅ Match Stage 1
+  sdf_bounding_sphere: 1.0  # ← Changed from 1.5 to match Stage 1
+  scene_bounding_sphere: 3.0  # ← Added to match Stage 1
 
 # Optimizer Configuration
 optimizer:
-  lr: 0.0001                   # ← INCREASE from 0.00005
+  lr: 0.00025  # ← Middle ground: between Stage 1 (0.0005) and original Stage 2 (0.0001)
   type: "adam"
   weight_decay: 0.0
+  betas: [0.9, 0.999]  # ← Added to match Stage 1
+  eps: 1.0e-08  # ← Added to match Stage 1
+
+# Logging (Added to match Stage 1)
+logging:
+  log_images_every: 500
+  log_mesh_every: 1000
+  log_to_file: true
+  verbose: false
+
+# Validation (Added to match Stage 1)
+validation:
+  enabled: false  # Keep disabled for Stage 2 speed
+  resolution: 64
+  chunk_size: 1024
+  clear_cache_interval: 5
+  num_samples_per_ray: 16
 
 experiment:
-  name: 'ghop_stage2_temporal'
+  name: 'ghop_stage2_temporal_fixed'
+  description: 'Stage 2 with architecture fixes matching Stage 1'

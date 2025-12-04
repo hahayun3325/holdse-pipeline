@@ -16,7 +16,8 @@ echo ""
 # ================================================================
 # USE OFFICIAL CHECKPOINT
 # ================================================================
-STAGE1_CKPT="/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt"
+#STAGE1_CKPT="/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt" # Official Checkpoint
+STAGE1_CKPT="logs/a0419ab35/checkpoints/last.ckpt"
 
 if [ ! -f "$STAGE1_CKPT" ]; then
     echo "❌ ERROR: Official checkpoint not found at $STAGE1_CKPT"
@@ -31,7 +32,8 @@ echo ""
 # ================================================================
 # USE MATCHING CONFIGURATION
 # ================================================================
-CONFIG="confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml"
+#CONFIG="confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml" # For Official Checkpoint
+CONFIG="confs/ghop_stage2_hold_MC1_ho3d.yaml"
 
 if [ ! -f "$CONFIG" ]; then
     echo "❌ ERROR: Official-compatible config not found at $CONFIG"
@@ -90,16 +92,16 @@ fi
 
 
 #chmod +x scripts/train_two_stage_v2_stage2_with_ghop.sh
-#./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/stage2_1to1_hold_MC1_ho3d_official_checkpoint_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/stage2_1to1_hold_MC1_ho3d_official_checkpoint_*.log | grep --line-buffered "Avg loss"
-# tail -f logs/stage2_1to1_hold_MC1_ho3d_official_checkpoint_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+# ./scripts/train_two_stage_v2_stage2_with_ghop.sh 2>&1 | tee logs/stage2_1to1_hold_MC1_ho3d_official_match_fixed_mano_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage2_1to1_hold_MC1_ho3d_official_match_fixed_mano_*.log | grep --line-buffered Avg loss"
+# tail -f logs/stage2_1to1_hold_MC1_ho3d_official_match_fixed_mano_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi
 
 ## Use HOLD dataset (hold_bottle1_itw/build/)
 ## Enable GHOP SDS loss via config
 #python train.py \
 #    --case hold_bottle1_itw \
-#    --config confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml \
+#    --config confs/ghop_stage2_hold_MC1_ho3d.yaml \
 #    --load_ckpt logs/stage1.ckpt \
 #    --num_epoch 30
 #    # ❌ NO --use_ghop flag
@@ -113,7 +115,7 @@ fi
 ## Enable GHOP SDS loss via config
 #python train.py \
 #    --case ghop_bottle_1 \
-#    --config confs/ghop_stage2_hold_MC1_ho3d_cb20a1702.yaml \
+#    --config confs/ghop_stage2_hold_MC1_ho3d.yaml \
 #    --use_ghop \  # ← Selects GHOP dataset
 #    --num_epoch 30
 #

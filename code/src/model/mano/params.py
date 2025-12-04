@@ -1,7 +1,8 @@
 import torch
 from loguru import logger
 from src.model.generic.params import GenericParams
-
+import os
+import numpy as np
 
 class MANOParams(GenericParams):
     def forward(self, frame_ids):
@@ -77,10 +78,6 @@ class MANOParams(GenericParams):
         return params
 
     def load_params(self, case):
-        import os
-
-        import numpy as np
-
         # load parameter from preprocessing
         params_h = {param_name: [] for param_name in self.param_names}
         data_root = os.path.join("./data", case, f"build/data.npy")
@@ -107,5 +104,13 @@ class MANOParams(GenericParams):
             trans,
             dtype=torch.float32,
         )
+
+        # ================================================================
+        # 🔥 FIX: Change requires_grad=False to True
+        # ================================================================
         for param_name in params_h.keys():
-            self.init_parameters(param_name, params_h[param_name], requires_grad=False)
+            self.init_parameters(
+                param_name,
+                params_h[param_name],
+                requires_grad=True  # ← CHANGED FROM False to True!
+            )

@@ -101,6 +101,13 @@ class MANONode(Node):
             betas,        # [B, 10]
         )
 
+        # ========================================================
+        # 🔧 FIX: Store predicted joints for supervision
+        # ========================================================
+        if 'jnts' in output:
+            # Store joints so they can be added to model outputs later
+            self._predicted_joints = output['jnts']  # [B, 21, 3]
+
         debug.debug_world2pix(self.args, output, input, self.node_id)
 
         # ================================================================
@@ -214,30 +221,29 @@ class MANONode(Node):
         # 2. SDF network queries (thousands of them)
         # 3. Marching Cubes algorithm
         # ================================================================
-        with torch.no_grad():
-            if pose is None:
-                cond = {"pose": torch.zeros(1, self.specs.pose_dim).float().cuda()}
-            else:
-                cond = {"pose": pose / np.pi}
+        if pose is None:
+            cond = {"pose": torch.zeros(1, self.specs.pose_dim).float().cuda()}
+        else:
+            cond = {"pose": pose / np.pi}
 
-            # Ensure condition tensors don't have gradients
-            cond["pose"] = cond["pose"].detach()
+        # Ensure condition tensors don't have gradients
+        # cond["pose"] = cond["pose"].detach()
 
-            assert cond["pose"].shape[0] == 1, "only support batch size 1"
+        assert cond["pose"].shape[0] == 1, "only support batch size 1"
 
-            v_min_max = np.array([[-0.0814, -0.0280, -0.0742], [0.1171, 0.0349, 0.0971]])
+        v_min_max = np.array([[-0.0814, -0.0280, -0.0742], [0.1171, 0.0349, 0.0971]])
 
-            # ================================================================
-            # FIX 3: query_oc is called within no_grad context
-            # ================================================================
-            # The lambda function captures the no_grad context, so all
-            # implicit_network evaluations are gradient-free
-            mesh_canonical = generate_mesh(
-                lambda x: hold_utils.query_oc(self.implicit_network, x, cond),
-                v_min_max,
-                point_batch=10000,
-                res_up=1,
-                res_init=64,
-            )
+        # ================================================================
+        # FIX 3: query_oc is called within no_grad context
+        # ================================================================
+        # The lambda function captures the no_grad context, so all
+        # implicit_network evaluations are gradient-free
+        mesh_canonical = generate_mesh(
+            lambda x: hold_utils.query_oc(self.implicit_network, x, cond),
+            v_min_max,
+            point_batch=10000,
+            res_up=1,
+            res_init=64,
+        )
 
-            return mesh_canonical
+        return mesh_canonical

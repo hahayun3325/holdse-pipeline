@@ -15,7 +15,7 @@ echo "========================================================================"
 # Configuration
 # ================================================================
 STAGE1_CKPT="$1"  # Pass checkpoint path as first argument
-TARGET_EPOCHS="${2:-200}"  # Default to 200 epochs for MC1 (changed from 100)
+TARGET_EPOCHS="${2:-100}"  # Default to 100 epochs for MC1
 
 # If no checkpoint provided, try to find the latest one
 if [ -z "$STAGE1_CKPT" ]; then
@@ -25,7 +25,7 @@ if [ -z "$STAGE1_CKPT" ]; then
     if [ -z "$STAGE1_CKPT" ]; then
         echo "❌ ERROR: No checkpoint found"
         echo "Usage: $0 <checkpoint_path> [target_epochs]"
-        echo "Example: $0 logs/140dc5c18/checkpoints/last.ckpt 200"
+        echo "Example: $0 logs/a0419ab35/checkpoints/last.ckpt 20"
         exit 1
     fi
 
@@ -33,7 +33,7 @@ if [ -z "$STAGE1_CKPT" ]; then
 fi
 
 # ✅ KEY CHANGE 1: Config file for MC1
-CONFIG="./confs/stage1_hold_MC1_ho3d.yaml"
+CONFIG="./confs/stage1_hold_MC1_ho3d_8layer_implicit_official_match_fixed.yaml"
 
 echo ""
 echo "Configuration:"
@@ -79,7 +79,7 @@ try:
     if isinstance(current_epoch, int) and current_epoch >= $TARGET_EPOCHS:
         print(f"\\n⚠️  WARNING: Checkpoint epoch ({current_epoch}) >= target epochs ($TARGET_EPOCHS)")
         print(f"   Training will complete immediately.")
-        print(f"   Increase target epochs (e.g., {current_epoch + 20}) to continue training.")
+        print(f"   Increase target epochs (e.g., {current_epoch + 100}) to continue training.")
         sys.exit(1)
     else:
         print(f"\\n✓ Will resume from epoch {current_epoch + 1 if isinstance(current_epoch, int) else 'unknown'} to $TARGET_EPOCHS")
@@ -171,52 +171,52 @@ fi
 #USAGE GUIDE FOR STAGE 1 CONTINUATION
 #=====================================
 #2. Make it executable:
-#   chmod +x scripts/train_two_stage_v2_stage1_continue.sh
+#   chmod +x scripts/train_MC1_stage1_continue.sh
 #
 #3. Usage Options:
 #
 #   OPTION A: Auto-detect latest checkpoint
 #   ----------------------------------------
-#   ./scripts/train_two_stage_v2_stage1_continue.sh [target_epochs]
+#   ./scripts/train_MC1_stage1_continue.sh [target_epochs]
 #
 #   Example (continue to epoch 100):
-#   ./scripts/train_two_stage_v2_stage1_continue.sh 300 2>&1 | tee logs/MC1_stage1_continuation_$(date +%Y%m%d_%H%M%S).log
-#./scripts/train_two_stage_v2_stage1_continue.sh \
-#    logs/140dc5c18/checkpoints/last.ckpt \
-#    300 \
-#    2>&1 | tee logs/MC1_stage1_continuation_$(date +%Y%m%d_%H%M%S).log
+#   ./scripts/train_MC1_stage1_continue.sh 100 2>&1 | tee logs/stage1_20to100_hold_MC1_ho3d_official_match_fixed_mano_$(date +%Y%m%d_%H%M%S).log
+#./scripts/train_MC1_stage1_continue.sh \
+#    logs/a0419ab35/checkpoints/last.ckpt \
+#    100 \
+#    2>&1 | tee logs/stage1_20to100_hold_MC1_ho3d_official_match_fixed_mano_$(date +%Y%m%d_%H%M%S).log
 
 #   OPTION B: Specify checkpoint explicitly
 #   ----------------------------------------
-#   ./scripts/train_two_stage_v2_stage1_continue.sh <checkpoint_path> [target_epochs]
+#   ./scripts/train_MC1_stage1_continue.sh <checkpoint_path> [target_epochs]
 #
 #   Example (continue specific checkpoint to epoch 100):
-#   ./scripts/train_two_stage_v2_stage1_continue.sh logs/abc123/checkpoints/last.ckpt 100
+#   ./scripts/train_MC1_stage1_continue.sh logs/a0419ab35/checkpoints/last.ckpt 100
 #
 #4. Monitor Training:
 #
 #   # Watch loss values
-#   tail -f logs/MC1_stage1_continuation_*.log | grep "Avg loss"
+#   tail -f logs/stage1_10to100_hold_MC1_ho3d_8implicit_mano_*.log | grep "Avg loss"
 #
 #   # Watch epoch progress
-#   tail -f logs/MC1_stage1_continuation_*.log | grep -E "Epoch.*Avg loss"
+#   tail -f logs/stage1_20to100_hold_MC1_ho3d_official_match_fixed_mano_*.log | grep -E "Epoch.*Avg loss"
 #
 #   # Monitor GPU usage
 #   watch -n 5 nvidia-smi
 #
 #5. Common Scenarios:
 #
-#   Scenario 1: Your Stage 1 trained for 80 epochs, continue to 100
+#   Scenario 1: Your Stage 1 trained for 10 epochs, continue to 100
 #   ----------------------------------------------------------------
-#   ./scripts/train_two_stage_v2_stage1_continue.sh logs/xyz/checkpoints/last.ckpt 100
+#   ./scripts/train_MC1_stage1_continue.sh logs/xyz/checkpoints/last.ckpt 100
 #
-#   Scenario 2: Continue from 100 to 120 epochs
+#   Scenario 2: Continue from 100 to 100 epochs
 #   --------------------------------------------
-#   ./scripts/train_two_stage_v2_stage1_continue.sh logs/abc/checkpoints/last.ckpt 120
+#   ./scripts/train_MC1_stage1_continue.sh logs/abc/checkpoints/last.ckpt 100
 #
 #   Scenario 3: Auto-find latest and train to 150
 #   ----------------------------------------------
-#   ./scripts/train_two_stage_v2_stage1_continue.sh 150
+#   ./scripts/train_MC1_stage1_continue.sh 150
 #
 #6. Verification:
 #
@@ -234,13 +234,13 @@ fi
 #===============================
 #
 #Stage 1 Script:
-#- Config: confs/ghop_stage1_rgb_only.yaml
-#- Case: hold_ABF12_ho3d
-#- Dataset: HOLD (RGB only, no GHOP)
+#- Config: confs/stage1_hold_MC1_ho3d_8layer_implicit.yaml
+#- Case: hold_MC1_ho3d
+#- Dataset: HO3D (RGB only, no GHOP)
 #- Typical epochs: 80-120
 #
 #Stage 2 Script:
 #- Config: confs/ghop_stage2_hold_MC1_ho3d.yaml
-#- Case: hold_bottle1_itw
-#- Dataset: HOLD with GHOP SDS
+#- Case: hold_MC1_ho3d
+#- Dataset: HO3D (RGB only, no GHOP)
 #- Typical epochs: 20-30

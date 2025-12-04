@@ -70,7 +70,8 @@ def extract_features(
             outputs=pnts_d,
             inputs=pnts_c,
             grad_outputs=d_out,
-            create_graph=create_graph,
+            # create_graph=create_graph,
+            create_graph=False,  # ← Always False to prevent nested graphs
             # retain_graph=True if i < num_dim - 1 else retain_graph
             retain_graph=True,
             only_inputs=True,

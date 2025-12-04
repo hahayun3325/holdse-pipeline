@@ -94,13 +94,34 @@ class HOLDNet(nn.Module):
             factors, sample_dict = node(input)
             factors_dicts[node.node_id] = factors
             sample_dicts[node.node_id] = sample_dict
+            # ========================================================
+            # 🔧 FIX: Extract predicted joints from MANO nodes
+            # ========================================================
+            # Retrieve joints from node instance (set in sample_points)
+            # Do this BEFORE merge_factors to avoid batch size mismatch
+            if hasattr(node, '_predicted_joints'):
+                # Add to output dict with key expected by loss function
+                # This bypasses the factors merging process
+                out_dict[f'j3d.{node.node_id}'] = node._predicted_joints
 
+                # Optional: Log for debugging (first time only)
+                if not hasattr(self, '_joint_logging_done'):
+                    logger.debug(
+                        f"[HOLDNet] Added predicted joints for {node.node_id}: "
+                        f"shape={node._predicted_joints.shape}"
+                    )
+                    self._joint_logging_done = True
         import src.utils.debug as debug
         debug.debug_deformer(sample_dicts, self)
 
         # Compute canonical SDF and features
         out_dict = self.prepare_loss_targets(out_dict, sample_dicts)
 
+        # ================================================================
+        # Merge factors from all nodes (for volumetric rendering)
+        # NOTE: Only contains rendering data (color, normal, density, z_vals)
+        #       Joints are already extracted above
+        # ================================================================
         factors_list = list(factors_dicts.values())
         factors = hold_utils.merge_factors(factors_list, check=True)
 
@@ -137,6 +158,15 @@ class HOLDNet(nn.Module):
         self.background.step_embedding()
 
     def forward(self, input):
+        print(f"\n[FORWARD] Rendering nodes:")
+        for node_name, node in self.nodes.items():
+            print(f"  - {node_name}: {type(node).__name__}")
+        # ✅ DEBUG: Log which nodes are being rendered
+        if not hasattr(self, '_logged_nodes'):
+            logger.warning(f"\n[HoldNet] Active nodes:")
+            for name, node in self.nodes.items():
+                logger.warning(f"  - {name}: {type(node).__name__}")
+            self._logged_nodes = True
         fg_dict = self.forward_fg(input)
         bg_dict = self.background(
             fg_dict["bg_weights"],

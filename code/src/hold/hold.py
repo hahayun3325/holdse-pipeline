@@ -937,6 +937,9 @@ class HOLD(pl.LightningModule):
 
     def configure_optimizers(self):
         base_lr = self.args.lr
+        mano_lr_multiplier = getattr(self.opt.training, 'mano_lr_multiplier', 0.1) \
+            if hasattr(self.opt, 'training') else 0.1
+        logger.info(f"[Optimizer] Base LR: {base_lr}, MANO LR multiplier: {mano_lr_multiplier}")
         node_params = set()
         params = []
 
@@ -947,7 +950,7 @@ class HOLD(pl.LightningModule):
             params.append(
                 {
                     "params": list(node_parameters),
-                    "lr": base_lr * 0.1,
+                    "lr": base_lr * mano_lr_multiplier,  # CHANGE LINE 950
                 }
             )
 
@@ -970,6 +973,21 @@ class HOLD(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
         print(f"[DEBUG BATCH] Keys: {list(batch.keys())}")
+
+        # ================================================================
+        # ✅ FIX: Correctly access Embedding.weight.requires_grad
+        # ================================================================
+        if self.global_step % 100 == 0:
+            pose_param = self.model.nodes['right'].params.pose.weight
+            transl_param = self.model.nodes['right'].params.transl.weight
+            betas_param = self.model.nodes['right'].params.betas.weight
+
+            logger.warning(f"[GRAD CHECK - Step {self.global_step}]")
+            logger.warning(f"  pose.weight.requires_grad = {pose_param.requires_grad}")
+            logger.warning(f"  transl.weight.requires_grad = {transl_param.requires_grad}")
+            logger.warning(f"  betas.weight.requires_grad = {betas_param.requires_grad}")
+            logger.warning(f"  pose.weight.shape = {pose_param.shape}")
+
         if 'rgb' in batch:
             print(f"[DEBUG BATCH] rgb shape: {batch['rgb'].shape}")
 
@@ -1256,20 +1274,13 @@ class HOLD(pl.LightningModule):
             logger.info(f"[FIX] Generated extrinsics: {batch['extrinsics'].shape}")
 
         # ================================================================
-        # ✅ OPTION 1 FIX: Detach all batch tensors (CORRECTED for xdict)
+        # ✅ FIX: Only detach metadata, NOT trainable parameters
+        # CRITICAL: MANO parameters must keep gradients for optimization!
         # ================================================================
-        logger.debug("[FIX] Detaching batch tensors to prevent inplace errors...")
+        logger.debug("[FIX] Detaching ONLY metadata tensors (preserving MANO gradients)...")
 
         keys_to_detach = [
-            'right.params',
-            'right.full_pose',
-            'right.pose',
-            'right.global_orient',
-            'right.transl',
-            'right.betas',
-            'object.params',
-            'object.global_orient',
-            'object.transl',
+            # Camera and scene metadata (no gradients needed)
             'uv',
             'extrinsics',
             'c2w',
@@ -1277,6 +1288,18 @@ class HOLD(pl.LightningModule):
             'hA',
             'th_betas',
         ]
+
+        # ================================================================
+        # ⚠️  IMPORTANT: MANO hand parameters are NO LONGER DETACHED!
+        # The following keys are intentionally EXCLUDED from detachment:
+        #   - 'right.params'
+        #   - 'right.full_pose'
+        #   - 'right.pose'
+        #   - 'right.global_orient'
+        #   - 'right.transl'
+        #   - 'right.betas'
+        # This allows gradients to flow from loss → rendering → MANO
+        # ================================================================
 
         for key in keys_to_detach:
             if key in batch and torch.is_tensor(batch[key]):
@@ -1302,13 +1325,21 @@ class HOLD(pl.LightningModule):
 
                 logger.debug(f"  Detached: {key} (shape: {detached_tensor.shape})")
 
-        logger.info("[FIX] ✓ All batch tensors detached successfully")
+        logger.info("[FIX] ✓ Metadata detached, MANO parameters preserved for gradient flow")
 
         # ================================================================
         # FORWARD PASS
         # ================================================================
         logger.info("[Forward] Calling self.model(batch)...")
         model_outputs = self.model(batch)
+        # Check which nodes contributed to output
+        if self.global_step % 100 == 0:
+            logger.warning(f"\n[NODE CHECK - Step {self.global_step}]")
+            logger.warning(f"  Model output keys: {list(model_outputs.keys())}")
+
+            # Check if hand node was used
+            for node_name, node in self.model.nodes.items():
+                logger.warning(f"  Node '{node_name}' type: {type(node).__name__}")
         logger.info(f"[Forward] Model returned {len(model_outputs)} keys")
         if should_profile:
             self.memory_profiler.checkpoint("after_forward")
@@ -1317,6 +1348,115 @@ class HOLD(pl.LightningModule):
         # COMPUTE BASE LOSSES
         # ================================================================
         loss_output = self.loss(batch, model_outputs)
+
+        # ========================================
+        # MANO Joint Supervision (MODIFIED)
+        # ========================================
+        if False:
+        # if hasattr(self.opt, 'training') and \
+        #         getattr(self.opt.training, 'supervise_joints', False):
+            from src.hold import loss_terms
+
+            try:
+                # ============================================================
+                # Pre-compute GT joints using MANO (CORRECT VERSION)
+                # ============================================================
+                gt_joints_computed = False
+                for hand_name in ['right', 'left']:
+                    gt_pose_key = f'gt.{hand_name}.hand_pose'
+                    if gt_pose_key in batch and hand_name in self.model.nodes:
+                        node = self.model.nodes[hand_name]
+
+                        # Extract GT params from batch
+                        gt_pose_full = batch[gt_pose_key]  # [B, 48]
+                        gt_trans = batch[f'gt.{hand_name}.hand_trans']  # [B, 3]
+                        gt_shape = batch[f'gt.{hand_name}.hand_shape']  # [10] or [B, 10]
+
+                        # Ensure gt_shape is batched [B, 10]
+                        if gt_shape.ndim == 1:
+                            gt_shape = gt_shape.unsqueeze(0).expand(gt_pose_full.shape[0], -1)
+
+                        try:
+                            with torch.no_grad():
+                                # ========================================================
+                                # Get scene_scale - CRITICAL MISSING PARAMETER!
+                                # ========================================================
+                                batch_size = gt_pose_full.shape[0]
+
+                                # Option 1: Use model's scale attribute
+                                if hasattr(node, 'scale'):
+                                    scene_scale = torch.full(
+                                        (batch_size,),
+                                        node.scale,
+                                        device=gt_pose_full.device
+                                    )
+                                # Option 2: Use default scale (usually 1.0)
+                                else:
+                                    scene_scale = torch.ones(
+                                        batch_size,
+                                        device=gt_pose_full.device
+                                    )
+
+                                # ========================================================
+                                # Call MANO server with POSITIONAL arguments (CORRECT!)
+                                # ========================================================
+                                gt_output = node.server(
+                                    scene_scale,  # arg1: [B] scene scaling
+                                    gt_trans,  # arg2: [B, 3] translation
+                                    gt_pose_full,  # arg3: [B, 48] full pose
+                                    gt_shape  # arg4: [B, 10] shape
+                                )
+
+                                # Extract joints from output
+                                if isinstance(gt_output, dict) and 'jnts' in gt_output:
+                                    gt_joints = gt_output['jnts'] # [B, 21, 3]
+
+                                    # Add to batch for loss computation
+                                    batch[f'gt.j3d.{hand_name}'] = gt_joints
+                                    gt_joints_computed = True
+
+                                    if self.global_step % 100 == 0:
+                                        logger.info(
+                                            f"[GT Joints] Computed for {hand_name}: "
+                                            f"shape={gt_joints.shape}, "
+                                            f"range=[{gt_joints.min().item():.3f}, {gt_joints.max().item():.3f}]"
+                                        )
+                                else:
+                                    logger.warning(
+                                        f"[GT Joints] MANO output missing 'jnts' key. "
+                                        f"Keys: {gt_output.keys() if isinstance(gt_output, dict) else type(gt_output)}"
+                                    )
+
+                        except Exception as e:
+                            if self.global_step % 100 == 0:
+                                logger.error(f"[GT Joints] Failed to compute for {hand_name}: {e}")
+                                import traceback
+
+                                logger.error(traceback.format_exc())
+
+                # Compute joint supervision loss if GT joints available
+                if gt_joints_computed:
+                    joint_loss = loss_terms.get_joint_supervision_loss_v2(
+                        model_outputs, batch, hand_node_name='right'
+                    )
+
+                    joint_loss_weight = getattr(self.opt.training, 'joint_loss_weight', 0.1)
+
+                    if joint_loss > 0:
+                        loss_output["loss"] = loss_output["loss"] + joint_loss * joint_loss_weight
+                        loss_output["loss/joint_supervision"] = joint_loss
+
+                        if self.global_step % 100 == 0:
+                            logger.info(
+                                f"[Joint Loss] {joint_loss.item():.4f} mm "
+                                f"(weight: {joint_loss_weight}, "
+                                f"contribution: {(joint_loss * joint_loss_weight).item():.4f})"
+                            )
+                else:
+                    if self.global_step % 100 == 0:
+                        logger.debug("[Joint Loss] GT joints not computed, skipping supervision")
+            except Exception as e:
+                logger.warning(f"[Joint Loss] Failed: {e}")
         # Example: log base and extra losses if present
         rgb_loss = loss_output.get("loss/rgb", None)
         contact_loss = loss_output.get("contact_loss", None)
@@ -1591,9 +1731,14 @@ class HOLD(pl.LightningModule):
         # PHASE 4: Contact Refinement (Enhanced with Phase 5 Adaptive Zones)
         # ====================================================================
         # ✅ FIX 2: Add end condition check to phase4_active
+        # phase4_active = (
+        #     self.phase4_enabled and
+        #     self.contact_start_iter <= self.global_step < self.contact_end_iter
+        # )
         phase4_active = (
-            self.phase4_enabled and
-            self.contact_start_iter <= self.global_step < self.contact_end_iter
+                getattr(self, 'phase4_enabled', False) and  # ← Use getattr with False default
+                self.contact_refiner is not None and  # ← Explicit None check
+                self.contact_start_iter <= self.global_step < self.contact_end_iter
         )
 
         if phase4_active:
@@ -2158,7 +2303,33 @@ class HOLD(pl.LightningModule):
         # Single backward call with appropriate retain_graph setting
         # self.manual_backward(final_loss, retain_graph=is_phase_transition or True)
         # self.manual_backward(final_loss, retain_graph=is_phase_transition)
-        self.manual_backward(final_loss, retain_graph=True)
+        # self.manual_backward(final_loss, retain_graph=True)
+        self.manual_backward(final_loss, retain_graph=False)
+
+        # ================================================================
+        # ✅ VERIFICATION: Check if gradients actually reached MANO params
+        # ================================================================
+        if self.global_step % 100 == 0:
+            transl_param = self.model.nodes['right'].params.transl.weight
+            try:
+                pose_param = self.model.nodes['right'].params.pose.weight
+                if pose_param.grad is not None:
+                    grad_mean = pose_param.grad.abs().mean().item()
+                    grad_max = pose_param.grad.abs().max().item()
+                    logger.warning(f"[GRAD FLOW - Step {self.global_step}]")
+                    logger.warning(f"  pose.grad EXISTS: mean={grad_mean:.10f}, max={grad_max:.10f}")
+                else:
+                    logger.warning(f"[GRAD FLOW - Step {self.global_step}]")
+                    logger.warning(f"  ❌ pose.grad is None - GRADIENTS NOT FLOWING!")
+            except Exception as e:
+                logger.warning(f"[GRAD FLOW - Step {self.global_step}] Error checking gradients: {e}")
+
+            if transl_param.grad is not None:
+                grad_mean = transl_param.grad.abs().mean().item()
+                logger.warning(f"  ✅ transl.grad mean={grad_mean:.10f}")
+            else:
+                logger.warning(f"  ❌ transl.grad is None!")
+        # ================================================================
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -2340,7 +2511,8 @@ class HOLD(pl.LightningModule):
 
         # ✅ FORCE no gradient tracking
         original_grad_mode = torch.is_grad_enabled()
-        torch.set_grad_enabled(False)
+        if not self.training:
+            torch.set_grad_enabled(False)
 
         try:  # ✅ FIX: Wrap in try-finally to ensure gradient mode is restored
             # Step 1: Determine batch size
@@ -2780,9 +2952,9 @@ class HOLD(pl.LightningModule):
 
             # Extract vertices
             if isinstance(mano_output, dict):
-                hand_verts = mano_output['verts']  # [B, 778, 3]
+                hand_verts = mano_output['verts'].detach()  # [B, 778, 3]
             else:
-                hand_verts = mano_output  # [B, 778, 3]
+                hand_verts = mano_output.detach()  # [B, 778, 3]
 
             # ================================================================
             # Get faces and handle dtype conversion

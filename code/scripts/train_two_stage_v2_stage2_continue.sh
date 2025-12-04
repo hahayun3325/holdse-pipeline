@@ -4,9 +4,9 @@
 cd ~/Projects/holdse/code
 
 echo "========================================================================"
-echo "STAGE 2 CONTINUATION: Epochs 21-30"
+echo "STAGE 2 CONTINUATION: Epochs 16-30"
 echo "========================================================================"
-echo "  Resuming from: logs/20d1ec1e8/checkpoints/last.ckpt"
+echo "  Resuming from: logs/a0c32d3e8/checkpoints/last.ckpt"
 echo "  Target epochs: 30 (adding 10 more)"
 echo "========================================================================"
 echo ""
@@ -14,7 +14,7 @@ echo ""
 # ================================================================
 # Verification: Stage 2 Checkpoint (20 epochs)
 # ================================================================
-STAGE2_CKPT="logs/4848a499d/checkpoints/last.ckpt" # Run A checkpoint trained with 16 epochs from finetuning 1 process
+STAGE2_CKPT="logs/a0c32d3e8/checkpoints/last.ckpt" # Run A checkpoint trained with 16 epochs from finetuning 1 process
 
 if [ ! -f "$STAGE2_CKPT" ]; then
     echo "❌ ERROR: Stage 2 checkpoint not found at $STAGE2_CKPT"
@@ -43,9 +43,9 @@ echo "Continuing Stage 2 training for 10 more epochs..."
 echo ""
 
 python train.py \
-    --config confs/stage2_tuned_runA.yaml \
-    --case hold_bottle1_itw \
-    --num_epoch 25 \
+    --config confs/ghop_stage2_hold_MC1_ho3d.yaml \
+    --case hold_MC1_ho3d \
+    --num_epoch 30 \
     --infer_ckpt "$STAGE2_CKPT" \
     --no-comet \
     --gpu_id 0 \
@@ -70,9 +70,9 @@ fi
 
 
 #chmod +x scripts/train_two_stage_v2_stage2_continue.sh
-#./scripts/train_two_stage_v2_stage2_continue.sh 2>&1 | tee logs/stage2_tuned_runA_continuation_20to25_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/stage2_tuned_runA_continuation_20to25_*.log | grep --line-buffered "Avg loss"
-#tail -f logs/stage2_tuned_runA_continuation_20to25_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
+# ./scripts/train_two_stage_v2_stage2_continue.sh 2>&1 | tee logs/stage2_16to30_hold_MC1_ho3d_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage2_16to30_hold_MC1_ho3d_*.log | grep --line-buffered "Avg loss"
+# tail -f logs/stage2_16to30_hold_MC1_ho3d_*.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
 # watch -n 5 nvidia-smi
 
 ## Use HOLD dataset (hold_bottle1_itw/build/)

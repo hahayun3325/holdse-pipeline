@@ -116,6 +116,7 @@ class Node(nn.Module):
             "semantics": semantics,
             "z_vals": sample_dict["z_vals"],
         }
+
         return factors, sample_dict
 
     def render(

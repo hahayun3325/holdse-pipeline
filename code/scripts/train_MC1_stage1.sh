@@ -11,13 +11,13 @@ cd ~/Projects/holdse/code
 echo "========================================================================"
 echo "HOLDSE Stage 1 Training - MC1 (HO3D Dataset)"
 echo "========================================================================"
-echo "Architecture: Full HOLD (dims=[256,256,256,256])"
+echo "Architecture: Full HOLD (dims=[256,256,256,256,256,256,256,256])"
 echo "Duration: 200 epochs (~18-24 hours)"
 echo "Dataset: hold_MC1_ho3d (144 frames)"
 echo "Phases: 1-2 only (RGB + Eikonal)"
 echo "========================================================================"
 
-CONFIG="./confs/stage1_hold_MC1_ho3d.yaml"
+CONFIG="./confs/stage1_hold_MC1_ho3d_8layer_implicit_official_match_fixed.yaml"
 
 # Verify config exists
 if [ ! -f "$CONFIG" ]; then
@@ -34,7 +34,7 @@ echo ""
 python train.py \
     --config "$CONFIG" \
     --case "hold_MC1_ho3d" \
-    --num_epoch 200 \
+    --num_epoch 20 \
     --no-comet \
     --gpu_id 0 \
     --no-pin-memory
@@ -61,7 +61,7 @@ EOF
 #chmod +x scripts/train_MC1_stage1.sh
 #
 ## Run full two-stage training
-# ./scripts/train_MC1_stage1.sh 2>&1 | tee logs/ho3d_MC1_stage1_$(date +%Y%m%d_%H%M%S).log
-# tail -f logs/ho3d_MC1_stage1_*.log | grep --line-buffered "Avg loss"
+# ./scripts/train_MC1_stage1.sh 2>&1 | tee logs/stage1_1to20_hold_MC1_ho3d_official_match_fixed_mano_$(date +%Y%m%d_%H%M%S).log
+# tail -f logs/stage1_1to20_hold_MC1_ho3d_official_match_fixed_mano_*.lo | grep --line-buffered "Avg loss"
 ## Monitor in another terminal
 #tail -f production_training.log | grep -E "Stage|Checkpoint|✅|❌|ERROR"
