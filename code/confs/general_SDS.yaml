@@ -1,0 +1,878 @@
+# ========================================================================
+# HOLD PROJECT CONFIGURATION FILE
+# Enhanced with GHOP Multi-Phase Integration (Phases 3, 4, 5)
+# ========================================================================
+
+model:
+  implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims:
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    init: geometry
+    bias: 0.6
+    skip_in:
+    - 4
+    weight_norm: true
+    multires: 6
+    cond: pose
+
+  rendering_network:
+    feature_vector_size: 256
+    mode: pose
+    d_in: 14
+    d_out: 3
+    dims:
+    - 256
+    - 256
+    - 256
+    - 256
+    weight_norm: true
+    multires_view: -1
+
+  bg_implicit_network:
+    feature_vector_size: 256
+    d_in: 4
+    d_out: 1
+    dims:
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    - 256
+    init: none
+    bias: 0.0
+    skip_in:
+    - 4
+    weight_norm: false
+    multires: 10
+    cond: frame
+    dim_frame_encoding: 32
+
+  bg_rendering_network:
+    feature_vector_size: 256
+    mode: nerf_frame_encoding
+    d_in: 3
+    d_out: 3
+    dims:
+    - 128
+    weight_norm: false
+    multires_view: 4
+    dim_frame_encoding: 32
+
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  ray_sampler:
+    near: 0.0
+    N_samples: 64
+    N_samples_eval: 128
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 10
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+    add_tiny: 1.0e-06
+
+dataset:
+  train:
+    type: train
+    batch_size: 5
+    drop_last: false
+    shuffle: true
+
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 512
+
+  test:
+    type: test
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 512
+
+# ========================================================================
+# PHASE 3: GHOP TWO-STAGE TRAINING INTEGRATION
+# ========================================================================
+# Score Distillation Sampling (SDS) → Contact Loss progressive training
+# Stage 1: SDS loss for coarse geometry (0-500 iters)
+# Stage 2: Contact loss for refinement (500-600 iters)
+# ========================================================================
+
+phase3:
+  # Master switch: enable/disable Phase 3 GHOP integration
+  enabled: true
+
+  # Use modular component initialization (Phase 3 architecture)
+  # If true: directly initialize VQ-VAE, U-Net, Hand Field
+  # If false: use legacy HOLDLoss wrapper
+  # Default: true
+  use_modular_init: true
+
+  # Warmup period: number of iterations before SDS loss is activated
+  # Allows HOLD to converge initially without diffusion guidance
+  # Recommended: 1000-2000 for stable initialization
+  warmup_iters: 1000
+
+  # SDS loss weight (multiplier for SDS gradient)
+  # Higher values = stronger generative prior influence
+  # Typical range: 1000 - 10000
+  # Default: 5000.0
+  w_sds: 5000.0
+
+  # ======================================================================
+  # Two-Stage Training Schedule
+  # ======================================================================
+
+  # Stage 1: SDS loss duration (iterations)
+  # Coarse geometry alignment using diffusion prior
+  # Recommended: 500-1000 iterations
+  # Default: 500
+  sds_iters: 500
+
+  # Stage 2: Contact loss duration (iterations)
+  # Fine-grained surface contact refinement
+  # Recommended: 50-200 iterations
+  # Default: 100
+  contact_iters: 100
+
+  # Maximum contact loss weight
+  # Weight is ramped from 0 to this value during Stage 2
+  # Typical range: 5.0 - 20.0
+  # Default: 10.0
+  w_contact: 10.0
+
+  # Interaction grid resolution (voxel grid size)
+  # Phase 3 uses 64³ for high-fidelity SDF extraction
+  # NOTE: This is different from Phase 2's 16³ latent resolution
+  # Default: 64 (64x64x64 grid)
+  grid_resolution: 64
+
+  # Spatial limits for grid boundaries (in meters)
+  # Defines the bounding box for hand-object interaction
+  # Default: 1.5 (±1.5m cube centered at origin)
+  spatial_lim: 1.5
+
+  # ======================================================================
+  # Hand Field Parameters
+  # ======================================================================
+
+  # Use hand skeletal distance field for conditioning
+  # Computes 15-channel distance field from hand joint positions
+  # Default: true
+  use_hand_field: true
+
+  # Hand field resolution
+  # Must match grid_resolution for Phase 3
+  # Default: 64
+  hand_field_resolution: 64
+
+  # Spatial limit for hand field computation
+  # Defines bounding box size (±limit in meters)
+  # Should match spatial_lim
+  # Default: 1.5
+  hand_field_limit: 1.5
+
+  # ======================================================================
+  # GHOP Model Checkpoints
+  # ======================================================================
+  ghop:
+    # VQ-VAE checkpoint: compresses 64³ object SDF to 3-channel 16³ latent
+    # REQUIRED: Must be downloaded from GHOP pretrained models
+    unified_checkpoint: "checkpoints/ghop/last.ckpt"
+
+    # 3D U-Net diffusion model checkpoint
+    # REQUIRED: Must be downloaded from GHOP pretrained models
+    config_path: "checkpoints/ghop/config.yaml"
+
+    # Text template library for category conditioning
+    # JSON file mapping object categories to text prompts
+    # Example: {"mug": "a hand grasping a mug", ...}
+    text_lib: "data/lib/text_templates.json"
+
+    # Device for GHOP model inference
+    # Options: "cuda", "cpu"
+    # Recommended: "cuda" for GPU acceleration
+    device: "cuda"
+
+  # ======================================================================
+  # Score Distillation Sampling (SDS) Parameters
+  # ======================================================================
+  sds:
+    # Total diffusion timesteps (T)
+    # Must match GHOP training configuration
+    # Default: 1000
+    diffusion_steps: 1000
+
+    # Prediction respacing for faster sampling
+    # Number of actual denoising steps (subset of diffusion_steps)
+    # Lower values = faster but less accurate
+    # Default: 100 (10x speedup)
+    prediction_respacing: 100
+
+    # Noise schedule type
+    # Options: "linear", "cosine", "sqrt"
+    # Must match GHOP training schedule
+    # Default: "linear"
+    noise_schedule: "linear"
+
+    # Minimum timestep ratio (t_min / T)
+    # Lower bound for random timestep sampling
+    # Avoids very noisy samples near t=0
+    # Default: 0.02 (timestep 20 when T=1000)
+    min_step_ratio: 0.02
+
+    # Maximum timestep ratio (t_max / T)
+    # Upper bound for random timestep sampling
+    # Avoids clean samples near t=T
+    # Default: 0.98 (timestep 980 when T=1000)
+    max_step_ratio: 0.98
+
+    # Classifier-free guidance scale (w)
+    # Controls strength of text conditioning
+    # Higher values = stronger category-specific shapes
+    # Typical range: 2.0 - 7.0
+    # Default: 4.0
+    guidance_scale: 4.0
+
+    # Gradient clipping value for SDS gradients
+    # Prevents exploding gradients from diffusion model
+    # Applied before multiplying by w_sds
+    # Default: 1.0
+    grad_clip_val: 1.0
+
+# ========================================================================
+# END PHASE 3 CONFIGURATION
+# ========================================================================
+
+# ========================================================================
+# PHASE 4: CONTACT REFINEMENT WITH MESH EXTRACTION
+# ========================================================================
+# Builds on Phase 3 by extracting explicit meshes from implicit SDFs
+# and applying contact-based refinement for high-fidelity hand-object
+# interaction. This is Stage 2 of the GHOP integration.
+#
+# Timeline:
+#   - Iterations 0-500: Phase 3 SDS loss (coarse geometry)
+#   - Iterations 500-600: Phase 4 contact refinement (fine detail)
+# ========================================================================
+
+phase4:
+  # ======================================================================
+  # Master Switch
+  # ======================================================================
+  # Enable/disable Phase 4 contact refinement
+  # REQUIREMENT: phase3.enabled must be true
+  # Default: true
+  enabled: true
+
+  # ======================================================================
+  # Mesh Extraction Parameters
+  # ======================================================================
+  # High-resolution mesh extraction from implicit SDF representations
+  # Uses Marching Cubes algorithm to convert volumetric SDFs to meshes
+
+  # Mesh extraction resolution (voxel grid size)
+  # Higher resolution = more detailed meshes but slower extraction
+  # Recommended: 128 for production, 64 for debugging
+  # Range: 64 - 256
+  # Default: 128
+  mesh_resolution: 128
+
+  # SDF iso-level for mesh extraction
+  # Defines the zero-crossing threshold for Marching Cubes
+  # Default: 0.0 (standard zero-level set)
+  mesh_iso_level: 0.0
+
+  # ======================================================================
+  # Contact Refinement Schedule
+  # ======================================================================
+  # Controls when and how contact losses are applied
+
+  # Contact refinement start iteration
+  # Must be >= phase3.sds_iters (typically 500)
+  # This marks the transition from SDS (Stage 1) to contact (Stage 2)
+  # Default: 500
+  contact_start_iter: 500
+
+  # Contact refinement duration (number of iterations)
+  # Total training = contact_start_iter + contact_duration
+  # Recommended: 100-200 iterations
+  # Default: 100
+  contact_duration: 100
+
+  # Progressive warmup for contact loss weight
+  # Number of iterations to linearly increase contact weight from 0 to w_contact
+  # Prevents sudden gradient spikes when transitioning to Stage 2
+  # Recommended: 50-100 (half of contact_duration)
+  # Default: 100
+  contact_warmup_iters: 100
+
+  # ======================================================================
+  # Contact Loss Weights
+  # ======================================================================
+  # Controls the relative importance of different contact terms
+
+  # Overall contact loss weight (master multiplier)
+  # Applied after warmup period completes
+  # Higher values = stronger contact enforcement
+  # Typical range: 5.0 - 20.0
+  # Default: 10.0
+  w_contact: 10.0
+
+  # Penetration loss weight (repulsion force)
+  # Penalizes hand vertices penetrating object surface
+  # Higher values = stronger anti-collision
+  # Typical range: 50.0 - 200.0
+  # Default: 100.0
+  w_penetration: 100.0
+
+  # Attraction loss weight (contact formation)
+  # Encourages hand vertices to approach object surface
+  # Applied only to contact zones (fingertips, palm)
+  # Typical range: 5.0 - 20.0
+  # Default: 10.0
+  w_attraction: 10.0
+
+  # Damping loss weight (smoothness regularization)
+  # Prevents excessive vertex movement during refinement
+  # Stabilizes optimization by limiting displacement
+  # Typical range: 0.01 - 1.0
+  # Default: 0.1
+  w_damping: 0.1
+
+  # ======================================================================
+  # Contact Detection Parameters
+  # ======================================================================
+  # Defines geometric thresholds for contact/collision detection
+
+  # Contact threshold (in meters)
+  # Maximum distance for vertices to be considered "in contact"
+  # Vertices within this distance contribute to attraction loss
+  # Recommended: 0.005 - 0.02 (5mm - 2cm)
+  # Default: 0.01 (1cm)
+  contact_thresh: 0.01
+
+  # Collision threshold (in meters)
+  # Maximum negative distance (penetration) before strong penalty
+  # Vertices penetrating beyond this trigger high repulsion
+  # Recommended: 0.001 - 0.01 (1mm - 1cm)
+  # Default: 0.005 (5mm)
+  collision_thresh: 0.005
+
+  # Contact zones mode
+  # Specifies which hand regions are encouraged to form contacts
+  # Options:
+  #   - "zones": Use predefined contact zones (fingertips, palm)
+  #   - "all": Allow contacts on all hand vertices
+  #   - "adaptive": Dynamically detect contact-prone regions
+  # Default: "zones"
+  contact_zones: "zones"
+
+  # ======================================================================
+  # Logging and Visualization
+  # ======================================================================
+  # Controls debugging output and monitoring
+
+  # Console logging frequency
+  # Print contact metrics (penetration, attraction, distance) every N steps
+  # Set to 0 to disable console logging
+  # Default: 50
+  log_contact_every: 50
+
+  # TensorBoard/Lightning logging
+  # Log scalar metrics to training logs
+  # Default: true
+  enable_tb_logging: true
+
+  # Save contact visualizations
+  # Generate mesh overlays showing contact points and penetrations
+  # WARNING: Slows training significantly (for debugging only)
+  # Default: false
+  visualize_contact: false
+
+  # Visualization save frequency (if enabled)
+  # Save contact visualizations every N iterations
+  # Only applies when visualize_contact=true
+  # Default: 100
+  visualize_every: 100
+
+  # Output directory for visualizations
+  # Relative to experiment log directory
+  # Default: "phase4_visualizations"
+  visualize_output_dir: "phase4_visualizations"
+
+  # ======================================================================
+  # Advanced Options
+  # ======================================================================
+  # Expert-level settings (modify with caution)
+
+  # Use cached mesh extraction
+  # Reuse extracted meshes across iterations when hand pose unchanged
+  # Improves speed but may miss dynamic updates
+  # Default: true
+  use_mesh_cache: true
+
+  # Maximum cache age (iterations)
+  # Invalidate mesh cache after N iterations to force re-extraction
+  # Set to 1 to disable caching
+  # Default: 10
+  cache_max_age: 10
+
+  # Contact loss gradient clipping
+  # Prevent exploding gradients from contact computations
+  # Applied before multiplying by w_contact
+  # Default: 5.0
+  contact_grad_clip: 5.0
+
+  # Fallback to SDS on contact failure
+  # If contact loss computation fails (e.g., empty mesh), continue with SDS
+  # Ensures training robustness
+  # Default: true
+  fallback_on_error: true
+
+  # Use PyTorch3D for distance computations
+  # Faster but requires pytorch3d installation
+  # If false, uses trimesh/numpy (slower but more stable)
+  # Default: true (if pytorch3d available)
+  use_pytorch3d: true
+
+# ========================================================================
+# END PHASE 4 CONFIGURATION
+# ========================================================================
+
+# ========================================================================
+# PHASE 5: ADVANCED GHOP INTEGRATION
+# ========================================================================
+# Builds on Phase 3 (SDS) and Phase 4 (Contact) with three advanced modules:
+#
+# 1. **Enhanced Diffusion Prior**: Refined SDS with adaptive weighting
+# 2. **Temporal Consistency**: Video sequence support for smooth trajectories
+# 3. **Adaptive Contact Zones**: Dynamic proximity-based contact detection
+#
+# Timeline:
+#   - Iterations 0-100:     Warm-up (base HOLD only)
+#   - Iterations 100-500:   Phase 3 SDS (coarse geometry)
+#   - Iterations 500-600:   Phase 4 contact (fine refinement)
+#   - Iterations 600-800:   Phase 5 full integration (temporal + adaptive)
+#   - Iterations 800-1000:  Fine-tuning (reduced guidance)
+# ========================================================================
+
+phase5:
+  # ======================================================================
+  # Master Switch
+  # ======================================================================
+  # Enable/disable Phase 5 advanced integration
+  # REQUIREMENTS:
+  #   - phase3.enabled must be true
+  #   - phase3.use_modular_init must be true
+  #   - phase4.enabled should be true (recommended)
+  # Default: true
+  enabled: true
+  use_enhanced_sds: true  # NEW PARAMETER (optional, auto-detected)
+  # ======================================================================
+  # Diffusion Prior Configuration
+  # ======================================================================
+  # Enhanced SDS guidance with dynamic scheduling and geometry sampling
+
+  # GHOP diffusion model checkpoint
+  # CLARIFICATION: Phase 5 uses the same Phase 3 checkpoints (VQ-VAE + U-Net)
+  # The "model_checkpoint" parameter is maintained for backward compatibility
+  # but Phase 5 actually references phase3.ghop.vqvae_checkpoint and
+  # phase3.ghop.unet_checkpoint internally via the modular initialization
+  #
+  # For standalone Phase 5 deployments (if needed), this can point to a
+  # combined checkpoint file. Otherwise, Phase 3 checkpoints are used.
+  # Default: Use Phase 3 checkpoints (recommended)
+  model_checkpoint: "checkpoints/ghop/vqvae_last.ckpt"  # References Phase 3 VQ-VAE
+
+  # NOTE: Phase 5 automatically inherits Phase 3 U-Net checkpoint
+  # No separate checkpoint needed unless using standalone deployment
+
+  # Classifier-free guidance scale (CFG weight)
+  # Controls strength of text-conditional generation
+  # Higher values = stronger category-specific geometry
+  # Typical range: 2.0 - 7.0
+  # Phase 5 uses same value as Phase 3 for consistency
+  # Default: 4.0
+  guidance_scale: 4.0
+
+  # Minimum timestep ratio (t_min / T)
+  # Lower bound for random timestep sampling during SDS
+  # Avoids very noisy samples near t=0
+  # Inherited from Phase 3 but can be fine-tuned
+  # Default: 0.02 (timestep 20 when T=1000)
+  min_step: 0.02
+
+  # Maximum timestep ratio (t_max / T)
+  # Upper bound for random timestep sampling during SDS
+  # Avoids clean samples near t=T
+  # Default: 0.98 (timestep 980 when T=1000)
+  max_step: 0.98
+
+  # Prediction respacing (DDIM acceleration)
+  # Number of actual denoising steps (subset of 1000 timesteps)
+  # Lower values = faster inference but less accurate gradients
+  # Phase 5 optimizes for speed without sacrificing quality
+  # Typical range: 50 - 200
+  # Default: 100 (10x speedup)
+  prediction_respacing: 100
+
+  # Weighting schedule for SDS gradients (DreamFusion-style)
+  # Controls how gradient magnitude varies with timestep
+  # Options:
+  #   - "dream": DreamFusion weighting (w(t) = σ_t^2)
+  #   - "uniform": Constant weighting across timesteps
+  #   - "exponential": Exponentially increasing with t
+  # Recommended: "dream" for stable training
+  # Default: "dream"
+  w_schedule: "dream"
+
+  # Spatial limits for Phase 5 computations (inherited from Phase 3)
+  # Defines bounding box for hand-object interaction space
+  # Should match phase3.spatial_lim for consistency
+  # Default: 1.5 (±1.5m cube centered at origin)
+  spatial_limit: 1.5
+
+  # Grid resolution for Phase 5 operations (inherited from Phase 3)
+  # Used for mesh extraction and distance field computations
+  # Should match phase3.grid_resolution
+  # Default: 64
+  grid_resolution: 64
+
+  # Enable geometry sampling (optional advanced feature)
+  # If true, uses DDIM sampling to generate refined geometry proposals
+  # WARNING: Significantly increases training time (3-5x slower)
+  # Only recommended for final fine-tuning or high-quality results
+  # Default: false
+  enable_geometry_sampling: false
+
+  # Geometry sampling frequency (if enabled)
+  # Generate new geometry samples every N iterations
+  # Only applies when enable_geometry_sampling=true
+  # Default: 50
+  geometry_sampling_freq: 50
+
+  # ======================================================================
+  # Training Schedule
+  # ======================================================================
+  # Multi-stage training with automatic phase transitions
+
+  # Total training iterations
+  # Defines the complete training duration for all phases
+  # Must be >= phase5_start_iter + reasonable fine-tuning duration
+  # Typical range: 800 - 1500
+  # Default: 1000
+  total_iterations: 1000
+
+  # Warm-up period (base HOLD without GHOP)
+  # Number of iterations before any GHOP modules activate
+  # Should match or be shorter than phase3.warmup_iters
+  # Allows base scene representation to stabilize
+  # Recommended: 50 - 200 (shorter than Phase 3's 1000)
+  # Default: 100
+  warmup_iters: 100
+
+  # Phase 5 start iteration
+  # When to enable temporal consistency and adaptive contact zones
+  # Must be > phase4.contact_start_iter (typically 500)
+  # Recommended: 600 (after Phase 4 has refined contacts)
+  # Default: 600
+  phase5_start_iter: 600
+
+  # Fine-tuning start iteration
+  # When to begin reducing guidance weights for final polish
+  # Learning rate and loss weights are gradually decreased
+  # Must be > phase5_start_iter and < total_iterations
+  # Recommended: 800 (allows 200 iterations for refinement)
+  # Default: 800
+  finetune_start_iter: 800
+
+  # ======================================================================
+  # Temporal Consistency Module
+  # ======================================================================
+  # Enforces smooth hand motion across video frames
+  # Only active when processing video sequences (consecutive frames)
+
+  # Temporal window size (number of frames to consider)
+  # How many past frames to use for consistency constraints
+  # Larger windows = smoother but more memory usage
+  # Typical range: 3 - 10
+  # Default: 5 (considers frames t-4 to t)
+  temporal_window: 5
+
+  # Velocity loss weight
+  # Penalizes sudden changes in hand joint positions between frames
+  # Higher values = smoother motion but may lag behind ground truth
+  # Typical range: 0.1 - 2.0
+  # Default: 0.5
+  w_velocity: 0.5
+
+  # Acceleration loss weight
+  # Penalizes sudden changes in hand joint velocities (second derivative)
+  # Enforces physically plausible motion without jerky transitions
+  # Lower values than velocity since acceleration is already derived
+  # Typical range: 0.01 - 0.5
+  # Default: 0.1
+  w_acceleration: 0.1
+
+  # Camera motion compensation weight
+  # Accounts for camera movement when computing hand motion consistency
+  # Transforms hand poses to camera-relative coordinates before comparison
+  # Higher values = better handling of camera pans/rotations
+  # Typical range: 0.1 - 1.0
+  # Default: 0.3
+  w_camera_motion: 0.3
+
+  # Adaptive temporal weighting
+  # If true, automatically adjust temporal loss weights based on motion speed
+  # Fast motions receive lower weights to avoid over-smoothing
+  # Slow motions receive higher weights for stability
+  # Default: true
+  adaptive_weight: true
+
+  # Temporal loss activation threshold
+  # Minimum number of frames required before temporal loss is applied
+  # Prevents errors when only single frames are available
+  # Must be <= temporal_window
+  # Default: 2 (at least one frame pair)
+  min_frames_for_temporal: 2
+
+  # ======================================================================
+  # Adaptive Contact Zones Module
+  # ======================================================================
+  # Dynamically detects contact regions based on hand-object proximity
+  # Replaces Phase 4's fixed fingertip indices with adaptive detection
+
+  # Proximity threshold (in meters)
+  # Maximum distance for a hand vertex to be considered "in contact"
+  # Vertices within this distance of object surface are selected
+  # GHOP paper uses 15mm as empirical optimum
+  # Typical range: 0.01 - 0.03 (1cm - 3cm)
+  # Default: 0.015 (1.5cm / 15mm)
+  proximity_threshold: 0.015
+
+  # Minimum number of contact vertices
+  # Lower bound on contact zone size to ensure meaningful interactions
+  # If fewer vertices are detected, closest K vertices are selected
+  # Prevents degenerate cases with zero contacts
+  # Typical range: 3 - 10
+  # Default: 5
+  min_contact_verts: 5
+
+  # Maximum number of contact vertices
+  # Upper bound on contact zone size to prevent over-selection
+  # If more vertices are detected, top K closest are retained
+  # Prevents computational overhead from large contact zones
+  # Typical range: 30 - 100
+  # Default: 50
+  max_contact_verts: 50
+
+  # Contact zone update frequency
+  # Recompute contact zones every N iterations
+  # More frequent updates = better adaptation but higher cost
+  # Less frequent updates = faster but may lag behind pose changes
+  # Typical range: 5 - 20
+  # Default: 10
+  contact_update_freq: 10
+
+  # Penalize palm contacts
+  # If true, applies stronger repulsion to palm vertices to avoid collisions
+  # Encourages contacts primarily on fingertips and finger pads
+  # Improves realism by matching human grasping behavior
+  # Default: true
+  penalize_palm: true
+
+  # Hybrid contact mode
+  # If true, combines adaptive proximity detection with fixed fingertip anchors
+  # Ensures fingertips are always included even if slightly far from object
+  # Recommended for robust grasping across diverse object shapes
+  # Default: true
+  use_hybrid_contact: true
+
+  # Fingertip anchor indices (for hybrid mode)
+  # MANO hand model vertex indices for 5 fingertips
+  # Only used when use_hybrid_contact=true
+  # Default: MANO fingertip indices
+  fingertip_indices: [745, 317, 444, 556, 673]  # thumb, index, middle, ring, pinky
+
+  # ======================================================================
+  # Advanced Options
+  # ======================================================================
+  # Expert-level settings and experimental features
+
+  # Overall Phase 5 loss weight (master multiplier)
+  # Applied to temporal + adaptive contact contributions
+  # Does NOT affect Phase 3 SDS or Phase 4 contact (controlled separately)
+  # Typical range: 0.5 - 2.0
+  # Default: 1.0
+  w_phase5: 1.0
+
+  # Temporal loss weight (applied after w_phase5)
+  # Additional multiplier specifically for temporal consistency
+  # Total temporal weight = w_phase5 * w_temporal * computed_loss
+  # Typical range: 0.5 - 2.0
+  # Default: 1.0
+  w_temporal: 1.0
+
+  # Gradient clipping for Phase 5 losses
+  # Prevents exploding gradients from temporal or contact computations
+  # Applied before multiplying by loss weights
+  # Typical range: 5.0 - 20.0
+  # Default: 10.0
+  gradient_clip_norm: 10.0
+
+  # ======================================================================
+  # Logging and Monitoring
+  # ======================================================================
+  # Controls debugging output and experiment tracking
+
+  # Phase 5 logging frequency
+  # Print temporal and adaptive contact metrics every N iterations
+  # Set to 0 to disable detailed logging
+  # Default: 50
+  log_phase5_every: 50
+
+  # TensorBoard logging
+  # Log Phase 5 scalar metrics to training logs
+  # Includes: temporal loss, velocity/acceleration, contact zone size, etc.
+  # Default: true
+  enable_tb_logging: true
+
+  # Visualize diffusion process
+  # Generate intermediate diffusion steps during SDS computation
+  # WARNING: Significantly increases training time (debugging only)
+  # Default: false
+  visualize_diffusion: false
+
+  # Visualize contact zones
+  # Render hand meshes with color-coded contact regions
+  # Shows adaptive contact zone evolution over training
+  # WARNING: Slows training (for debugging only)
+  # Default: false
+  visualize_contact_zones: false
+
+  # Visualization save frequency
+  # Save visualizations every N iterations (if enabled)
+  # Only applies when visualize_* options are true
+  # Default: 100
+  visualize_every: 100
+
+  # Visualization output directory
+  # Path relative to experiment log directory
+  # Default: "phase5_visualizations"
+  visualize_output_dir: "phase5_visualizations"
+
+  # ======================================================================
+  # Video Sequence Configuration
+  # ======================================================================
+  # Enables temporal consistency for video datasets
+
+  # Use video sequences for training
+  # If true, dataloader provides consecutive frames with sequence IDs
+  # Required for temporal consistency module to function
+  # Default: true
+  use_video_sequences: true
+
+  # Frame sampling strategy
+  # How to sample frames from video sequences during training
+  # Options:
+  #   - "consecutive": Sample frames t, t+1, t+2, ... (for temporal loss)
+  #   - "random": Sample random frames from same video (no temporal loss)
+  #   - "keyframe": Sample keyframes with large motion changes
+  # Default: "consecutive"
+  frame_sampling_strategy: "consecutive"
+
+  # Video datasets to use
+  # List of dataset names that provide video sequences
+  # Datasets not in this list are treated as single-frame
+  # Supported: hoi4d, oakink, dexycb (with sequential annotations)
+  # Default: ["hoi4d", "oakink", "dexycb"]
+  video_datasets:
+    - "hoi4d"
+    - "oakink"
+    - "dexycb"
+
+  # Minimum frames per sequence
+  # Skip video sequences shorter than this threshold
+  # Ensures sufficient temporal context for consistency loss
+  # Default: 5 (matches temporal_window)
+  min_sequence_length: 5
+
+  # Maximum temporal gap (in frames)
+  # Maximum allowed gap between consecutive sampled frames
+  # Larger gaps may have motion discontinuities
+  # Default: 3 (ensures smooth motion within window)
+  max_temporal_gap: 3
+
+  # ======================================================================
+  # Dynamic Weight Scheduling
+  # ======================================================================
+  # Automatic adjustment of loss weights during training
+
+  # Enable dynamic weight scheduling
+  # If true, Phase5TrainingScheduler adjusts loss weights automatically
+  # Gradually increases Phase 5 weight while decreasing SDS weight
+  # Default: true
+  enable_dynamic_scheduling: true
+
+  # SDS weight schedule
+  # How SDS loss weight changes over training
+  # Options:
+  #   - "constant": Keep w_sds fixed (use phase3.w_sds)
+  #   - "linear_decay": Linearly decrease from phase3.w_sds to 0
+  #   - "exponential_decay": Exponentially decrease (smoother)
+  #   - "step": Step function (full weight until finetune_start, then 0)
+  # Default: "exponential_decay"
+  sds_weight_schedule: "exponential_decay"
+
+  # Contact weight schedule
+  # How contact loss weight changes over training
+  # Options: same as sds_weight_schedule
+  # Default: "constant" (keep Phase 4 weight fixed)
+  contact_weight_schedule: "constant"
+
+  # Temporal weight schedule
+  # How temporal loss weight increases during Phase 5
+  # Options:
+  #   - "linear_ramp": Linearly increase from 0 to w_temporal
+  #   - "exponential_ramp": Exponentially increase (gentler start)
+  #   - "step": Instantly jump to full weight at phase5_start_iter
+  # Default: "linear_ramp"
+  temporal_weight_schedule: "linear_ramp"
+
+  # Learning rate schedule
+  # How learning rate changes during Phase 5
+  # Options:
+  #   - "constant": Keep initial LR fixed
+  #   - "cosine_decay": Cosine annealing from initial to 0
+  #   - "step_decay": Step down at finetune_start_iter
+  # Default: "cosine_decay"
+  lr_schedule: "cosine_decay"
+
+  # Minimum learning rate (for decay schedules)
+  # Lower bound for learning rate during fine-tuning
+  # Prevents LR from going to zero prematurely
+  # Default: 1e-6
+  min_lr: 1.0e-6
+
+# ========================================================================
+# END PHASE 5 CONFIGURATION
+# ========================================================================

@@ -1,0 +1,195 @@
+# ================================================================
+# Stage 2: SDS Training from Official Checkpoint (COMPLETE FIX)
+# ================================================================
+
+# Phase Configuration
+phase3:
+  enabled: true
+  ghop:
+    config_path: checkpoints/ghop/config.yaml
+    device: cuda
+    unet_checkpoint: checkpoints/ghop/last.ckpt
+    unified_checkpoint: checkpoints/ghop/last.ckpt
+    vqvae_checkpoint: checkpoints/ghop/last.ckpt
+    unet_use_pretrained: true
+    vqvae_use_pretrained: true
+
+  grid_resolution: 24
+  phase3_start_iter: 0
+  phase3_end_iter: 60000
+
+  sds:
+    diffusion_steps: 1000
+    guidance_scale: 3.0
+    max_step_ratio: 0.98
+    min_step_ratio: 0.02
+    noise_schedule: linear
+    prediction_respacing: 50
+
+  sds_iters: 1
+  spatial_lim: 1.5
+  use_modular_init: true
+  w_sds: 10.0
+  warmup_iters: 500
+
+phase4:
+  enabled: false
+
+phase5:
+  enabled: false
+
+# ================================================================
+# SCENE CONFIGURATION
+# ================================================================
+scene_bounding_sphere: 6.0
+
+# ================================================================
+# MODEL: EXACT MATCH TO OFFICIAL CHECKPOINT
+# ================================================================
+model:
+  # ================================================================
+  # DENSITY CONFIGURATION
+  # ================================================================
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  # ================================================================
+  # RAY SAMPLER CONFIGURATION
+  # ================================================================
+  ray_sampler:
+    near: 0.0
+    N_samples: 64
+    N_samples_eval: 128
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 10
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+    add_tiny: 0.000001
+
+  # ================================================================
+  # HAND IMPLICIT NETWORK
+  # ================================================================
+  implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: pose
+
+  # ================================================================
+  # HAND RENDERING NETWORK - MATCHES OFFICIAL
+  # ================================================================
+  rendering_network:
+    feature_vector_size: 256
+    mode: pose
+    d_in: 270                  # 270 + 0 (multires=0) = 270 (MATCHES OFFICIAL)
+    d_out: 3
+    dims: [256, 256, 256, 256]
+    weight_norm: true
+    multires_view: 0
+    d_implicit_features: 256
+
+  # ================================================================
+  # BACKGROUND IMPLICIT NETWORK
+  # ================================================================
+  bg_implicit_network:
+    feature_vector_size: 256
+    d_in: 4
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: none
+    bias: 0.0
+    skip_in: [4]
+    weight_norm: false
+    multires: 10
+    cond: frame
+    dim_frame_encoding: 32
+
+  # ================================================================
+  # BACKGROUND RENDERING NETWORK - DIMENSION FIXED
+  # ================================================================
+  bg_rendering_network:
+    feature_vector_size: 256
+    mode: nerf_frame_encoding
+    # Target final size: 315
+    # Code adds: dim_frame_encoding (32)
+    # Code adds: embedder (if multires > 0)
+
+    # Strategy: Set d_in such that final sum is 315
+    # If multires_view=4 (adds 24 dims over 3):
+
+    d_in: 259                  # CHANGE BACK to 259
+    d_out: 3
+    dims: [128]
+    weight_norm: false
+    multires_view: 4
+    dim_frame_encoding: 32
+    multires_xyz: 42
+    d_implicit_features: 171
+
+# ================================================================
+# DATASET CONFIGURATION
+# ================================================================
+dataset:
+  dataset_path: data/hold_MC1_ho3d/build
+  seq_name: hold_MC1_ho3d
+
+  train:
+    type: train
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 4
+
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 512
+    enabled: false
+
+# ================================================================
+# LOSS CONFIGURATION
+# ================================================================
+loss:
+  w_rgb: 1.0
+  w_mask: 0.1
+  w_eikonal: 1.0
+  w_smooth: 0.005
+  w_temporal: 1.0
+  rgb_loss_type: "l1"
+
+# ================================================================
+# TRAINING CONFIGURATION
+# ================================================================
+training:
+  num_epochs: 1              # Start with 1 epoch for testing
+  max_steps: -1
+  eval_every_epoch: 999
+  log_every: 10
+  gradient_clip: 1.0
+
+# ================================================================
+# OPTIMIZER CONFIGURATION
+# ================================================================
+optimizer:
+  lr: 0.0001
+  type: "adam"
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+# ================================================================
+# EXPERIMENT CONFIGURATION
+# ================================================================
+experiment:
+  name: 'stage2_official_cb20a1702_FIXED'

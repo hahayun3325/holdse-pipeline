@@ -175,6 +175,87 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=No
 
             with torch.no_grad():
                 batch_cuda = thing2dev(batch, 'cuda')
+                # ============== ADD THIS DEBUG BLOCK ==============
+                print(f"\n[Render Debug] Frame {actual_frame_idx}")
+
+                # Check camera parameters
+                if 'extrinsics' in batch_cuda:
+                    extr = batch_cuda['extrinsics'][0]  # [4, 4]
+                    camera_pos = extr[:3, 3]
+                    print(f"  Camera position: {camera_pos.cpu().numpy()}")
+
+                if 'intrinsics' in batch_cuda:
+                    intr = batch_cuda['intrinsics'][0]  # [4, 4]
+                    fx = intr[0, 0]
+                    cx = intr[0, 2]
+                    cy = intr[1, 2]
+                    print(f"  Camera intrinsics: fx={fx:.1f}, cx={cx:.1f}, cy={cy:.1f}")
+
+                # Check if model has object SDF
+                if hasattr(model.model.nodes, 'object'):
+                    obj_node = model.model.nodes['object']
+                    print(f"  Object node exists: {type(obj_node).__name__}")
+
+                    try:
+                        with torch.no_grad():
+                            # Get frame index from batch
+                            frame_idx = batch_cuda.get('idx', torch.tensor([0], device='cuda'))
+                            if frame_idx.dim() == 0:
+                                frame_idx = frame_idx.unsqueeze(0)
+
+                            print(f"  Querying object SDF for frame {frame_idx.item()}")
+
+                            # Sample test points
+                            test_pts = torch.tensor([
+                                [0., 0., 0.],
+                                [0.1, 0., 0.],
+                                [0., 0.1, 0.],
+                            ], device='cuda')
+
+                            if hasattr(obj_node, 'implicit_network'):
+                                # Get frame latent code (conditioning)
+                                if hasattr(obj_node, 'frame_latent_encoder'):
+                                    frame_latents = obj_node.frame_latent_encoder(frame_idx)  # [1, latent_dim]
+                                    print(f"  Frame latent shape: {frame_latents.shape}")
+
+                                    # Expand to match points
+                                    cond = frame_latents.unsqueeze(1).expand(-1, len(test_pts), -1)  # [1, 3, latent_dim]
+
+                                    # Query SDF with conditioning
+                                    sdf_vals = obj_node.implicit_network(test_pts.unsqueeze(0), cond)  # ← Now has both args
+
+                                    print(f"  Object SDF samples:")
+                                    for i, pt in enumerate(test_pts):
+                                        print(f"    Point {pt.cpu().numpy()}: SDF = {sdf_vals[0, i].item():.4f}")
+
+                                    # Check statistics
+                                    sdf_mean = sdf_vals.abs().mean().item()
+                                    sdf_std = sdf_vals.std().item()
+                                    print(f"  SDF statistics: mean_abs={sdf_mean:.4f}, std={sdf_std:.4f}")
+
+                                    if sdf_std < 0.01:
+                                        print(f"    ⚠️  Near-constant SDF (std={sdf_std:.4f}) - object network untrained!")
+                                    elif sdf_mean > 2.0:
+                                        print(f"    ⚠️  Large SDF values - object outside scene bounds!")
+                                    else:
+                                        print(f"    ✓ SDF looks reasonable")
+                                else:
+                                    print(f"  ❌ Object node missing frame_latent_encoder!")
+                            else:
+                                print(f"  ❌ Object node has no implicit_network!")
+
+                    except Exception as e:
+                        print(f"  ❌ SDF query failed: {type(e).__name__}: {e}")
+                        traceback.print_exc()
+                else:
+                    print(f"  ❌ No object node in model!")
+
+                # Check hand parameters
+                if 'right.fullpose' in batch_cuda:
+                    hand_pose = batch_cuda['right.fullpose'][0]
+                    print(f"  Hand pose shape: {hand_pose.shape}, mean: {hand_pose.mean():.4f}")
+
+                # ============== END DEBUG BLOCK ==============
                 output = model.validation_step(batch_cuda)
 
                 # Clean NaN if present
@@ -254,10 +335,11 @@ def main():
     # Configuration
     # config_path = 'confs/stage1_hold_MC1_ho3d.yaml' # Case hold_MC1_ho3d Stage 1 Configuration File
     # config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet MANO Enabled Configuration File
-    config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit_official_match_fixed.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet MANO Enabled New Configuration File
+    # config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit_official_match_fixed.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet MANO Enabled New Configuration File
     # config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit_joint002.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet Joint Supervision Configuration File
     # config_path = 'confs/ghop_stage1_rgb_only.yaml' # Case hold_bottle1_itw Stage 1 Configuration File(Stage 2 and 3 use the same. Phase 3, 4, 5 have no influence on rendering process)
     # config_path = '/home/fredcui/Projects/hold-master/code/confs/general.yaml' # HOLD Officail Configuration
+    config_path = 'confs/stage1_hold_MC1_ho3d_sds_from_official.yaml' # Case hold_MC1_ho3d Stage 2 on Official Checkpoint
     base_output_dir = Path('rgb_validation_renders')
 
     # All checkpoints from training session
@@ -292,10 +374,12 @@ def main():
         # ('logs/d839b2738/checkpoints/last.ckpt', 13),  # Stage 1 Checkpoint 8-layer implicitnet 70-epoch MANO Enabled
         # ('logs/6fc82956f/checkpoints/last.ckpt', 14),  # Stage 1 Checkpoint 8-layer implicitnet 70-epoch MANO Enabled New Config
         # ('logs/a0419ab35/checkpoints/last.ckpt', 15), # Stage 1 Checkpoint 8-layer implicitnet 20-epoch MANO Updated
-        ('logs/7a34708ef/checkpoints/last.ckpt', 15), # Stage 1 Checkpoint 8-layer implicitnet 100-epoch MANO Updated
+        # ('logs/7a34708ef/checkpoints/last.ckpt', 15), # Stage 1 Checkpoint 8-layer implicitnet 100-epoch MANO Updated
         # ('logs/4fa8bb20d/checkpoints/last.ckpt', 2), # Stage 2 Checkpoint
         # ('logs/a0c32d3e8/checkpoints/last.ckpt', 21), # Stage 2 Checkpoint 15 epochs Refiend SDS
         # ('logs/70d907fbb/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint 30 epochs Refiend SDS
+        # ('logs/482915ef4/checkpoints/last.ckpt', 23),  # Stage 2 Checkpoint 1-epoch on Official Checkpoint
+        # ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
         # GHOP Official Checkpoint
@@ -349,7 +433,6 @@ def main():
 
         except Exception as e:
             print(f"❌ Error rendering epoch {expected_epoch}: {e}")
-            import traceback
             traceback.print_exc()
 
     # Final summary
@@ -390,6 +473,7 @@ To use the script:
 python scripts/render_validation_with_arg.py --frames 50,100,150,200,250
 # Full resolution (640×480)
 python scripts/render_validation_with_arg.py --frames 0,50,100 --downsample 1
+python scripts/render_validation_with_arg.py --frames 0 --downsample 1 2>&1 | tee logs/evaluation_results/MC1_official_rendering$(date +%d%H%M%S).log
 # Half resolution (320×240) - faster for testing
 python scripts/render_validation_with_arg.py --frames 0,50,100 --downsample 2
 '''

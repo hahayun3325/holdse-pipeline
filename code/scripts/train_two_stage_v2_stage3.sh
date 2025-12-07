@@ -96,6 +96,7 @@ python train.py \
     --no-comet \
     --gpu_id 0 \
     --no-pin-memory
+
 # logs/140dc5c18/checkpoints/last.ckpt stage 1 checkpoint
 # ================================================================
 # Post-Training: Save and Report
