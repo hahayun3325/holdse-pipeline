@@ -9,6 +9,7 @@ from pathlib import Path
 from tqdm import tqdm
 import sys
 import glob
+from torch.utils.data import Subset
 
 sys.path.insert(0, '.')
 sys.path.insert(0, '..')
@@ -67,6 +68,18 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
 
     print(f"Loading checkpoint: {checkpoint_path}")
     ckpt = torch.load(checkpoint_path, map_location='cpu')
+
+    pose_mean = ckpt['state_dict']['model.nodes.right.params.pose.weight'].mean()
+    print(f"\n{'=' * 60}")
+    print(f"CHECKPOINT VERIFICATION")
+    print(f"{'=' * 60}")
+    print(f"Path: {checkpoint_path}")
+    print(f"Pose mean: {pose_mean:.6f}")
+    print(f"Expected:")
+    print(f"  Official: 0.017972")
+    print(f"  Stage1:   0.018969")
+    print(f"  Stage2:   0.017512")
+    print(f"{'=' * 60}\n")
 
     # Detect number of frames
     try:
@@ -144,6 +157,70 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
         model.ghop_enabled = False
 
     model.load_state_dict(ckpt['state_dict'], strict=False)
+
+    # ========== VERIFICATION: What parameters were loaded? ==========
+    print("\n" + "=" * 60)
+    print("CHECKPOINT PARAMETER VERIFICATION")
+    print("=" * 60)
+
+    # First, discover the actual model structure
+    print("\nModel top-level attributes:")
+    for attr in dir(model):
+        if not attr.startswith('_') and not callable(getattr(model, attr, None)):
+            print(f"  - {attr}")
+
+    # Try to find pose parameters by searching all state dict keys
+    print("\nSearching for pose parameters in checkpoint...")
+    pose_keys = [k for k in ckpt['state_dict'].keys() if 'pose' in k.lower()]
+    print(f"Found {len(pose_keys)} pose-related keys:")
+    for key in pose_keys[:10]:  # Show first 10
+        value = ckpt['state_dict'][key]
+        print(f"  {key}: shape={value.shape}, mean={value.mean():.6f}")
+
+    # Try to find pose in loaded model
+    print("\nSearching for pose parameters in loaded model...")
+    model_pose_keys = [k for k, v in model.named_parameters() if 'pose' in k.lower()]
+    print(f"Found {len(model_pose_keys)} pose-related parameters:")
+    for key in model_pose_keys[:10]:
+        param = dict(model.named_parameters())[key]
+        print(f"  {key}: shape={param.shape}, mean={param.mean():.6f}")
+
+    # If we found matching keys, compare them
+    if pose_keys and model_pose_keys:
+        print("\nComparing checkpoint vs loaded model:")
+        # Try to match first pose key
+        ckpt_key = pose_keys[0]
+        model_key = model_pose_keys[0]
+
+        ckpt_pose = ckpt['state_dict'][ckpt_key]
+        model_pose = dict(model.named_parameters())[model_key]
+
+        print(f"\nCheckpoint '{ckpt_key}':")
+        print(f"  Mean: {ckpt_pose.mean():.6f}")
+        print(f"  Std: {ckpt_pose.std():.6f}")
+        print(f"  Shape: {ckpt_pose.shape}")
+
+        print(f"\nModel '{model_key}':")
+        print(f"  Mean: {model_pose.mean():.6f}")
+        print(f"  Std: {model_pose.std():.6f}")
+        print(f"  Shape: {model_pose.shape}")
+        print(f"  Requires grad: {model_pose.requires_grad}")
+
+        # Check if they match
+        if ckpt_key == model_key:
+            if torch.allclose(ckpt_pose, model_pose, atol=1e-6):
+                print(f"\n  ✅ Checkpoint pose successfully loaded")
+            else:
+                print(f"\n  ❌ WARNING: Pose values differ!")
+                print(f"     Difference: {(ckpt_pose - model_pose).abs().mean():.8f}")
+        else:
+            print(f"\n  ⚠️ Key names don't match ('{ckpt_key}' vs '{model_key}')")
+    else:
+        print("\n  ⚠️ Could not find pose parameters to compare")
+
+    print("=" * 60 + "\n")
+    # ========== END VERIFICATION ==========
+
     model.cuda()
     model.eval()
 
@@ -185,6 +262,31 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
     base_dataset = full_dataset.dataset if hasattr(full_dataset, 'dataset') else full_dataset
 
     print(f"✓ Dataset: {len(base_dataset)} frames")
+
+    # ========== SAMPLING FOR FAST TESTING (ADD THIS BLOCK) ==========
+    SAMPLE_EVERY_N_FRAMES = 100  # Change this to 5, 10, or 20
+
+    print(f"\n{'=' * 60}")
+    print(f"FAST TESTING MODE: Sampling every {SAMPLE_EVERY_N_FRAMES} frames")
+    print(f"{'=' * 60}")
+
+    # Create sampled indices
+    original_length = len(base_dataset)
+    sampled_indices = list(range(0, original_length, SAMPLE_EVERY_N_FRAMES))
+
+    # Create a subset dataset using Subset wrapper
+    base_dataset = Subset(base_dataset, sampled_indices)
+
+    print(f"  Original frames: {original_length}")
+    print(f"  Sampled frames:  {len(sampled_indices)} ({len(sampled_indices) / original_length * 100:.1f}%)")
+    print(f"  Speed multiplier: ~{SAMPLE_EVERY_N_FRAMES}x faster")
+    print(f"  Estimated time: {240 / SAMPLE_EVERY_N_FRAMES:.1f} minutes (was ~240 min)")
+    print(f"{'=' * 60}\n")
+
+    # IMPORTANT: Store for evaluation script
+    SAMPLED_FRAME_INDICES = np.array(sampled_indices)  # ADD THIS LINE
+    TOTAL_FRAMES_IN_SEQUENCE = original_length          # ADD THIS LINE
+    # ============== END OF SAMPLING BLOCK ==============
 
     if len(base_dataset) != n_frames:
         print(f"⚠️ WARNING: Dataset has {len(base_dataset)} frames, checkpoint has {n_frames}")
@@ -232,9 +334,69 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
         for batch_idx, batch in enumerate(tqdm(dataloader, total=len(dataloader), desc="Extracting")):
             batch_cuda = thing2dev(batch, 'cuda')
 
+            if batch_idx == 0:  # First batch only
+                print("\n" + "="*70)
+                print("POSE SOURCE TRACING - BEFORE validation_step")
+                print("="*70)
+
+                # Check what's in batch before validation_step
+                print("\n1. Batch pose (from dataset):")
+                if 'gt.right.hand_pose' in batch_cuda:
+                    gt_pose = batch_cuda['gt.right.hand_pose']
+                    print(f"   Shape: {gt_pose.shape}")
+                    print(f"   Mean: {gt_pose.mean():.6f}")
+                    print(f"   First 5: {gt_pose[0, :5]}")
+
+                # Check model's stored parameters
+                print("\n2. Model checkpoint params.pose.weight:")
+                for name, param in model.named_parameters():
+                    if 'params.pose.weight' in name:
+                        print(f"   {name}:")
+                        print(f"   Mean: {param.mean():.6f}")
+                        print(f"   Frame 0 first 5: {param[0, :5]}")
+                        break
+
+                # Check what node.params() returns
+                print("\n3. Calling node.params(batch['idx']):")
+                try:
+                    if isinstance(model, HOLD):
+                        for node_name, node in model.nodes.items():
+                            if node_name == 'right':
+                                returned_params = node.params(batch_cuda['idx'])
+                                if 'hand_pose' in returned_params:
+                                    hp = returned_params['hand_pose']
+                                    print(f"   Returned hand_pose shape: {hp.shape}")
+                                    print(f"   Returned hand_pose mean: {hp.mean():.6f}")
+                                    print(f"   Returned hand_pose first 5: {hp[0, :5] if hp.ndim > 1 else hp[:5]}")
+                                elif 'full_pose' in returned_params:
+                                    fp = returned_params['full_pose']
+                                    print(f"   Returned full_pose shape: {fp.shape}")
+                                    print(f"   Returned full_pose mean: {fp.mean():.6f}")
+                except Exception as e:
+                    print(f"   Error calling node.params(): {e}")
+
+                print("="*70 + "\n")
+
             try:
                 output = model.validation_step(batch_cuda)
 
+                # ========== CHECK: What pose is in the output? ==========
+                if batch_idx == 0:
+                    print("\n" + "="*70)
+                    print("POSE SOURCE TRACING - AFTER validation_step")
+                    print("="*70)
+
+                    # Check output
+                    for key in ['hand_pose', 'full_pose', 'right.hand_pose']:
+                        if key in output:
+                            pose_out = output[key]
+                            print(f"\nOutput['{key}']:")
+                            print(f"   Shape: {pose_out.shape}")
+                            print(f"   Mean: {pose_out.mean():.6f}")
+                            print(f"   First 5: {pose_out[0, :5] if pose_out.ndim > 1 else pose_out[:5]}")
+
+                    print("="*70 + "\n")
+                # ========== END CHECK ==========
                 betas = output[param_keys['betas']].detach()
                 hand_pose = output[param_keys['hand_pose']].detach()
                 global_orient = output[param_keys['global_orient']].detach()
@@ -307,6 +469,25 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
     print(f"  Object vertices: {obj_verts.shape}")
     print(f"  Valid: {is_valid.sum()}/{len(is_valid)}")
 
+    # ========== DIAGNOSTIC: Compare deformation space statistics ==========
+    print(f"\n{'='*60}")
+    print(f"DEFORMATION SPACE STATISTICS")
+    print(f"{'='*60}")
+    print(f"Hand vertices (deformation space):")
+    print(f"  Mean: {hand_verts.mean():.6f}")
+    print(f"  Std:  {hand_verts.std():.6f}")
+    print(f"  Range: [{hand_verts.min():.6f}, {hand_verts.max():.6f}]")
+    print(f"  Frame 0 mean: {hand_verts[0].mean():.6f}")
+    print(f"  Frame 0 range: [{hand_verts[0].min():.6f}, {hand_verts[0].max():.6f}]")
+    print(f"\nHand joints (deformation space):")
+    print(f"  Mean: {hand_joints.mean():.6f}")
+    print(f"  Std:  {hand_joints.std():.6f}")
+    print(f"  Wrist (joint 0) positions:")
+    for i in range(min(5, len(hand_joints))):
+        print(f"    Frame {i}: {hand_joints[i, 0]}")
+    print(f"{'='*60}\n")
+    # ========== END DIAGNOSTIC ==========
+
     # Apply coordinate transformation
     print("\n=== Applying map_deform2eval transformation ===")
     hand_verts_eval = np.array([map_deform2eval(frame, inverse_scale, normalize_shift) for frame in hand_verts])
@@ -334,6 +515,8 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
         'full_seq_name': seq_name,
         'fnames': np.array(fnames),
         'is_valid': is_valid,
+        'sampled_frame_indices': SAMPLED_FRAME_INDICES if SAMPLE_EVERY_N_FRAMES > 1 else None,  # ADD
+        'total_frames_in_sequence': TOTAL_FRAMES_IN_SEQUENCE if SAMPLE_EVERY_N_FRAMES > 1 else None,  # ADD
         'v3d_c.right': hand_verts_eval,
         'j3d_c.right': hand_joints_eval,
         'v3d_c.object': obj_verts_eval,
@@ -409,9 +592,16 @@ python scripts/extract_predictions.py \
     --checkpoint logs/e1c95c0d0/checkpoints/last.ckpt \
     --seq_name hold_MC1_ho3d \
     --config confs/stage1_hold_MC1_ho3d_8layer_implicit.yaml \
-    --output logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_predictions.pkl \
-    2>&1 | tee logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_debug.log
+    --output logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_predictions_$(date +%Y%m%d_%H%M%S).pkl \
+    2>&1 | tee logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_$(date +%Y%m%d_%H%M%S).log
 
 # Monitor the progress in a separate terminal
 tail -f logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_debug_fresh.log | grep "Extracting:"
+
+# Fast testing button:
+When ready for final evaluation, simply change:
+SAMPLE_EVERY_N_FRAMES = 10  # Fast testing
+to:
+SAMPLE_EVERY_N_FRAMES = 1   # Full extraction (all frames)
+This gives you a single switch to control extraction speed without modifying multiple places in the code.
 '''

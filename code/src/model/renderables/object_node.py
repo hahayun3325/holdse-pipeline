@@ -73,6 +73,13 @@ class ObjectNode(Node):
         else:
             scene_scale = params[:, 0]
 
+        # After line ~30 (after squeeze operations)
+        print(f"\n[ObjectNode.sample_points] Object parameters:")
+        print(f"  scene_scale: {scene_scale}")
+        print(f"  transl: {transl}")
+        print(f"  global_orient: {global_orient}")
+        # print(f"  global_orient (degrees): {(global_orient * 180 / np.pi).cpu().numpy()}")
+
         # ✅ Call server (returns output dict)
         output = self.server(scene_scale, transl, global_orient)
 
@@ -126,6 +133,12 @@ class ObjectNode(Node):
         if torch.isnan(z_vals).any():
             print(f"  ❌ z_vals is NaN from ray sampler!")
             z_vals = torch.nan_to_num(z_vals, nan=1.0)
+        # After z_vals are computed (around line 80)
+        print(f"\n[ObjectNode.sample_points] Ray sampling statistics:")
+        print(f"  z_vals shape: {z_vals.shape}")
+        print(f"  z_vals min/max: {z_vals.min().item():.4f} / {z_vals.max().item():.4f}")
+        # print(f"  Object position (transl): {transl[0].cpu().numpy()}")
+        print(f"  Camera position: (will need from input)")
 
         # Compute sample points
         points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
@@ -136,6 +149,11 @@ class ObjectNode(Node):
         if torch.isnan(points).any():
             print(f"  ❌ points is NaN!")
             points = torch.nan_to_num(points, nan=0.0)
+        # After points are computed
+        print(f"  Sampled points min/max:")
+        print(f"    x: {points[..., 0].min().item():.4f} / {points[..., 0].max().item():.4f}")
+        print(f"    y: {points[..., 1].min().item():.4f} / {points[..., 1].max().item():.4f}")
+        print(f"    z: {points[..., 2].min().item():.4f} / {points[..., 2].max().item():.4f}")
 
         pose = cond["pose"]
 

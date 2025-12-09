@@ -214,38 +214,119 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=No
 
                             if hasattr(obj_node, 'implicit_network'):
                                 # Get frame latent code (conditioning)
-                                if hasattr(obj_node, 'frame_latent_encoder'):
-                                    frame_latents = obj_node.frame_latent_encoder(frame_idx)  # [1, latent_dim]
-                                    print(f"  Frame latent shape: {frame_latents.shape}")
+                                if hasattr(obj_node, 'implicit_network') and hasattr(obj_node, 'frame_latent_encoder'):
+                                    try:
+                                        frame_latents = obj_node.frame_latent_encoder(frame_idx)
+                                        print(f"  Frame latent shape: {frame_latents.shape}")
 
-                                    # Expand to match points
-                                    cond = frame_latents.unsqueeze(1).expand(-1, len(test_pts), -1)  # [1, 3, latent_dim]
+                                        # Check what conditioning the network expects
+                                        if hasattr(obj_node.implicit_network, 'cond'):
+                                            cond_mode = obj_node.implicit_network.cond
+                                            print(f"  Network conditioning mode: '{cond_mode}'")
+                                        else:
+                                            cond_mode = "unknown"
+                                            print(f"  ⚠️  Network has no 'cond' attribute!")
 
-                                    # Query SDF with conditioning
-                                    sdf_vals = obj_node.implicit_network(test_pts.unsqueeze(0), cond)  # ← Now has both args
+                                        # Test single point
+                                        test_pt = torch.tensor([[0., 0., 0.]], device='cuda')  # [1, 3]
+                                        B = frame_latents.shape[0]
 
-                                    print(f"  Object SDF samples:")
-                                    for i, pt in enumerate(test_pts):
-                                        print(f"    Point {pt.cpu().numpy()}: SDF = {sdf_vals[0, i].item():.4f}")
+                                        pts_batched = test_pt.unsqueeze(0)  # [1, 1, 3]
 
-                                    # Check statistics
-                                    sdf_mean = sdf_vals.abs().mean().item()
-                                    sdf_std = sdf_vals.std().item()
-                                    print(f"  SDF statistics: mean_abs={sdf_mean:.4f}, std={sdf_std:.4f}")
+                                        # Create conditioning as DICTIONARY (the correct format!)
+                                        cond_tensor = frame_latents.unsqueeze(1)  # [1, 1, 32]
 
-                                    if sdf_std < 0.01:
-                                        print(f"    ⚠️  Near-constant SDF (std={sdf_std:.4f}) - object network untrained!")
-                                    elif sdf_mean > 2.0:
-                                        print(f"    ⚠️  Large SDF values - object outside scene bounds!")
-                                    else:
-                                        print(f"    ✓ SDF looks reasonable")
+                                        # Build dict with all possible conditioning keys
+                                        cond_dict = {
+                                            "frame": cond_tensor,
+                                            "pose": torch.zeros(1, 1, 48, device='cuda'),  # Dummy pose if needed
+                                        }
+
+                                        print(f"  Query shapes: pts={pts_batched.shape}, cond['frame']={cond_dict['frame'].shape}")
+
+                                        try:
+                                            # Pass dictionary, not raw tensor!
+                                            sdf_output = obj_node.implicit_network(pts_batched, cond_dict)
+                                            print(f"  ✓ Dict-conditioned SDF succeeded: shape={sdf_output.shape}")
+
+                                            # Extract value
+                                            sdf_val = sdf_output.flatten()[0].item()
+                                            print(f"  Object SDF at origin: {sdf_val:.4f}")
+
+                                            # Test multiple points
+                                            test_pts = torch.tensor([
+                                                [0., 0., 0.],
+                                                [0.1, 0., 0.],
+                                                [0., 0.1, 0.],
+                                                [0., 0., 0.1],
+                                                [-0.1, 0., 0.],
+                                            ], device='cuda')
+
+                                            N = test_pts.shape[0]
+                                            pts_multi = test_pts.unsqueeze(0)  # [1, 5, 3]
+
+                                            # ✅ FIX: Conditioning should be [B, C], NOT [B, N, C]!
+                                            # The implicit network will handle expansion to [B, N, C] internally
+                                            cond_multi = {
+                                                "frame": frame_latents,  # [1, 32] - 2D only!
+                                                "pose": frame_latents,   # [1, 32] - 2D only!
+                                            }
+
+                                            print(f"  Multi-point query: pts={pts_multi.shape}, cond['pose']={cond_multi['pose'].shape}")
+
+                                            try:
+                                                sdf_multi = obj_node.implicit_network(pts_multi, cond_multi)
+                                                print(f"  ✓ Multi-point SDF succeeded! Output shape: {sdf_multi.shape}")
+
+                                                # Extract SDF from output (first channel of 257)
+                                                if sdf_multi.shape[-1] > 1:
+                                                    sdf_vals = sdf_multi[..., 0]  # Get SDF channel only: [1, 5]
+                                                else:
+                                                    sdf_vals = sdf_multi.squeeze(-1)  # [1, 5]
+
+                                                print(f"  Multi-point SDF shape: {sdf_vals.shape}")
+                                                print(f"  Object SDF samples:")
+                                                for i in range(N):
+                                                    pt = test_pts[i].cpu().numpy()
+                                                    val = sdf_vals[0, i].item()
+                                                    print(f"    {pt}: {val:.4f}")
+
+                                                # Statistics
+                                                sdf_flat = sdf_vals.flatten()
+                                                mean_val = sdf_flat.mean().item()
+                                                std_val = sdf_flat.std().item()
+                                                min_val = sdf_flat.min().item()
+                                                max_val = sdf_flat.max().item()
+
+                                                print(f"  SDF stats: mean={mean_val:.4f}, std={std_val:.4f}, min={min_val:.4f}, max={max_val:.4f}")
+
+                                                if std_val < 0.01:
+                                                    print(f"    ⚠️  Near-constant SDF - object geometry degenerate!")
+                                                elif abs(mean_val) > 2.0:
+                                                    print(f"    ⚠️  Large SDF values - object outside bounds!")
+                                                else:
+                                                    print(f"    ✓ SDF values reasonable - object geometry exists!")
+
+                                            except Exception as e:
+                                                print(f"  ❌ Multi-point query failed: {e}")
+                                                import traceback
+                                                traceback.print_exc()
+                                        except Exception as e:
+                                            print(f"  ❌ Dict-conditioned query failed: {e}")
+                                            traceback.print_exc()
+                                    except Exception as e:
+                                        print(f"  ❌ SDF query error: {e}")
+                                        exc_type, exc_value, exc_tb = sys.exc_info()
+                                        print("  Traceback:")
+                                        for line in traceback.format_exception(exc_type, exc_value, exc_tb):
+                                            print(f"    {line.rstrip()}")
                                 else:
                                     print(f"  ❌ Object node missing frame_latent_encoder!")
                             else:
                                 print(f"  ❌ Object node has no implicit_network!")
-
                     except Exception as e:
                         print(f"  ❌ SDF query failed: {type(e).__name__}: {e}")
+                        print("  Full traceback:")
                         traceback.print_exc()
                 else:
                     print(f"  ❌ No object node in model!")
@@ -380,13 +461,15 @@ def main():
         # ('logs/70d907fbb/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint 30 epochs Refiend SDS
         # ('logs/482915ef4/checkpoints/last.ckpt', 23),  # Stage 2 Checkpoint 1-epoch on Official Checkpoint
         # ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
+        # ('logs/adfdabdc0/checkpoints/last.ckpt', 25),  # Stage 2 Checkpoint 70-epoch on Official Checkpoint
+        ('logs/afb17c622/checkpoints/last.ckpt', 26),  # Stage 2 Checkpoint 70-epoch(full SDS) on Official Checkpoint
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)
         # ('/home/fredcui/Projects/hold/code/logs/009c2e923/checkpoints/last.ckpt', 999), # hold_bottle1_itw
-        ('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 999), # hold_MC1_ho3d
+        # ('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 999), # hold_MC1_ho3d
     ]
 
     print("="*70)

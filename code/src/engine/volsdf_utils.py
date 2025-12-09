@@ -267,10 +267,37 @@ def sdf_func_with_deformer(deformer, sdf_fn, training, x, deform_info):
         # Original path: use deformer with tfs
         num_images = tfs.shape[0]
         x = x.view(num_images, -1, 3)
+        print(f"\n=== FULL DEFORMATION TRACE ===")
+        print(f"1. Input world points (x):")
+        print(f"   shape: {x.shape}")
+        print(f"   range: [{x.min():.4f}, {x.max():.4f}]")
+        print(f"   sample: {x[0, :3]}")
+        # ✅ NEW DEBUG: Check verts scale before deformer
+        print(f"\n[sdf_func] Before deformer - scale check:")
+        print(f"  x (query points) shape: {x.shape}")
+        print(f"  x min/max: {x.min().item():.4f} / {x.max().item():.4f}")
+        if verts is not None:
+            print(f"  verts (reference) shape: {verts.shape}")
+            print(f"  verts min/max: {verts.min().item():.4f} / {verts.max().item():.4f}")
+
+            # Check scale mismatch
+            x_scale = (x.max() - x.min()).item()
+            verts_scale = (verts.max() - verts.min()).item()
+            scale_ratio = x_scale / verts_scale
+            print(f"  Scale ratio (x/verts): {scale_ratio:.1f}x")
+            if scale_ratio > 5:
+                print(f"  ⚠️ SCALE MISMATCH! verts are {scale_ratio:.1f}x smaller than query points!")
+        else:
+            print(f"  verts: None")
         x_c, outlier_mask = deformer.forward(
             x, tfs, return_weights=False, inverse=True, verts=verts
         )
-
+        print(f"2. Canonical points (x_c):")
+        print(f"   shape: {x_c.shape}")
+        print(f"   range: [{x_c.min():.4f}, {x_c.max():.4f}]")
+        print(f"   sample: {x_c[0, :3]}")
+        print(f"3. Outlier check:")
+        print(f"   outliers: {outlier_mask.sum()}/{outlier_mask.numel()}")
         # ✅ NEW DEBUG 2: Check deformer output
         print(f"\n[sdf_func_with_deformer] After deformer.forward(inverse=True):")
         print(f"  x_c has_nan: {torch.isnan(x_c).any().item()}")
@@ -283,8 +310,12 @@ def sdf_func_with_deformer(deformer, sdf_fn, training, x, deform_info):
 
     # Continue with SDF computation
     output = sdf_fn(x_c, cond)
-
     sdf = output[:, :, 0:1]
+    print(f"4. SDF network output:")
+    print(f"   sdf range: [{sdf.min():.4f}, {sdf.max():.4f}]")
+    print(f"   inside points (SDF<0): {(sdf < 0).sum()}")
+    print(f"   near-surface (|SDF|<0.01): {(sdf.abs() < 0.01).sum()}")
+    print(f"=== END TRACE ===\n")
     feature = output[:, :, 1:]
 
     return sdf, x_c, feature

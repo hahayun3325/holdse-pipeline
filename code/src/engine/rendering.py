@@ -59,9 +59,13 @@ def render_color(
         time_code=time_code,
     )
 
-    print(f"[render_color] After render_fg_rgb:")
-    print(f"  fg_rgb has_nan: {torch.isnan(fg_rgb).any().item()}")
-    print(f"  fg_normal has_nan: {torch.isnan(fg_normal).any().item()}")
+    # In render_color function, after fg_rgb is computed (around line 60)
+    print(f"\n[render_color] Output analysis:")
+    print(f"  fg_rgb shape: {fg_rgb.shape}")
+    print(f"  fg_rgb min/max: {fg_rgb.min().item():.4f} / {fg_rgb.max().item():.4f}")
+    print(f"  fg_rgb mean: {fg_rgb.mean().item():.4f}")
+    if (fg_rgb == 0).all():
+        print(f"  ⚠️  fg_rgb is ALL ZEROS - object will be invisible!")
 
     fg_rgb = fg_rgb.reshape(-1, num_samples, 3)
     fg_normal = fg_normal.reshape(-1, num_samples, 3)

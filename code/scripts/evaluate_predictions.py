@@ -64,6 +64,65 @@ def evaluate_predictions(pred_path, compare_path=None, output_json=None):
         print(f"  ❌ Failed to load GT: {e}")
         return None
 
+    # ========== HANDLE SAMPLED PREDICTIONS ==========
+    if 'sampled_frame_indices' in data_pred and data_pred['sampled_frame_indices'] is not None:
+        sampled_indices = data_pred['sampled_frame_indices']
+        total_frames = data_pred['total_frames_in_sequence']
+
+        print(f"\n{'='*75}")
+        print(f"SAMPLED PREDICTIONS DETECTED")
+        print(f"{'='*75}")
+        print(f"  Prediction frames: {len(sampled_indices)} (sampled)")
+        print(f"  GT frames: {total_frames} (full sequence)")
+
+        # Show sampling pattern
+        if len(sampled_indices) <= 10:
+            print(f"  Sampled indices: {sampled_indices}")
+        else:
+            indices_str = f"{sampled_indices[:5].tolist()}...{sampled_indices[-3:].tolist()}"
+            print(f"  Sampled indices: {indices_str}")
+
+        # Convert to numpy array if torch tensor
+        if torch.is_tensor(sampled_indices):
+            sampled_indices = sampled_indices.cpu().numpy()
+        sampled_indices = sampled_indices.astype(int)
+
+        # Create new dictionary with subsetted GT (xdict doesn't allow reassignment)
+        print(f"\nAligning GT to sampled frames...")
+        aligned_count = 0
+        subsetted_gt = {}
+
+        for key in list(data_gt.keys()):
+            value = data_gt[key]
+
+            # Check if this is an array/tensor with frame dimension
+            if isinstance(value, (np.ndarray, torch.Tensor)) and len(value) > 0:
+                # Check if first dimension matches total frame count
+                if len(value) == total_frames:
+                    # Subset this array
+                    if torch.is_tensor(value):
+                        subsetted_gt[key] = value[sampled_indices]
+                    else:
+                        subsetted_gt[key] = value[sampled_indices]
+                    print(f"  ✓ {key}: {len(value)} → {len(subsetted_gt[key])} frames")
+                    aligned_count += 1
+                else:
+                    # Keep non-frame data as is
+                    subsetted_gt[key] = value
+            else:
+                # Keep non-array data as is
+                subsetted_gt[key] = value
+
+        # Replace data_gt with subsetted version
+        data_gt = subsetted_gt
+
+        print(f"{'='*75}")
+        print(f"✅ Aligned {aligned_count} GT arrays to {len(sampled_indices)} sampled frames")
+        print(f"{'='*75}\n")
+    else:
+        print(f"  ℹ️ Full sequence evaluation (no sampling)\n")
+    # ========== END FRAME ALIGNMENT ==========
+
     # Evaluation functions
     eval_fn_dict = {
         "mpjpe_ra_r": eval_m.eval_mpjpe_right,

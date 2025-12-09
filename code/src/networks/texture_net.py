@@ -217,18 +217,28 @@ class RenderingNet(nn.Module):
             elif num_dim > 0 and self.cond_dim == 0:
                 # Object case: has orient (3D) but NO pose linear layer
                 # The network was trained WITHOUT pose conditioning
-                # So we need to create a ZERO embedding of the EXPECTED size
-                # BUT: We need to match what the first linear layer expects!
-                # The rendering_input will be: [points(3) + normals(3) + body_pose(?) + features(37)]
-                # The lin0 expects 78 input features
-                # So: 3 + 3 + body_pose_size + 37 = 78
-                # Therefore: body_pose_size = 78 - 3 - 3 - 37 = 35
-                expected_input_size = self.lin0.weight.shape[1]  # 78
-                current_size = 3 + 3 + feature_vectors.shape[-1]  # 3(points) + 3(normals) + 37(features)
-                needed_body_pose_size = expected_input_size - current_size
+
+                # ✅ DEBUG: Check actual sizes
+                print(f"\n[RENDER NET] cond_dim=0 path:")
+                print(f"  points shape: {points.shape}")
+                print(f"  normals shape: {normals.shape if normals is not None else 'None'}")
+                print(f"  feature_vectors shape: {feature_vectors.shape}")
+                print(f"  lin0 expects input: {self.lin0.weight.shape[1]}")
+
+                expected_input_size = self.lin0.weight.shape[1]  # 302
+                current_size_without_pose = 3 + 3 + feature_vectors.shape[-1]
+                needed_body_pose_size = expected_input_size - current_size_without_pose
+
+                print(f"  Calculated needed_body_pose_size: {needed_body_pose_size}")
+
+                if needed_body_pose_size < 0:
+                    print(f"  ⚠️  ERROR: negative padding size! Feature vectors too large!")
+                    print(f"  Expected: {expected_input_size}, Got: {current_size_without_pose}")
+                    # Fallback: use zero padding
+                    needed_body_pose_size = 0
 
                 body_pose = torch.zeros(points.shape[0], needed_body_pose_size, device=points.device)
-                print(f"  body_pose zeroed: {body_pose.shape}")
+                print(f"  Created zero body_pose: {body_pose.shape}")
             else:
                 # No pose parameters at all
                 expected_input_size = self.lin0.weight.shape[1]
@@ -252,6 +262,9 @@ class RenderingNet(nn.Module):
         # After constructing rendering_input, add:
         print(f"\n[RENDER NET] rendering_input constructed:")
         print(f"  shape: {rendering_input.shape}")
+        print(f"  Expected by lin0: {self.lin0.weight.shape[1]}")
+        if rendering_input.shape[-1] != self.lin0.weight.shape[1]:
+            print(f"  ❌ MISMATCH! Difference: {rendering_input.shape[-1] - self.lin0.weight.shape[1]}")
         print(f"  has_nan: {torch.isnan(rendering_input).any().item()}")
         if torch.isnan(rendering_input).any():
             print(f"  ❌ rendering_input contains NaN before first layer!")

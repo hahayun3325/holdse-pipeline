@@ -62,18 +62,25 @@ class Node(nn.Module):
             print(f"[Node.forward] ⚠️ sample_dict['z_vals'] has NaN, replacing with 1.0")
             sample_dict['z_vals'] = torch.nan_to_num(sample_dict['z_vals'], nan=1.0)
 
-        # ✅ NEW DEBUG: Check inputs to sdf_func_with_deformer
-        print(f"\n[Node.forward] Before sdf_func_with_deformer:")
-        print(f"  sample_dict['points'] has_nan: {torch.isnan(sample_dict['points']).any().item()}")
+        # ✅ NEW DEBUG: Check deform_info structure
+        print(f"\n[Node.forward] {self.node_id} - About to call sdf_func_with_deformer:")
+        print(f"  points shape: {sample_dict['points'].shape}")
         if 'deform_info' in sample_dict and sample_dict['deform_info'] is not None:
-            # deform_info is typically a dict with 'tfs', 'cond', etc.
-            if isinstance(sample_dict['deform_info'], dict):
-                for k, v in sample_dict['deform_info'].items():
+            deform_info = sample_dict['deform_info']
+            print(f"  deform_info type: {type(deform_info)}")
+            if isinstance(deform_info, dict):
+                print(f"  deform_info keys: {list(deform_info.keys())}")
+                for k, v in deform_info.items():
                     if isinstance(v, torch.Tensor):
-                        print(f"  deform_info['{k}'] has_nan: {torch.isnan(v).any().item()}")
+                        print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+                    elif isinstance(v, dict):
+                        print(f"    {k}: (nested dict with keys {list(v.keys())})")
+                    else:
+                        print(f"    {k}: type={type(v)}")
             else:
-                print(f"  deform_info has_nan: {torch.isnan(sample_dict['deform_info']).any().item()}")
-
+                print(f"  deform_info: {deform_info}")
+        else:
+            print(f"  ⚠️  deform_info is None or missing!")
         # compute canonical SDF and features
         (
             sdf_output,
@@ -96,7 +103,18 @@ class Node(nn.Module):
             print(f"  ❌ canonical_points is NaN right after deformer!")
             # Also check input points
             print(f"  input points (sample_dict['points']) has_nan: {torch.isnan(sample_dict['points']).any().item()}")
+        # After line ~100 where sdf_output is computed
+        print(f"\n[Node.forward] {self.node_id} SDF statistics:")
+        print(f"  sdf_output shape: {sdf_output.shape}")
+        print(f"  sdf min/max: {sdf_output.min().item():.4f} / {sdf_output.max().item():.4f}")
+        print(f"  sdf mean: {sdf_output.mean().item():.4f}")
+        print(f"  sdf std: {sdf_output.std().item():.4f}")
 
+        # Count how many points are inside (SDF < 0) vs outside (SDF > 0)
+        inside_count = (sdf_output < 0).sum().item()
+        outside_count = (sdf_output > 0).sum().item()
+        print(f"  Points inside surface (SDF<0): {inside_count}")
+        print(f"  Points outside surface (SDF>0): {outside_count}")
         num_samples = sample_dict["z_vals"].shape[1]
         color, normal, semantics = self.render(
             sample_dict, num_samples, canonical_points, feature_vectors, time_code
@@ -105,6 +123,12 @@ class Node(nn.Module):
 
         num_samples = color.shape[1]
         density = self.density(sdf_output).view(-1, num_samples, 1)
+        print(f"\n[Node.forward] {self.node_id} Density statistics:")
+        print(f"  density shape: {density.shape}")
+        print(f"  density min/max: {density.min().item():.6f} / {density.max().item():.6f}")
+        print(f"  density mean: {density.mean().item():.6f}")
+        if density.max().item() < 0.001:
+            print(f"  ⚠️  Density is near-zero! Object will be invisible!")
         sample_dict["canonical_pts"] = canonical_points.view(
             sample_dict["batch_size"], sample_dict["num_pixels"], num_samples, 3
         )

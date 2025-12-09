@@ -25,7 +25,8 @@ class MANONode(Node):
         else:
             assert False
 
-        deformer = MANODeformer(max_dist=0.1, K=15, betas=betas, is_rhand=self.is_rhand)
+        # deformer = MANODeformer(max_dist=0.1, K=15, betas=betas, is_rhand=self.is_rhand)
+        deformer = MANODeformer(max_dist=2.0, K=15, betas=betas, is_rhand=self.is_rhand)
         server = MANOServer(betas=betas, is_rhand=self.is_rhand)
 
         from src.model.mano.params import MANOParams
@@ -132,6 +133,19 @@ class MANONode(Node):
             "tfs": output["tfs"],
             "verts": output["verts"],
         }
+
+        if 'tfs' in deform_info:
+            tfs = deform_info['tfs']
+            print(f"\n[MANO DEBUG] tfs validation:")
+            print(f"  tfs shape: {tfs.shape}")
+            print(f"  tfs has_nan: {torch.isnan(tfs).any().item()}")
+            print(f"  tfs min/max: {tfs.min().item():.4f} / {tfs.max().item():.4f}")
+
+            # Check if any transformation is identity (not deforming)
+            for joint_idx in range(min(5, tfs.shape[1])):  # Check first 5 joints
+                tf = tfs[0, joint_idx]
+                is_identity = torch.allclose(tf, torch.eye(4).cuda(), atol=1e-3)
+                print(f"  Joint {joint_idx} is identity: {is_identity}")
 
         z_vals = self.ray_sampler.get_z_vals(
             volsdf_utils.sdf_func_with_deformer,

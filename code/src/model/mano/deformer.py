@@ -33,6 +33,20 @@ class KNNDeformer:
         self.verts = output["verts"].detach()
         self.skin_weights = output["skin_weights"].detach()
 
+        # In KNNDeformer.__init__, after self.verts is computed
+        print(f"\n[Deformer Init] Canonical mesh statistics:")
+        print(f"  verts shape: {self.verts.shape}")
+        print(f"  verts min/max:")
+        print(f"    x: {self.verts[..., 0].min():.4f} / {self.verts[..., 0].max():.4f}")
+        print(f"    y: {self.verts[..., 1].min():.4f} / {self.verts[..., 1].max():.4f}")
+        print(f"    z: {self.verts[..., 2].min():.4f} / {self.verts[..., 2].max():.4f}")
+
+        # Check if fingers are included
+        if self.verts[..., 0].max() > 0.1:  # Fingers extend in +x
+            print(f"  ✓ Canonical mesh includes fingers")
+        else:
+            print(f"  ✗ Canonical mesh might be missing fingers!")
+
     def forward(self, x, tfs, return_weights=True, inverse=False, verts=None):
         """
         # transform query points from one space to another given tfs
@@ -74,6 +88,24 @@ class KNNDeformer:
             weights, outlier_mask = self.query_skinning_weights_multi(
                 x, verts=verts, skin_weights=skin_weights
             )
+
+        # In forward(), right after weights are computed
+        print(f"\n[Deformer] Skinning weights statistics:")
+        print(f"  weights shape: {weights.shape}")
+        print(f"  weights sum (should be ~1.0): {weights.sum(dim=-1).mean():.4f}")
+        print(f"  outlier_mask sum (how many points are outliers): {outlier_mask.sum()}")
+        # ✅ NEW DEBUG
+        print(f"\n[Deformer] Query results for call #{len(_forward_call_stack)}:")
+        print(f"  Input points: {x.shape}")
+        print(f"  Found weights: {weights.shape}")
+        print(f"  Outliers: {outlier_mask.sum().item()} / {outlier_mask.numel()}")
+        # Check if many points are outliers (no nearby vertices)
+        outlier_ratio = outlier_mask.sum().float() / outlier_mask.numel()
+        if outlier_ratio > 0.1:
+            print(f"  ⚠️  {outlier_ratio*100:.1f}% points are FAR from canonical mesh!")
+            print(f"  max_dist threshold: {self.max_dist}")
+            print(f"  Consider increasing max_dist")
+
         if return_weights:
             return weights
         x_transformed = skinning(x, weights, tfs, inverse=inverse)

@@ -16,7 +16,7 @@ phase3:
 
   grid_resolution: 24
   phase3_start_iter: 0
-  phase3_end_iter: 60000
+  phase3_end_iter: 999999 # SDS Forever(changed from 60000, which means 30 epochs)
 
   sds:
     diffusion_steps: 1000
