@@ -12,7 +12,7 @@ from src.model.obj.server import ObjectServer
 from src.model.obj.specs import object_specs
 from src.model.obj.params import ObjectParams
 import src.hold.hold_utils as hold_utils
-
+from loguru import logger
 
 class ObjectNode(Node):
     def __init__(self, args, opt, sdf_bounding_sphere, node_id):
@@ -29,7 +29,15 @@ class ObjectNode(Node):
             },
             node_id,
         )
-        params.load_params(args.case)
+
+        # ========== CONDITIONAL LOADING ==========
+        # Only load from dataset if not loading from checkpoint
+        if getattr(args, 'loading_from_checkpoint', False):
+            logger.info(f"[ObjectNode:{node_id}] Skipping load_params - will preserve checkpoint values")
+            params.preserve_checkpoint_values()
+        else:
+            params.load_params(args.case)
+        # ==========================================
         super(ObjectNode, self).__init__(
             args,
             opt,

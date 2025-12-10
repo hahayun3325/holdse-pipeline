@@ -90,7 +90,7 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=No
     
     # Setup args
     class Args:
-        case = 'hold_MC1_ho3d'
+        case = 'hold_MC1_ho3d' # hold_GPMF12_ho3d
         n_images = 71  # Placeholder, will be overwritten
         num_sample = 2048
         infer_ckpt = checkpoint_path
@@ -462,9 +462,13 @@ def main():
         # ('logs/482915ef4/checkpoints/last.ckpt', 23),  # Stage 2 Checkpoint 1-epoch on Official Checkpoint
         # ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
         # ('logs/adfdabdc0/checkpoints/last.ckpt', 25),  # Stage 2 Checkpoint 70-epoch on Official Checkpoint
-        ('logs/afb17c622/checkpoints/last.ckpt', 26),  # Stage 2 Checkpoint 70-epoch(full SDS) on Official Checkpoint
+        # ('logs/afb17c622/checkpoints/last.ckpt', 26),  # Stage 2 Checkpoint 70-epoch(full SDS) on Official Checkpoint
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
+        # ('logs/8ceebe9d0/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint 30-epoch
+        ('logs/ac71c88b7/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint 40-epoch
+        # hold_GPMF12_ho3d case
+        # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
         # GHOP Official Checkpoint
         # ('/home/fredcui/Projects/holdse/code/checkpoints/ghop/last.ckpt', 100),
         # HOLD Official Checkpoint(Case hold_bottle1_itw)

@@ -1,0 +1,261 @@
+# ================================================================
+# Stage 3: Full Pipeline (Phase 3 + Phase 4 + Phase 5)
+# Training from Stage 2 Checkpoint
+# ================================================================
+
+# ================================================================
+# PHASE 3: SDS GUIDANCE (Carry over from Stage 2)
+# ================================================================
+phase3:
+  enabled: true
+
+  # GHOP Checkpoints - MUST MATCH Stage 2
+  ghop:
+    config_path: checkpoints/ghop/config.yaml
+    device: cuda
+
+    # Use same checkpoint paths as Stage 2
+    unet_checkpoint: checkpoints/ghop/last.ckpt
+    unified_checkpoint: checkpoints/ghop/last.ckpt
+    vqvae_checkpoint: checkpoints/ghop/last.ckpt
+
+    unet_use_pretrained: true
+    vqvae_use_pretrained: true
+
+  # Grid settings - MUST MATCH Stage 2
+  grid_resolution: 24
+  spatial_lim: 1.5
+
+  # Phase 3 Boundaries - CHANGED FOR STAGE 3
+  phase3_start_iter: 0          # Start immediately (warmup already done in Stage 2)
+  phase3_end_iter: 500          # End before Phase 4 starts (CHANGED from 999999)
+
+  # SDS Configuration - KEEP FROM STAGE 2
+  sds:
+    diffusion_steps: 1000
+    guidance_scale: 3.0
+    max_step_ratio: 0.98
+    min_step_ratio: 0.02
+    noise_schedule: linear
+    prediction_respacing: 50
+
+  sds_iters: 1                  # Compute SDS every step
+  use_modular_init: true        # Use modular initialization
+
+  # Weight - KEEP GHOP-VALIDATED VALUE
+  w_sds: 10.0                   # Matches GHOP graspsyn.py Lines 166-167
+
+  # Warmup - REDUCED (already warmed up in Stage 2)
+  warmup_iters: 0               # CHANGED: No warmup needed (Stage 2 already trained)
+
+# ================================================================
+# PHASE 4: CONTACT REFINEMENT (NEW FOR STAGE 3)
+# ================================================================
+phase4:
+  enabled: true
+
+  # Phase boundaries
+  contact_start_iter: 500       # Start after Phase 3 ends
+  contact_end_iter: 1500        # Continue through training
+  contact_warmup_iters: 100     # Gradual weight ramp-up
+
+  # Contact loss weights - FROM GHOP graspsyn.py Lines 238-243
+  w_contact: 1.0                # Base contact weight
+  w_penetration: 100.0          # Strong penalty for collisions (10x attraction)
+  w_attraction: 10.0            # Pull contact zones to surface
+  w_damping: 0.0                # Disabled (not needed for single frames)
+
+  # Mesh extraction settings
+  mesh_resolution: 128          # Marching cubes resolution
+  mesh_padding: 0.1             # Padding around object bounds
+
+  # Logging
+  log_contact_every: 10         # Log contact metrics every 10 steps
+
+# ================================================================
+# PHASE 5: TEMPORAL CONSISTENCY (NEW FOR STAGE 3)
+# ================================================================
+phase5:
+  enabled: true
+
+  # Phase boundaries
+  phase5_start_iter: 600        # Start after Phase 4 has stabilized
+
+  # Scheduler configuration
+  use_scheduler: true           # Enable progressive weight scheduling
+  scheduler:
+    total_iterations: 2000      # Total training iterations
+    warmup_iters: 0             # No warmup (Stage 2 already done)
+    phase3_start: 0             # Phase 3 starts immediately
+    phase4_start: 500           # Phase 4 starts at 500
+    phase5_start: 600           # Phase 5 starts at 600
+    finetune_start: 1500        # Fine-tuning begins at 1500
+
+  # Temporal loss weights - CONSERVATIVE INITIAL VALUES
+  w_temporal: 0.01              # Base temporal weight (will be scaled by scheduler)
+  w_velocity: 0.005             # Velocity smoothness
+  w_acceleration: 0.005         # Acceleration smoothness
+  w_camera_motion: 0.001        # Camera-aware consistency
+
+  # Adaptive contact zones
+  adaptive_contacts:
+    enabled: true               # Enable dynamic contact detection
+    k_neighbors: 5              # K-NN search parameter
+    contact_threshold: 0.02     # 2cm proximity threshold
+    update_frequency: 10        # Update zones every 10 steps
+    cache_size: 100             # LRU cache for efficiency
+
+  # Temporal history
+  temporal:
+    history_size: 10            # Track last 10 poses per sequence
+    velocity_weight: 1.0        # Relative velocity importance
+    acceleration_weight: 0.5    # Relative acceleration importance
+
+  # Logging
+  log_phase5_every: 10          # Log temporal metrics every 10 steps
+
+# ================================================================
+# SCENE CONFIGURATION (KEEP FROM STAGE 2)
+# ================================================================
+scene_bounding_sphere: 6.0
+
+# ================================================================
+# MODEL CONFIGURATION (MUST MATCH STAGE 2 CHECKPOINT)
+# ================================================================
+model:
+  # Density configuration
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  # Ray sampler configuration
+  ray_sampler:
+    near: 0.0
+    N_samples: 64
+    N_samples_eval: 128
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 10
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+    add_tiny: 0.000001
+
+  # Hand implicit network
+  implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: pose
+
+  # Hand rendering network
+  rendering_network:
+    feature_vector_size: 256
+    mode: pose
+    d_in: 270
+    d_out: 3
+    dims: [256, 256, 256, 256]
+    weight_norm: true
+    multires_view: 0
+    d_implicit_features: 256
+
+  # Background implicit network
+  bg_implicit_network:
+    feature_vector_size: 256
+    d_in: 4
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: none
+    bias: 0.0
+    skip_in: [4]
+    weight_norm: false
+    multires: 10
+    cond: frame
+    dim_frame_encoding: 32
+
+  # Background rendering network
+  bg_rendering_network:
+    feature_vector_size: 256
+    mode: nerf_frame_encoding
+    d_in: 259
+    d_out: 3
+    dims: [128]
+    weight_norm: false
+    multires_view: 4
+    dim_frame_encoding: 32
+    multires_xyz: 42
+    d_implicit_features: 171
+
+# ================================================================
+# DATASET CONFIGURATION (KEEP FROM STAGE 2)
+# ================================================================
+dataset:
+  dataset_path: data/hold_MC1_ho3d/build
+  seq_name: hold_MC1_ho3d
+
+  train:
+    type: train
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 4
+
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 512
+    enabled: false
+
+# ================================================================
+# LOSS CONFIGURATION (UPDATED FOR STAGE 3)
+# ================================================================
+loss:
+  w_rgb: 1.0                    # Keep base RGB loss
+  w_mask: 0.1                   # Keep mask loss
+  w_eikonal: 1.0                # Keep SDF regularization
+  w_smooth: 0.005               # Keep smoothness
+  w_temporal: 1.0               # NEW: Temporal base weight
+  rgb_loss_type: "l1"
+
+# ================================================================
+# TRAINING CONFIGURATION (UPDATED FOR STAGE 3)
+# ================================================================
+training:
+  num_epochs: 1                 # Single epoch for full pipeline
+  max_steps: 2000               # Match scheduler total_iterations
+  eval_every_epoch: 999
+  log_every: 10
+  gradient_clip: 1.0
+
+# ================================================================
+# OPTIMIZER CONFIGURATION (KEEP FROM STAGE 2)
+# ================================================================
+optimizer:
+  lr: 0.0001                    # Same learning rate as Stage 2
+  type: "adam"
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+# ================================================================
+# EXPERIMENT CONFIGURATION
+# ================================================================
+experiment:
+  name: 'stage3_full_pipeline_from_stage2'
+
+# ================================================================
+# CHECKPOINT LOADING (CRITICAL FOR STAGE 3)
+# ================================================================
+checkpoint:
+  # Load Stage 2 trained checkpoint
+  resume_from: 'outputs/stage2_official_cb20a1702_FIXED/checkpoints/last.ckpt'
+  load_optimizer: false         # Start with fresh optimizer state
+  load_scheduler: false         # Use new Phase 5 scheduler

@@ -117,13 +117,13 @@ echo ""
 
 python train.py \
     --config "$CONFIG" \
-    --case "hold_MC1_ho3d" \
+    --case "hold_GPMF12_ho3d" \
     --num_epoch $TARGET_EPOCHS \
     --infer_ckpt "$STAGE2_CKPT" \
     --no-comet \
     --gpu_id 0 \
     --no-pin-memory
-
+#     --case "hold_MC1_ho3d" \
 # ================================================================
 # Post-Training: Summary
 # ================================================================

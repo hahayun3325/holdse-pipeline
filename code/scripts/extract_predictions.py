@@ -145,6 +145,11 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
         agent_id = -1
         offset = 1
         num_workers = 0
+        # ========== CHECKPOINT PRESERVATION FLAG ==========
+        # This tells MANONode/ObjectNode to preserve checkpoint params
+        # instead of loading from dataset
+        loading_from_checkpoint = True
+        # ==================================================
 
     args = Args()
 
@@ -594,6 +599,7 @@ python scripts/extract_predictions.py \
     --config confs/stage1_hold_MC1_ho3d_8layer_implicit.yaml \
     --output logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_predictions_$(date +%Y%m%d_%H%M%S).pkl \
     2>&1 | tee logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_$(date +%Y%m%d_%H%M%S).log
+
 
 # Monitor the progress in a separate terminal
 tail -f logs/evaluation_results/MC1_stage1_e200_8layer_implicitnet_extraction_debug_fresh.log | grep "Extracting:"

@@ -16,6 +16,10 @@ class GenericParams(nn.Module):
 
         self.param_names = self.params_dim.keys()
 
+        # ========== ADD THIS FLAG ==========
+        self._preserve_checkpoint = False
+        # ===================================
+
         # init variables based on dim specs
         for param_name in self.param_names:
             if param_name == "betas":
@@ -169,6 +173,11 @@ class GenericParams(nn.Module):
 
     def load_params(self, case):
         raise NotImplementedError
+
+    def preserve_checkpoint_values(self):
+        """Mark that checkpoint values should be preserved"""
+        self._preserve_checkpoint = True
+        logger.info(f"[{self.node_id}] Checkpoint preservation enabled")
 
     def defrost(self, keys=None):
         if keys is None:

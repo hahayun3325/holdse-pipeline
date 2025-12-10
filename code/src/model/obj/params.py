@@ -7,8 +7,13 @@ class ObjectParams(GenericParams):
         return params
 
     def load_params(self, case):
-        import os
+        # ========== ADD THIS CHECK ==========
+        if self._preserve_checkpoint:
+            logger.info(f"[ObjectParams:{self.node_id}] Skipping load_params - preserving checkpoint values")
+            return
+        # ====================================
 
+        import os
         import numpy as np
         import torch
 

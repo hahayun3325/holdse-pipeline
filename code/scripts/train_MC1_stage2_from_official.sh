@@ -5,10 +5,10 @@
 
 set -e
 
-#OFFICIAL_CKPT="/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt"
-#SEQ_NAME="hold_MC1_ho3d"
-OFFICIAL_CKPT="/home/fredcui/Projects/hold/code/logs/00bc6dc5e/checkpoints/last.ckpt"
-SEQ_NAME="hold_GPMF12_ho3d"
+OFFICIAL_CKPT="/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt"
+SEQ_NAME="hold_MC1_ho3d"
+#OFFICIAL_CKPT="/home/fredcui/Projects/hold/code/logs/00bc6dc5e/checkpoints/last.ckpt"
+#SEQ_NAME="hold_GPMF12_ho3d"
 STAGE2_CONFIG="confs/stage2_hold_MC1_ho3d_sds_from_official.yaml"
 
 echo "=================================================="
@@ -33,7 +33,7 @@ echo
 python train.py \
     --config $STAGE2_CONFIG \
     --load_ckpt $OFFICIAL_CKPT \
-    --case hold_GPMF12_ho3d \
+    --case hold_MC1_ho3d \
     --no-comet \
     --gpu_id 0 \
     --num_epoch 10 \

@@ -78,6 +78,12 @@ class MANOParams(GenericParams):
         return params
 
     def load_params(self, case):
+        # ========== ADD THIS CHECK ==========
+        if self._preserve_checkpoint:
+            logger.info(f"[MANOParams:{self.node_id}] Skipping load_params - preserving checkpoint values")
+            return
+        # ====================================
+
         # load parameter from preprocessing
         params_h = {param_name: [] for param_name in self.param_names}
         data_root = os.path.join("./data", case, f"build/data.npy")
@@ -105,9 +111,6 @@ class MANOParams(GenericParams):
             dtype=torch.float32,
         )
 
-        # ================================================================
-        # 🔥 FIX: Change requires_grad=False to True
-        # ================================================================
         for param_name in params_h.keys():
             self.init_parameters(
                 param_name,

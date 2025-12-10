@@ -12,6 +12,7 @@ from src.utils.meshing import generate_mesh
 from src.model.mano.deformer import MANODeformer
 from src.model.mano.server import MANOServer
 import src.hold.hold_utils as hold_utils
+from loguru import logger
 
 
 class MANONode(Node):
@@ -42,7 +43,15 @@ class MANONode(Node):
             },
             node_id,
         )
-        params.load_params(args.case)
+
+        # ========== CONDITIONAL LOADING ==========
+        # Only load from dataset if not loading from checkpoint
+        if getattr(args, 'loading_from_checkpoint', False):
+            logger.info(f"[MANONode:{node_id}] Skipping load_params - will preserve checkpoint values")
+            params.preserve_checkpoint_values()
+        else:
+            params.load_params(args.case)
+        # ==========================================
         super(MANONode, self).__init__(
             args,
             opt,

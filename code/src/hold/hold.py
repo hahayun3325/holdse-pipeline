@@ -1877,11 +1877,16 @@ class HOLD(pl.LightningModule):
                     phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
                                     self.global_step >= self.phase5_start_iter)
 
-                    # Always detach contact loss to ensure consistent graph structure
-                    weighted_contact_detached = weighted_contact_loss.detach()
-                    loss_output["loss"] = loss_output["loss"] + weighted_contact_detached
-                    logger.debug(f"[Phase 4] Detached contact loss (consistent strategy)")
-                    loss_output['contact_loss'] = weighted_contact_detached
+                    # OPTION A: Remove detachment for direct gradient optimization
+                    # Contact loss needs to directly optimize hand pose parameters
+                    loss_output["loss"] = loss_output["loss"] + weighted_contact_loss
+                    logger.debug(f"[Phase 4] Contact loss with gradients (Option A strategy)")
+                    loss_output['contact_loss'] = weighted_contact_loss  # Keep gradients
+
+                    # Add gradient monitoring for validation
+                    if self.global_step % 100 == 0:
+                        contact_grad_norm = weighted_contact_loss.grad.norm() if weighted_contact_loss.grad is not None else 0.0
+                        logger.info(f"[Phase 4 Grad Check] contact_loss grad_norm: {contact_grad_norm:.6f}")
 
                     # Log metrics
                     self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
@@ -2092,11 +2097,17 @@ class HOLD(pl.LightningModule):
                     weighted_temporal = temporal_loss * loss_weights['temporal'] * self.w_temporal
 
                     # =============================================================
-                    # Step 7: Add to total loss (detached for consistent graph)
+                    # Step 7: Add to total loss (OPTION A: with gradients)
                     # =============================================================
-                    weighted_temporal_detached = weighted_temporal.detach()
-                    loss_output['loss'] = loss_output['loss'] + weighted_temporal_detached
-                    loss_output['temporal_loss'] = weighted_temporal_detached  # Keep non-detached for logging
+                    # OPTION A: Remove detachment for direct gradient optimization
+                    # Temporal loss needs to directly optimize hand pose smoothness
+                    loss_output['loss'] = loss_output['loss'] + weighted_temporal
+                    loss_output['temporal_loss'] = weighted_temporal  # Keep gradients
+
+                    # Add gradient monitoring for validation
+                    if self.global_step % 100 == 0:
+                        temporal_grad_norm = weighted_temporal.grad.norm() if weighted_temporal.grad is not None else 0.0
+                        logger.info(f"[Phase 5 Grad Check] temporal_loss grad_norm: {temporal_grad_norm:.6f}")
 
                     # =============================================================
                     # Step 8: Log temporal metrics
@@ -2154,6 +2165,37 @@ class HOLD(pl.LightningModule):
         # ====================================================================
         final_loss = loss_output.get("loss",
                                      torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True))
+
+        # ====================================================================
+        # ✅ OPTION A VALIDATION: Monitor all gradient components
+        # ====================================================================
+        if self.global_step % 100 == 0 and self.global_step > 0:
+            grad_components = {
+                'rgb': loss_output.get('loss/rgb', None),
+                'ghop': loss_output.get('ghop_loss', None),
+                'contact': loss_output.get('contact_loss', None),
+                'temporal': loss_output.get('temporal_loss', None),
+            }
+
+            logger.info(f"\n[OPTION A GRAD CHECK - Step {self.global_step}]")
+            for name, loss_val in grad_components.items():
+                if loss_val is not None and isinstance(loss_val, torch.Tensor):
+                    has_grad = loss_val.requires_grad
+                    grad_norm = loss_val.grad.norm().item() if loss_val.grad is not None else 0.0
+                    logger.info(f"  {name:10s}: requires_grad={has_grad}, grad_norm={grad_norm:.6f}")
+
+            # Check for gradient imbalance (contact >> temporal)
+            contact_grad = grad_components.get('contact')
+            temporal_grad = grad_components.get('temporal')
+
+            if contact_grad is not None and temporal_grad is not None:
+                if contact_grad.grad is not None and temporal_grad.grad is not None:
+                    ratio = contact_grad.grad.norm() / max(temporal_grad.grad.norm(), 1e-8)
+                    if ratio > 100:
+                        logger.warning(
+                            f"  ⚠️  GRADIENT IMBALANCE: contact/temporal = {ratio:.1f}x. "
+                            f"Consider reducing w_contact or increasing w_temporal."
+                        )
 
         # Safety check: Ensure loss_output['loss'] exists and is valid
         if "loss" not in loss_output:
@@ -4081,18 +4123,37 @@ class HOLD(pl.LightningModule):
         # ================================================================
         # CRITICAL FIX: Get parameters from nodes and add to batch
         # ================================================================
-        for node in self.model.nodes.values():
-            params = node.params(batch["idx"])  # Returns dict with all parameters
+        # Try to find nodes attribute in different locations
+        nodes = None
+        if hasattr(self, 'nodes'):
+            nodes = self.nodes
+        elif hasattr(self.model, 'nodes'):
+            nodes = self.model.nodes
+        elif hasattr(self, '_modules') and 'model' in self._modules:
+            if hasattr(self._modules['model'], 'nodes'):
+                nodes = self._modules['model'].nodes
 
-            # params already contains full_pose, betas, etc.
-            # Use dict methods to avoid xdict's duplicate key check
-            for key, value in params.items():
-                if key in batch:
-                    # Key already exists, use underlying dict to overwrite
-                    dict.__setitem__(batch, key, value)
-                else:
-                    # New key, can use normal assignment
-                    batch[key] = value
+        if nodes is not None:
+            from loguru import logger
+            logger.info(f"[HOLD.inference_step] Found nodes at correct location, fetching checkpoint params")
+            for node in nodes.values():
+                params = node.params(batch["idx"])  # Returns dict with all parameters
+
+                # params already contains full_pose, betas, etc.
+                # Use dict methods to avoid xdict's duplicate key check
+                for key, value in params.items():
+                    if key in batch:
+                        # Key already exists, use underlying dict to overwrite
+                        dict.__setitem__(batch, key, value)
+                    else:
+                        # New key, can use normal assignment
+                        batch[key] = value
+            logger.info(f"[HOLD.inference_step] Successfully loaded checkpoint params into batch")
+        else:
+            from loguru import logger
+            logger.warning("[HOLD.inference_step] ⚠️ Could not find nodes attribute!")
+            logger.warning("  Checking if checkpoint preservation is enabled...")
+            logger.warning("  If not, will use batch GT instead of checkpoint params")
         # ================================================================
 
         output = xdict()
