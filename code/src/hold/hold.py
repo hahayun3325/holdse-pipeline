@@ -187,28 +187,38 @@ class HOLD(pl.LightningModule):
                 unet_use_pretrained = phase3_cfg.ghop.get('unet_use_pretrained', False)
 
                 # ============================================================
-                # CRITICAL FIX: Determine checkpoint path with priority
+                # CRITICAL FIX: Use separate checkpoint paths for VQ-VAE and U-Net
                 # ============================================================
-                # Priority 1: Command-line args (for rendering)
-                # Priority 2: Config file (for training)
-                # Priority 3: Default path (for backward compatibility)
+                # Priority 1: Command-line args (for inference/rendering)
+                # Priority 2: Config file (for training - SEPARATE paths)
+                # Priority 3: Default unified path (for backward compatibility)
 
                 if hasattr(args, 'infer_ckpt') and args.infer_ckpt:
+                    # Command-line override (use same checkpoint for both)
+                    vqvae_checkpoint = args.infer_ckpt
+                    unet_checkpoint = args.infer_ckpt
                     model_checkpoint = args.infer_ckpt
-                    logger.info(f"[GHOP] Using checkpoint from args.infer_ckpt: {model_checkpoint}")
+                    logger.info(f"[GHOP] Using checkpoint from args.infer_ckpt: {args.infer_ckpt}")
                 elif hasattr(args, 'ckpt_p') and args.ckpt_p:
+                    # Legacy command-line override
+                    vqvae_checkpoint = args.ckpt_p
+                    unet_checkpoint = args.ckpt_p
                     model_checkpoint = args.ckpt_p
-                    logger.info(f"[GHOP] Using checkpoint from args.ckpt_p: {model_checkpoint}")
+                    logger.info(f"[GHOP] Using checkpoint from args.ckpt_p: {args.ckpt_p}")
                 else:
+                    # Use separate paths from config (recommended for training)
+                    vqvae_checkpoint = phase3_cfg.ghop.get('vqvae_checkpoint', 'checkpoints/ghop/last.ckpt')
+                    unet_checkpoint = phase3_cfg.ghop.get('unet_checkpoint', 'checkpoints/ghop/last.ckpt')
                     model_checkpoint = phase3_cfg.ghop.get('model_checkpoint', 'checkpoints/ghop/last.ckpt')
-                    logger.info(f"[GHOP] Using config/default checkpoint: {model_checkpoint}")
+                    logger.info(f"[GHOP] Using VQ-VAE checkpoint from config: {vqvae_checkpoint}")
+                    logger.info(f"[GHOP] Using U-Net checkpoint from config: {unet_checkpoint}")
 
                 # Determine if we need the checkpoint file
                 need_checkpoint = vqvae_use_pretrained or unet_use_pretrained
 
                 if need_checkpoint:
                     # Only check file existence if we're loading pretrained weights
-                    logger.info(f"Loading unified GHOP checkpoint from: {model_checkpoint}")
+                    logger.info(f"Loading unified GHOP checkpoint from: {unet_checkpoint}")
                     logger.info("  This checkpoint contains BOTH VQ-VAE and U-Net components")
 
                     # Verify checkpoint exists
@@ -266,13 +276,13 @@ class HOLD(pl.LightningModule):
                 # ============================================================
                 logger.info("Initializing VQ-VAE...")
                 self.vqvae = GHOPVQVAEWrapper(
-                    vqvae_ckpt_path=model_checkpoint if vqvae_use_pretrained else None,
+                    vqvae_ckpt_path=vqvae_checkpoint if vqvae_use_pretrained else None,
                     device=device,
                     use_hand_field=phase3_cfg.get('use_hand_field', True)
                 )
 
                 if vqvae_use_pretrained:
-                    logger.info("✓ VQ-VAE initialized with pretrained weights")
+                    logger.info(f"✓ VQ-VAE initialized with pretrained weights from: {vqvae_checkpoint}")
                 else:
                     logger.info("✓ VQ-VAE initialized with RANDOM weights")
 
@@ -281,9 +291,15 @@ class HOLD(pl.LightningModule):
                 # ============================================================
                 logger.info("Initializing U-Net...")
                 self.unet = GHOP3DUNetWrapper(
-                    unet_ckpt_path=model_checkpoint if unet_use_pretrained else None,
+                    unet_ckpt_path=unet_checkpoint if unet_use_pretrained else None,
                     device=device
                 )
+
+                if unet_use_pretrained:
+                    logger.info(f"✓ U-Net initialized with pretrained weights from: {unet_checkpoint}")
+                else:
+                    logger.info("✓ U-Net initialized with RANDOM weights")
+
 
                 if unet_use_pretrained:
                     logger.info("✓ U-Net initialized with pretrained weights")
@@ -427,6 +443,7 @@ class HOLD(pl.LightningModule):
             # Store Phase 3 Hyperparameters for Training Step
             # ================================================================
             self.phase3_start_iter = phase3_cfg.get('phase3_start_iter', 0)
+            self.phase3_end_iter = phase3_cfg.get('phase3_end_iter', 2000)  # ← ADD THIS LINE
             self.warmup_iters = phase3_cfg.get('warmup_iters', 0)
             self.sds_iters = phase3_cfg.get('sds_iters', 500)
             self.w_sds = phase3_cfg.get('w_sds', 5000.0)
@@ -507,7 +524,7 @@ class HOLD(pl.LightningModule):
             if not self.phase3_enabled:
                 logger.error("[Phase 4] Cannot enable Phase 4 without Phase 3. Skipping...")
                 self.phase4_enabled = False
-            elif self.vqvae is None or self.hand_field_builder is None:  # FIX: Consistent naming
+            elif self.vqvae is None or self.hand_field_builder is None:
                 logger.error(
                     "[Phase 4] Cannot enable Phase 4 without modular Phase 3 initialization.\n"
                     "Set phase3.use_modular_init=true in config."
@@ -527,15 +544,20 @@ class HOLD(pl.LightningModule):
                 # Get device
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-                # Initialize mesh extractor
+                # ============================================================
+                # Initialize Mesh Extractor
+                # ============================================================
                 logger.info("Initializing GHOP Mesh Extractor...")
+                self.mesh_resolution = phase4_cfg.get('mesh_resolution', 128)
                 self.mesh_extractor = GHOPMeshExtractor(
                     vqvae_wrapper=self.vqvae,
-                    resolution=phase4_cfg.get('mesh_resolution', 128)
+                    resolution=self.mesh_resolution
                 )
-                logger.info(f"✓ Mesh extractor initialized (resolution: {phase4_cfg.get('mesh_resolution', 128)}³)")
+                logger.info(f"✓ Mesh extractor initialized (resolution: {self.mesh_resolution}³)")
 
-                # Initialize contact refiner
+                # ============================================================
+                # Initialize Contact Refiner
+                # ============================================================
                 logger.info("Initializing GHOP Contact Refinement...")
                 self.contact_refiner = GHOPContactRefinement(
                     contact_thresh=phase4_cfg.get('contact_thresh', 0.01),
@@ -544,52 +566,57 @@ class HOLD(pl.LightningModule):
                 )
                 logger.info("✓ Contact refiner initialized")
 
-                # Store Phase 4 hyperparameters
+                # ============================================================
+                # ✅ FIX: Set Phase 4 Boundaries (CONSOLIDATED - NO DUPLICATES)
+                # ============================================================
+                # Iteration boundaries
                 self.contact_start_iter = phase4_cfg.get('contact_start_iter', 500)
-                self.w_contact = phase4_cfg.get('w_contact', 10.0)
-                self.mesh_resolution = phase4_cfg.get('mesh_resolution', 128)
+                self.contact_end_iter = phase4_cfg.get('contact_end_iter', 999999)
                 self.contact_warmup_iters = phase4_cfg.get('contact_warmup_iters', 100)
-                self.log_contact_every = phase4_cfg.get('log_contact_every', 50)
 
-                # ✅ FIX 1: Store contact_duration and calculate end iteration
-                self.contact_duration = phase4_cfg.get('contact_duration', 100)
-                self.contact_end_iter = self.contact_start_iter + self.contact_duration
+                # Calculate duration from boundaries (for logging/reference only)
+                self.contact_duration = self.contact_end_iter - self.contact_start_iter
 
-                # Enable Phase 4 flag
+                # Loss weights
+                self.w_contact = phase4_cfg.get('w_contact', 1.0)
+
+                # Logging frequency
+                self.log_contact_every = phase4_cfg.get('log_contact_every', 10)
+
+                # Enable Phase 4
                 self.phase4_enabled = True
 
-                logger.info(
-                    f"\n✓ Phase 4 initialized successfully:\n"
-                    f"   - Contact start iteration: {self.contact_start_iter}\n"
-                    f"   - Contact duration: {self.contact_duration} iterations\n"
-                    f"   - Contact end iteration: {self.contact_end_iter}\n"
-                    f"   - Contact loss weight: {self.w_contact}\n"
-                    f"   - Mesh resolution: {self.mesh_resolution}³ voxels\n"
-                    f"   - Contact threshold: {phase4_cfg.get('contact_thresh', 0.01)}m\n"
-                    f"   - Collision threshold: {phase4_cfg.get('collision_thresh', 0.005)}m\n"
-                    f"   - Warmup iterations: {self.contact_warmup_iters}"
-                    f"   - Active window: steps"
-                )
+                # Log configuration
+                logger.info("\n✓ Phase 4 Boundaries Set:")
+                logger.info(f"    - contact_start_iter:    {self.contact_start_iter}")
+                logger.info(f"    - contact_end_iter:      {self.contact_end_iter}")
+                logger.info(f"    - contact_duration:      {self.contact_duration} iterations")
+                logger.info(f"    - contact_warmup_iters:  {self.contact_warmup_iters}")
+                logger.info(f"    - w_contact:             {self.w_contact}")
+                logger.info(f"    - log_contact_every:     {self.log_contact_every}")
+                logger.info(f"    - mesh_resolution:       {self.mesh_resolution}³ voxels")
+                logger.info(f"    - contact_thresh:        {phase4_cfg.get('contact_thresh', 0.01)}m")
+                logger.info(f"    - collision_thresh:      {phase4_cfg.get('collision_thresh', 0.005)}m")
+                logger.info(f"    - Active window:         steps [{self.contact_start_iter}, {self.contact_end_iter})")
                 logger.info("=" * 70 + "\n")
         else:
             # ================================================================
-            # ✅ CRITICAL FIX: Initialize all Phase 4 attributes
-            # Even when disabled, code may check these attributes
+            # Phase 4 Disabled - Initialize attributes to safe defaults
             # ================================================================
             self.phase4_enabled = False
 
-            # Initialize contact iteration attributes (set to never activate)
+            # Set iteration boundaries to never activate
             self.contact_start_iter = float('inf')
             self.contact_end_iter = float('inf')
             self.contact_duration = 0
             self.contact_warmup_iters = 0
 
-            # Initialize weight and resolution attributes
+            # Set weights and parameters
             self.w_contact = 0.0
             self.mesh_resolution = 128
             self.log_contact_every = 50
 
-            # Initialize component references
+            # Set component references to None
             self.mesh_extractor = None
             self.contact_refiner = None
 
@@ -711,28 +738,44 @@ class HOLD(pl.LightningModule):
                     logger.info("  Using boundary-based phase switching for two-stage training")
                     self.phase5_scheduler = None
                 else:
-                    # Validate configuration before initialization
-                    phase3_start = opt.phase3.get('phase3_start_iter', 0)
-                    phase4_start = opt.phase4.get('contact_start_iter', 999999)
-                    phase5_start = self.phase5_start_iter
-                    finetune_start = phase5_cfg.get('finetune_start_iter', 10000)
-                    total_iterations = phase5_cfg.get('total_iterations', 12000)
-                    warmup_iters = phase5_cfg.get('warmup_iters', 0)
+                    # ============================================================
+                    # CRITICAL FIX: Read scheduler config from correct nested level
+                    # Config structure: phase5 -> scheduler -> {keys}
+                    # ============================================================
+                    scheduler_cfg = phase5_cfg.get('scheduler', {})
 
-                    # Check ordering
+                    # Read timing parameters from scheduler config
+                    warmup_iters = scheduler_cfg.get('warmup_iters', 0)
+                    phase3_start = scheduler_cfg.get('phase3_start', opt.phase3.get('phase3_start_iter', 0))
+                    phase4_start = scheduler_cfg.get('phase4_start', opt.phase4.get('contact_start_iter', 999999))
+                    phase5_start = scheduler_cfg.get('phase5_start', self.phase5_start_iter)
+                    finetune_start = scheduler_cfg.get('finetune_start', 50000)
+                    total_iterations = scheduler_cfg.get('total_iterations', 60000)
+
+                    # Log loaded configuration
+                    logger.info("  [Phase5Scheduler] Configuration loaded from config:")
+                    logger.info(f"    - total_iterations:  {total_iterations:>6d}")
+                    logger.info(f"    - warmup_iters:      {warmup_iters:>6d}")
+                    logger.info(f"    - phase3_start:      {phase3_start:>6d}")
+                    logger.info(f"    - phase4_start:      {phase4_start:>6d}")
+                    logger.info(f"    - phase5_start:      {phase5_start:>6d}")
+                    logger.info(f"    - finetune_start:    {finetune_start:>6d}")
+
+                    # Validate phase ordering
                     if not (warmup_iters <= phase3_start <= phase4_start <= phase5_start <= finetune_start <= total_iterations):
                         logger.error(
-                            f"[Phase5Scheduler] Invalid phase ordering:\n"
+                            f"[Phase5Scheduler] ❌ Invalid phase ordering:\n"
                             f"  warmup_iters={warmup_iters}\n"
                             f"  phase3_start={phase3_start}\n"
                             f"  phase4_start={phase4_start}\n"
                             f"  phase5_start={phase5_start}\n"
                             f"  finetune_start={finetune_start}\n"
                             f"  total_iterations={total_iterations}\n"
-                            f"\nRequired: warmup <= phase3 <= phase4 <= phase5 <= finetune <= total"
+                            f"\n  Required: warmup <= phase3 <= phase4 <= phase5 <= finetune <= total"
                         )
                         raise ValueError("Invalid Phase5Scheduler configuration - see error above")
 
+                    # Initialize scheduler with validated parameters
                     self.phase5_scheduler = Phase5TrainingScheduler(
                         total_iterations=total_iterations,
                         warmup_iters=warmup_iters,
@@ -741,36 +784,70 @@ class HOLD(pl.LightningModule):
                         phase5_start=phase5_start,
                         finetune_start=finetune_start
                     )
-                    logger.info("  ✓ Phase5Scheduler initialized with custom schedule")
+                    logger.info("  ✓ Phase5Scheduler initialized successfully")
 
                 # ============================================================
-                # ✅ FIX: Verify Phase Boundaries
+                # ✅ FIX: Verify Phase Boundaries (ALL PHASES)
                 # ============================================================
                 logger.info("\n" + "=" * 70)
-                logger.info("[Phase 5] Verifying Phase Boundaries")
+                logger.info("[Phase Boundaries] Verification")
                 logger.info("=" * 70)
 
-                if hasattr(self, 'phase3_end_iter'):
+                # Phase 3 boundaries
+                if hasattr(self, 'phase3_start_iter') and hasattr(self, 'phase3_end_iter'):
                     logger.info(f"  Phase 3 (SDS):")
                     logger.info(f"    Start:  {self.phase3_start_iter}")
                     logger.info(f"    End:    {self.phase3_end_iter}")
-                    logger.info(f"    Active: [{self.phase3_start_iter}, {self.phase3_end_iter}]")
-                    logger.info(f"")
+                    logger.info(f"    Active: [{self.phase3_start_iter}, {self.phase3_end_iter})")
+                    logger.info("")
+                else:
+                    logger.warning("  ⚠️  Phase 3 boundaries not set")
+
+                # Phase 4 boundaries (NEW CHECK)
+                if hasattr(self, 'contact_start_iter') and hasattr(self, 'contact_end_iter'):
+                    logger.info(f"  Phase 4 (Contact):")
+                    logger.info(f"    Start:  {self.contact_start_iter}")
+                    logger.info(f"    End:    {self.contact_end_iter}")
+                    logger.info(f"    Active: [{self.contact_start_iter}, {self.contact_end_iter})")
+                    logger.info(f"    Warmup: {self.contact_warmup_iters} iters")
+                    logger.info("")
+                else:
+                    logger.error("  ❌ Phase 4 boundaries NOT SET - Phase 4 will not activate!")
+                    logger.error("     This is a critical configuration error.")
+
+                # Phase 5 boundaries
+                if hasattr(self, 'phase5_start_iter'):
                     logger.info(f"  Phase 5 (Temporal):")
                     logger.info(f"    Start:  {self.phase5_start_iter}")
                     logger.info(f"    Active: [{self.phase5_start_iter}, ∞)")
-                    logger.info(f"")
-
-                    if self.phase3_end_iter + 1 == self.phase5_start_iter:
-                        logger.info(f"  ✅ Phases are MUTUALLY EXCLUSIVE (no overlap)")
-                    else:
-                        gap = self.phase5_start_iter - self.phase3_end_iter - 1
-                        if gap > 0:
-                            logger.warning(f"  ⚠️  Phase boundary gap: {gap} iterations")
-                        else:
-                            logger.error(f"  ❌ Phase OVERLAP detected!")
+                    logger.info("")
                 else:
-                    logger.warning("  ⚠️  Phase boundaries not set - setup_phase_boundaries() may not have been called")
+                    logger.warning("  ⚠️  Phase 5 boundaries not set")
+
+                # Check for phase overlaps/gaps
+                if hasattr(self, 'phase3_end_iter') and hasattr(self, 'contact_start_iter'):
+                    gap_3_4 = self.contact_start_iter - self.phase3_end_iter
+                    if gap_3_4 == 0:
+                        logger.info(f"  ✅ Phase 3 → Phase 4 transition: seamless (no gap)")
+                    elif gap_3_4 > 0:
+                        logger.warning(f"  ⚠️  Phase 3 → Phase 4 gap: {gap_3_4} iterations")
+                    else:
+                        logger.warning(f"  ⚠️  Phase 3 and Phase 4 overlap: {abs(gap_3_4)} iterations")
+
+                if hasattr(self, 'contact_end_iter') and hasattr(self, 'phase5_start_iter'):
+                    overlap_4_5 = self.contact_end_iter - self.phase5_start_iter
+                    if overlap_4_5 > 0:
+                        logger.info(f"  ✅ Phase 4 and Phase 5 overlap: {overlap_4_5} iterations (intentional)")
+                    elif overlap_4_5 == 0:
+                        logger.info(f"  ✅ Phase 4 → Phase 5 transition: seamless")
+                    else:
+                        logger.warning(f"  ⚠️  Phase 4 → Phase 5 gap: {abs(overlap_4_5)} iterations")
+
+                if hasattr(self, 'phase3_end_iter') and hasattr(self, 'phase5_start_iter'):
+                    if self.phase3_end_iter < self.phase5_start_iter:
+                        logger.info(f"  ✅ Phase 3 and Phase 5 are MUTUALLY EXCLUSIVE")
+                    else:
+                        logger.error(f"  ❌ Phase 3 and Phase 5 OVERLAP (mutual exclusivity violated!)")
 
                 logger.info("=" * 70 + "\n")
         else:
@@ -804,44 +881,134 @@ class HOLD(pl.LightningModule):
         self.setup_phase_boundaries()
 
     def setup_phase_boundaries(self):
-        """Setup and validate phase boundaries to prevent overlap."""
+        """Validate and log phase boundaries (values already set from config)."""
 
-        # Get phase configuration from args/config
+        # ================================================================
+        # All boundaries should already be set by phase init sections above
+        # This method only validates and logs them
+        # ================================================================
+
+        # Get phase enable flags (already set)
         self.phase3_enabled = getattr(self, 'phase3_enabled', False)
-        self.phase3_start_iter = getattr(self, 'phase3_start_iter', 0)
-
         self.phase4_enabled = getattr(self, 'phase4_enabled', False)
-        self.contact_start_iter = getattr(self, 'contact_start_iter', 1000)
-        self.contact_end_iter = getattr(self, 'contact_end_iter', 1100)
-
         self.phase5_enabled = getattr(self, 'phase5_enabled', False)
-        self.phase5_start_iter = getattr(self, 'phase5_start_iter', 1100)
 
-        # If phase3_end_iter not set, derive from phase5_start_iter
+        # Validate Phase 3 boundaries
+        if not hasattr(self, 'phase3_start_iter'):
+            logger.warning("[Phase Boundaries] phase3_start_iter not set, defaulting to 0")
+            self.phase3_start_iter = 0
+
         if not hasattr(self, 'phase3_end_iter'):
-            self.phase3_end_iter = self.phase5_start_iter - 1 if self.phase5_enabled else 99999
-        else:
-            self.phase3_end_iter = getattr(self, 'phase3_end_iter', 99999)
+            logger.warning("[Phase Boundaries] phase3_end_iter not set, defaulting to 2000")
+            self.phase3_end_iter = 2000
 
-        # Validate non-overlapping phases
-        if self.phase3_enabled and self.phase5_enabled:
-            if self.phase3_start_iter >= self.phase5_start_iter:
-                raise ValueError(
-                    f"[Phase Boundaries] Phase 3 start ({self.phase3_start_iter}) "
-                    f"must be BEFORE Phase 5 start ({self.phase5_start_iter}). "
-                    f"This causes simultaneous activation and double backward error."
+        # Validate Phase 4 boundaries (should be set by Phase 4 init)
+        if not hasattr(self, 'contact_start_iter'):
+            logger.warning("[Phase Boundaries] contact_start_iter not set, defaulting to 2000")
+            self.contact_start_iter = 2000
+
+        if not hasattr(self, 'contact_end_iter'):
+            logger.warning("[Phase Boundaries] contact_end_iter not set, defaulting to 999999")
+            self.contact_end_iter = 999999
+
+        # Validate Phase 5 boundaries (should be set by Phase 5 init)
+        if not hasattr(self, 'phase5_start_iter'):
+            logger.warning("[Phase Boundaries] phase5_start_iter not set, defaulting to 2100")
+            self.phase5_start_iter = 2100
+
+        # ================================================================
+        # Log all phase boundaries
+        # ================================================================
+        logger.info("[Phase Boundaries] Final Configuration:")
+
+        if self.phase3_enabled:
+            logger.info(f"  Phase 3 (SDS): [{self.phase3_start_iter}, {self.phase3_end_iter})")
+
+        if self.phase4_enabled:
+            logger.info(f"  Phase 4 (Contact): [{self.contact_start_iter}, {self.contact_end_iter})")
+
+        if self.phase5_enabled:
+            logger.info(f"  Phase 5 (Temporal): [{self.phase5_start_iter}, ∞)")
+
+        # ================================================================
+        # Validate Phase 3 vs Phase 4 boundaries
+        # ================================================================
+        if self.phase3_enabled and self.phase4_enabled:
+            # Check if Phase 3 is meant to run continuously (end_iter >> contact_start)
+            phase3_continuous = self.phase3_end_iter > 100000  # Arbitrary large threshold
+
+            if phase3_continuous:
+                # Phase 3 runs throughout - this is intentional overlap
+                logger.info(
+                    f"  Phase 3 runs continuously (end_iter={self.phase3_end_iter})\n"
+                    f"  Phase 4 starts at {self.contact_start_iter} (both active simultaneously)\n"
+                    f"  ✅ Intentional overlap - scheduler will control weights"
                 )
+            else:
+                # Phase 3 has explicit end - check for unintended overlap
+                if self.phase3_end_iter >= self.contact_start_iter:
+                    logger.error(
+                        f"[Phase Boundaries] ❌ OVERLAP DETECTED!\n"
+                        f"  Phase 3 ends at:   {self.phase3_end_iter}\n"
+                        f"  Phase 4 starts at: {self.contact_start_iter}\n"
+                        f"  This causes conflicts!\n"
+                        f"  Either:\n"
+                        f"    1. Set phase3_end_iter < {self.contact_start_iter}\n"
+                        f"    2. Set phase3_end_iter = 999999 (continuous mode)"
+                    )
+                    raise ValueError("Phase boundaries overlap - see error above")
 
-            logger.info(f"[Phase Boundaries] Phase 3: [{self.phase3_start_iter}, {self.phase3_end_iter})")
-            logger.info(f"[Phase Boundaries] Phase 5: [{self.phase5_start_iter}, inf)")
-
-        # Check Phase 3 vs Phase 4
-        elif self.phase3_enabled and self.phase4_enabled:
-            if self.phase3_start_iter >= self.contact_start_iter:
+            # Check for gaps
+            gap = self.contact_start_iter - self.phase3_end_iter
+            if gap == 1:
+                logger.info(f"  ✅ Phase 3 → Phase 4: Seamless transition (no gap)")
+            elif gap > 1:
                 logger.warning(
-                    f"[Phase Boundaries] Phase 3 starts at {self.phase3_start_iter}, "
-                    f"Phase 4 starts at {self.contact_start_iter}. Phases may overlap."
+                    f"  ⚠️  Phase 3 → Phase 4: {gap - 1} iteration gap\n"
+                    f"     Steps {self.phase3_end_iter} to {self.contact_start_iter - 1} have no guidance"
                 )
+
+        # ================================================================
+        # Check Phase 3 vs Phase 5 overlap
+        # ================================================================
+        phase3_overlap_with_phase5 = (
+            self.phase3_enabled and
+            self.phase5_enabled and
+            self.phase3_end_iter >= self.phase5_start_iter
+        )
+
+        if phase3_overlap_with_phase5:
+            # Check if Phase 3 is in continuous mode (intentional overlap)
+            phase3_continuous = self.phase3_end_iter > 100000
+
+            if phase3_continuous:
+                # Phase 3 runs throughout - intentional overlap
+                phase3_overlap_duration = self.phase3_end_iter - self.phase5_start_iter
+                logger.info(
+                    f"  ✅ Phase 3 and Phase 5 overlap: {phase3_overlap_duration} iterations (intentional)\n"
+                    f"     Phase 3 (SDS) runs continuously for guidance\n"
+                    f"     Phase 5 (Temporal) adds temporal consistency on top\n"
+                    f"     Scheduler controls relative weights"
+                )
+            else:
+                # Phase 3 has explicit end - overlap is likely a mistake
+                logger.error(
+                    f"[Phase Boundaries] ❌ MUTUAL EXCLUSIVITY VIOLATED!\n"
+                    f"  Phase 3 ends at:   {self.phase3_end_iter}\n"
+                    f"  Phase 5 starts at: {self.phase5_start_iter}\n"
+                    f"  Phase 3 and Phase 5 overlap!\n"
+                    f"  Either:\n"
+                    f"    1. Set phase3_end_iter < {self.phase5_start_iter} (clean transition)\n"
+                    f"    2. Set phase3_end_iter = 999999 (continuous SDS mode)"
+                )
+                raise ValueError(
+                    f"Phase 3 and Phase 5 overlap detected. "
+                    f"Set phase3_end_iter < {self.phase5_start_iter} or use continuous mode (999999)."
+                )
+        else:
+            logger.info(f"  ✅ Phase 3 and Phase 5 are mutually exclusive (no overlap)")
+
+        logger.info("[Phase Boundaries] ✅ Validation complete\n")
 
     def save_misc(self):
         """Save miscellaneous outputs (meshes, camera params, etc.)."""
@@ -996,7 +1163,7 @@ class HOLD(pl.LightningModule):
         # ====================================================================
         # Ensure phase boundaries are set
         if not hasattr(self, 'phase3_end_iter'):
-            self.phase3_end_iter = getattr(self, 'phase5_start_iter', 99999) - 1
+            # self.phase3_end_iter = getattr(self, 'phase5_start_iter', 99999) - 1
             logger.debug(f"[Init] Set phase3_end_iter to {self.phase3_end_iter}")
 
         if not hasattr(self, 'phase5_start_iter'):
@@ -1751,6 +1918,24 @@ class HOLD(pl.LightningModule):
                 # Extract object mesh from SDF
                 obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
 
+                # ✅ DEBUG: Log mesh extraction results
+                if self.global_step % 50 == 0:  # Log every 50 steps
+                    logger.info(f"[Phase 4 - Step {self.global_step}] Mesh Extraction:")
+                    logger.info(f"  Hand verts: {hand_verts.shape}")
+                    logger.info(f"  Hand faces: {hand_faces.shape if hand_faces is not None else 'None'}")
+
+                    if isinstance(obj_verts_list, list):
+                        for b_idx, obj_v in enumerate(obj_verts_list):
+                            obj_f = obj_faces_list[b_idx] if isinstance(obj_faces_list, list) else obj_faces_list[b_idx]
+                            logger.info(
+                                f"  Batch {b_idx}: Object verts={obj_v.shape[0]}, faces={obj_f.shape[0] if obj_f is not None else 0}")
+
+                            if obj_v.shape[0] == 0:
+                                logger.error(f"    ❌ Empty object mesh for batch {b_idx}!")
+                    else:
+                        logger.info(f"  Object verts: {obj_verts_list.shape}")
+                        logger.info(f"  Object faces: {obj_faces_list.shape if obj_faces_list is not None else 'None'}")
+
                 # ============================================================
                 # PHASE 5 ENHANCEMENT: Adaptive Contact Zone Detection
                 # ============================================================
@@ -1775,10 +1960,10 @@ class HOLD(pl.LightningModule):
                             if self.global_step % self.log_phase5_every == 0:
                                 contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
 
-                                self.log('phase5/contact_mean', contact_stats['mean'].detach().item(), prog_bar=False)
-                                self.log('phase5/contact_min', contact_stats['min'].detach().item(), prog_bar=False)
-                                self.log('phase5/contact_max', contact_stats['max'].detach().item(), prog_bar=False)
-                                self.log('phase5/contact_std', contact_stats['std'].detach().item(), prog_bar=False)
+                                self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
+                                self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
+                                self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
+                                self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
 
                                 logger.info(
                                     f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"

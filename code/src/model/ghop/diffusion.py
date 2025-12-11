@@ -565,7 +565,7 @@ class GHOP3DUNetWrapper(nn.Module):
     def _load_checkpoint(self, checkpoint_path):
         """
         Load pretrained U-Net weights from unified GHOP checkpoint.
-        Note: GHOP checkpoint may not contain standard U-Net keys.
+        Maps glide_model.* keys to unet.* keys for model compatibility.
         """
         from loguru import logger
 
@@ -590,72 +590,79 @@ class GHOP3DUNetWrapper(nn.Module):
             logger.info(f"  Total parameters in checkpoint: {len(state_dict)}")
 
             # ============================================================
-            # CRITICAL: Extract U-Net parameters (exclude VQ-VAE)
+            # Extract U-Net parameters with key remapping
+            # Checkpoint format: glide_model.input_blocks.*, etc.
+            # Target format: unet.input_blocks.*, etc.
             # ============================================================
             unet_state_dict = {}
 
-            # Define VQ-VAE patterns to EXCLUDE
-            vqvae_patterns = [
-                'encoder.',
-                'decoder.',
-                'quantize.',
-                'quant_conv',
-                'post_quant'
-            ]
-
             for key, value in state_dict.items():
-                # Skip VQ-VAE components
-                if any(pattern in key for pattern in vqvae_patterns):
+                # Skip VQ-VAE components (ae.model.* prefix)
+                if key.startswith('ae.model.'):
                     continue
 
-                # Include everything else (U-Net diffusion model)
-                new_key = key
+                # Process U-Net keys (glide_model.* prefix)
+                if key.startswith('glide_model.'):
+                    # Replace 'glide_model.' with 'unet.' prefix
+                    # Example: glide_model.input_blocks.0.0.weight → unet.input_blocks.0.0.weight
+                    new_key = key.replace('glide_model.', 'unet.', 1)
+                    unet_state_dict[new_key] = value
 
-                # Remove common prefixes
-                if 'ae.model.' in new_key:
-                    new_key = new_key.replace('ae.model.', '')
-
-                # Try to map to unet submodule
-                if not new_key.startswith('unet.'):
-                    # Check if this looks like a U-Net parameter
-                    if any(pattern in new_key for pattern in ['conv', 'norm', 'attn', 'resblock', 'down', 'up', 'middle']):
-                        new_key = 'unet.' + new_key
-
-                unet_state_dict[new_key] = value
-
-            logger.info(f"  Extracted non-VQ-VAE parameters: {len(unet_state_dict)}")
+            logger.info(f"  Extracted U-Net parameters: {len(unet_state_dict)} (from {len(state_dict)} total)")
 
             if len(unet_state_dict) == 0:
-                logger.warning("  ⚠️  No U-Net parameters extracted!")
-                logger.warning("  Sample checkpoint keys:")
+                logger.error("  ❌ No U-Net parameters extracted!")
+                logger.error("  Checkpoint may be in unexpected format")
+                logger.error("  Sample checkpoint keys:")
                 for i, key in enumerate(list(state_dict.keys())[:10]):
-                    logger.warning(f"    {key}")
-                logger.warning("  Continuing with random initialization...")
+                    logger.error(f"    {key}")
+                logger.error("  Continuing with random initialization...")
                 return
 
             # Show sample keys
             sample_keys = list(unet_state_dict.keys())[:5]
             logger.info(f"  Sample extracted keys: {sample_keys}")
 
-            # Try loading
-            missing_keys, unexpected_keys = self.load_state_dict(unet_state_dict, strict=False)
+            # ============================================================
+            # Load weights into model
+            # ============================================================
+            # Get current model state for comparison
+            model_state = self.state_dict()
+            model_keys = set(model_state.keys())
+            ckpt_keys = set(unet_state_dict.keys())
 
-            logger.info(f"  Missing keys: {len(missing_keys)}")
-            logger.info(f"  Unexpected keys: {len(unexpected_keys)}")
+            # Find matching keys
+            matching_keys = model_keys & ckpt_keys
+            missing_in_ckpt = model_keys - ckpt_keys
+            unexpected_in_ckpt = ckpt_keys - model_keys
 
-            # Check if any meaningful keys were loaded
-            model_keys = set(self.state_dict().keys())
-            loaded_keys = set(unet_state_dict.keys()) & model_keys
+            logger.info(f"  Matching keys: {len(matching_keys)}")
+            logger.info(f"  Missing in checkpoint: {len(missing_in_ckpt)}")
+            logger.info(f"  Unexpected in checkpoint: {len(unexpected_in_ckpt)}")
 
-            if len(loaded_keys) > 0:
-                logger.info(f"✓ U-Net weights loaded: {len(loaded_keys)} parameters matched")
+            # Load matching keys only
+            filtered_state_dict = {k: v for k, v in unet_state_dict.items() if k in model_keys}
+
+            missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
+
+            if len(matching_keys) > 0:
+                logger.info(f"✅ [U-Net] Successfully loaded {len(matching_keys)} parameters")
             else:
                 logger.warning("⚠️  No matching keys found - using random initialization")
-                logger.warning("  This is expected if GHOP checkpoint doesn't contain standard U-Net")
+
+            # Log critical missing keys (if any)
+            critical_missing = [k for k in missing_in_ckpt if any(p in k for p in ['input_blocks', 'middle_block', 'output_blocks'])]
+            if critical_missing:
+                logger.warning(f"  Critical missing keys: {len(critical_missing)}")
+                if len(critical_missing) <= 5:
+                    for key in critical_missing[:5]:
+                        logger.warning(f"    - {key}")
 
         except Exception as e:
-            logger.warning(f"⚠️  Checkpoint loading failed: {e}")
-            logger.warning("  Continuing with randomly initialized U-Net...")
+            logger.error(f"❌ Checkpoint loading failed: {e}")
+            logger.error("Continuing with randomly initialized U-Net...")
+            import traceback
+            traceback.print_exc()
 
     def predict_noise(self, noisy_latent, timestep, text_emb=None):
         """

@@ -30,10 +30,10 @@ python train.py \
     --case $SEQ_NAME \
     --no-comet \
     --gpu_id 0 \
-    --num_epoch 10 \
+    --num_epoch 30 \
     --no-pin-memory
 
 echo "✅ STAGE 3 COMPLETE (boundary mode)"
 
 # chmod +x scripts/train_MC1_stage3_from_official.sh
-# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to10_hold_MC1_ho3d_infer_official_$(date +%Y%m%d_%H%M%S).log
+# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to30_hold_MC1_ho3d_infer_official_phase4Debug_$(date +%Y%m%d_%H%M%S).log

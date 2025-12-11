@@ -115,6 +115,8 @@ class TemporalConsistencyModule(nn.Module):
             temporal_loss: Scalar temporal consistency loss
             metrics: Dictionary with loss components
         """
+        logger.info(f"[Temporal] forward() called at step {self.global_step}")
+        logger.debug(f"[Temporal] Sample keys: {list(sample.keys())}")
         batch_size = predicted_hand_pose.shape[0]
         device = predicted_hand_pose.device
 

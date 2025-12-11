@@ -4,7 +4,7 @@
 # ================================================================
 
 # ================================================================
-# PHASE 3: SDS GUIDANCE (Carry over from Stage 2)
+# PHASE 3: SDS GUIDANCE (EXTENDED)
 # ================================================================
 phase3:
   enabled: true
@@ -18,7 +18,6 @@ phase3:
     unet_checkpoint: checkpoints/ghop/last.ckpt
     unified_checkpoint: checkpoints/ghop/last.ckpt
     vqvae_checkpoint: checkpoints/ghop/last.ckpt
-
     unet_use_pretrained: true
     vqvae_use_pretrained: true
 
@@ -26,9 +25,9 @@ phase3:
   grid_resolution: 24
   spatial_lim: 1.5
 
-  # Phase 3 Boundaries - CHANGED FOR STAGE 3
-  phase3_start_iter: 0          # Start immediately (warmup already done in Stage 2)
-  phase3_end_iter: 500          # End before Phase 4 starts (CHANGED from 999999)
+  # Phase 3 Boundaries - KEEP ACTIVE THROUGHOUT
+  phase3_start_iter: 0
+  phase3_end_iter: 999999      # ← CHANGED: Never end (reduce weight via scheduler instead)
 
   # SDS Configuration - KEEP FROM STAGE 2
   sds:
@@ -39,25 +38,29 @@ phase3:
     noise_schedule: linear
     prediction_respacing: 50
 
-  sds_iters: 1                  # Compute SDS every step
-  use_modular_init: true        # Use modular initialization
+  sds_iters: 1
+  use_modular_init: true
 
-  # Weight - KEEP GHOP-VALIDATED VALUE
-  w_sds: 10.0                   # Matches GHOP graspsyn.py Lines 166-167
+  # Weight - WILL BE SCALED BY SCHEDULER
+  w_sds: 10.0                   # Full strength Phase 3, reduced later
 
   # Warmup - REDUCED (already warmed up in Stage 2)
   warmup_iters: 0               # CHANGED: No warmup needed (Stage 2 already trained)
 
 # ================================================================
-# PHASE 4: CONTACT REFINEMENT (NEW FOR STAGE 3)
+# PHASE 4: CONTACT REFINEMENT (30 EPOCHS)
 # ================================================================
 phase4:
   enabled: true
 
-  # Phase boundaries
-  contact_start_iter: 500       # Start after Phase 3 ends
-  contact_end_iter: 1500        # Continue through training
-  contact_warmup_iters: 100     # Gradual weight ramp-up
+  # Phase boundaries - EXTENDED
+  contact_start_iter: 20000     # Start at epoch 10 (after 20k steps of SDS)
+  contact_end_iter: 999999
+  contact_warmup_iters: 500     # Longer warmup for 30 epochs
+
+  # Relaxed thresholds for early training
+  contact_thresh: 0.20           # ← ADD: 5cm (was implicit 1cm)
+  collision_thresh: 0.08        # ← ADD: 2.5cm (was implicit 0.5cm)
 
   # Contact loss weights - FROM GHOP graspsyn.py Lines 238-243
   w_contact: 1.0                # Base contact weight
@@ -69,27 +72,25 @@ phase4:
   mesh_resolution: 128          # Marching cubes resolution
   mesh_padding: 0.1             # Padding around object bounds
 
-  # Logging
-  log_contact_every: 10         # Log contact metrics every 10 steps
+  log_contact_every: 50         # Reduce frequency for long training
 
 # ================================================================
-# PHASE 5: TEMPORAL CONSISTENCY (NEW FOR STAGE 3)
+# PHASE 5: TEMPORAL CONSISTENCY (30 EPOCHS)
 # ================================================================
 phase5:
   enabled: true
 
-  # Phase boundaries
-  phase5_start_iter: 600        # Start after Phase 4 has stabilized
+  phase5_start_iter: 20500      # Start shortly after Phase 4
 
   # Scheduler configuration
   use_scheduler: true           # Enable progressive weight scheduling
   scheduler:
-    total_iterations: 2000      # Total training iterations
-    warmup_iters: 0             # No warmup (Stage 2 already done)
-    phase3_start: 0             # Phase 3 starts immediately
-    phase4_start: 500           # Phase 4 starts at 500
-    phase5_start: 600           # Phase 5 starts at 600
-    finetune_start: 1500        # Fine-tuning begins at 1500
+    total_iterations: 60000     # 30 epochs * 2000 samples
+    warmup_iters: 0
+    phase3_start: 0             # Phase 3 always active
+    phase4_start: 20000         # Epoch 10
+    phase5_start: 20500         # Epoch 10 + warmup
+    finetune_start: 50000       # Epoch 25 - reduce all weights
 
   # Temporal loss weights - CONSERVATIVE INITIAL VALUES
   w_temporal: 0.01              # Base temporal weight (will be scaled by scheduler)
@@ -99,11 +100,11 @@ phase5:
 
   # Adaptive contact zones
   adaptive_contacts:
-    enabled: true               # Enable dynamic contact detection
-    k_neighbors: 5              # K-NN search parameter
-    contact_threshold: 0.02     # 2cm proximity threshold
-    update_frequency: 10        # Update zones every 10 steps
-    cache_size: 100             # LRU cache for efficiency
+    enabled: true
+    k_neighbors: 5
+    contact_threshold: 0.10
+    update_frequency: 50
+    cache_size: 200
 
   # Temporal history
   temporal:
@@ -111,8 +112,7 @@ phase5:
     velocity_weight: 1.0        # Relative velocity importance
     acceleration_weight: 0.5    # Relative acceleration importance
 
-  # Logging
-  log_phase5_every: 10          # Log temporal metrics every 10 steps
+  log_phase5_every: 50
 
 # ================================================================
 # SCENE CONFIGURATION (KEEP FROM STAGE 2)
@@ -226,13 +226,13 @@ loss:
   rgb_loss_type: "l1"
 
 # ================================================================
-# TRAINING CONFIGURATION (UPDATED FOR STAGE 3)
+# TRAINING CONFIGURATION - 30 EPOCHS
 # ================================================================
 training:
-  num_epochs: 1                 # Single epoch for full pipeline
-  max_steps: 2000               # Match scheduler total_iterations
+  num_epochs: 30
+  max_steps: 60000
   eval_every_epoch: 999
-  log_every: 10
+  log_every: 50
   gradient_clip: 1.0
 
 # ================================================================

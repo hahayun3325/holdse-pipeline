@@ -355,41 +355,37 @@ class GHOPVQVAEWrapper(nn.Module):
         logger.info(f"  Total parameters in checkpoint: {len(state_dict)}")
 
         # ============================================================
-        # CRITICAL FIX: Extract VQ-VAE with correct key filtering
+        # Extract VQ-VAE parameters with correct key remapping
         # ============================================================
         vqvae_state_dict = {}
 
         for key, value in state_dict.items():
-            # Match VQ-VAE components based on actual checkpoint structure
-            # From verification: ae.model.encoder.*, ae.model.decoder.*, ae.model.quantize.*
-            if any(pattern in key for pattern in [
-                'encoder.',      # Encoder layers
-                'decoder.',      # Decoder layers
-                'quantize.',     # Quantizer
-                'quant_conv',    # Pre-quantization conv
-                'post_quant'     # Post-quantization conv
-            ]):
-                # Remove prefixes to match local model structure
-                new_key = key
+            # GHOP checkpoint format: ae.model.encoder.*, ae.model.decoder.*, ae.model.quantize.*
+            # Target format: encoder.*, decoder.*, quantize.* (direct, no prefix)
 
+            if key.startswith('ae.model.'):
                 # Remove 'ae.model.' prefix
-                if 'ae.model.' in new_key:
-                    new_key = new_key.replace('ae.model.', '')
+                new_key = key.replace('ae.model.', '', 1)
 
-                # Remove 'first_stage_model.' prefix (alternative naming)
-                if 'first_stage_model.' in new_key:
-                    new_key = new_key.replace('first_stage_model.', '')
+                # Only include VQ-VAE components
+                if any(pattern in new_key for pattern in [
+                    'encoder.',
+                    'decoder.',
+                    'quantize.',
+                    'quant_conv',
+                    'post_quant'
+                ]):
+                    vqvae_state_dict[new_key] = value
 
-                vqvae_state_dict[new_key] = value
-
-        logger.info(f"  Extracted VQ-VAE parameters: {len(vqvae_state_dict)}")
+        logger.info(f"  Extracted VQ-VAE parameters: {len(vqvae_state_dict)} (from {len(state_dict)} total)")
 
         if len(vqvae_state_dict) == 0:
-            logger.warning("  ⚠️  No VQ-VAE parameters extracted!")
-            logger.warning("  Sample checkpoint keys:")
+            logger.error("  ❌ No VQ-VAE parameters extracted!")
+            logger.error("  Checkpoint may be in unexpected format")
+            logger.error("  Sample checkpoint keys:")
             for i, key in enumerate(list(state_dict.keys())[:10]):
-                logger.warning(f"    {key}")
-            logger.warning("  Continuing with random initialization...")
+                logger.error(f"    {key}")
+            logger.error("  Continuing with random initialization...")
             return
 
         # Show sample extracted keys
