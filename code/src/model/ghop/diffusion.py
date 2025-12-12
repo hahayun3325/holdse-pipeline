@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import os
+from loguru import logger
 
 class DiffusionSchedule:
     """
@@ -533,11 +534,34 @@ class GHOP3DUNetWrapper(nn.Module):
     def __init__(self, unet_ckpt_path=None, device='cuda', config=None):
         super().__init__()
 
-        # Initialize U-Net with default or provided config
+        # ============================================================
+        # Detect checkpoint architecture BEFORE initialization
+        # ============================================================
+        checkpoint_out_channels = 3  # Default for random init
+
+        if unet_ckpt_path and os.path.exists(unet_ckpt_path):
+            # Peek at checkpoint to detect output channels
+            ckpt = torch.load(unet_ckpt_path, map_location='cpu')
+            state_dict = ckpt.get('state_dict', ckpt)
+
+            for key in state_dict.keys():
+                if key == 'glide_model.out.2.weight' and state_dict[key].ndim == 5:
+                    checkpoint_out_channels = state_dict[key].shape[0]
+                    logger.info(
+                        f"[GHOP3DUNetWrapper] Detected checkpoint expects "
+                        f"{checkpoint_out_channels} output channels"
+                    )
+                    break
+
+            del ckpt, state_dict  # Free memory
+
+        # ============================================================
+        # Initialize U-Net with CHECKPOINT architecture
+        # ============================================================
         if config is None:
             self.unet = GHOP3DUNet(
                 in_channels=3,
-                out_channels=3,
+                out_channels=checkpoint_out_channels,  # ← Use detected value (23)
                 model_channels=64,
                 num_res_blocks=2,
                 attention_resolutions=[4, 2],
@@ -546,11 +570,75 @@ class GHOP3DUNetWrapper(nn.Module):
                 context_dim=768
             )
         else:
+            # Update config to match checkpoint
+            if 'out_channels' in config:
+                config['out_channels'] = checkpoint_out_channels
             self.unet = GHOP3DUNet(**config)
 
-        # Load pretrained weights if provided
+        logger.info(f"[GHOP3DUNetWrapper] Initialized U-Net with out_channels={checkpoint_out_channels}")
+
+        # ============================================================
+        # Load checkpoint (now architecture matches!)
+        # ============================================================
         if unet_ckpt_path:
             self._load_checkpoint(unet_ckpt_path)
+
+        # ============================================================
+        # OUTPUT ADAPTER: Convert checkpoint output (23) to HOLD expected (3)
+        # ============================================================
+        expected_out_channels = 3  # What HOLD expects
+
+        if checkpoint_out_channels != expected_out_channels:
+            self.output_adapter = nn.Conv3d(
+                in_channels=checkpoint_out_channels,  # 23 from checkpoint
+                out_channels=expected_out_channels,    # 3 for HOLD
+                kernel_size=1,
+                padding=0,
+                bias=True
+            )
+
+            # Initialize to extract first 3 channels
+            with torch.no_grad():
+                self.output_adapter.weight.zero_()
+                for i in range(min(expected_out_channels, checkpoint_out_channels)):
+                    self.output_adapter.weight[i, i, 0, 0, 0] = 1.0
+                self.output_adapter.bias.zero_()
+
+            logger.info(
+                f"[GHOP3DUNetWrapper] Created output adapter: "
+                f"{checkpoint_out_channels} → {expected_out_channels} channels"
+            )
+
+            self.output_adapter.to(device)
+        else:
+            # Mismatch detected - create adapter
+            # The model outputs model_out_channels (e.g., 3)
+            # But we want to pretend it outputs checkpoint_out_channels (e.g., 23)
+            # Then reduce back to expected 3 channels for HOLD
+
+            logger.warning(
+                f"[GHOP3DUNetWrapper] Creating output adapter due to architecture mismatch"
+            )
+
+            # Since the final layer wasn't loaded from checkpoint,
+            # we need to replace it or adapt it
+            # Option 1: No adapter (use model's random final layer - NOT RECOMMENDED)
+            # Option 2: Replace final layer to match checkpoint
+
+            # For now, log the issue
+            logger.error("=" * 70)
+            logger.error("[GHOP3DUNetWrapper] CRITICAL: Cannot use checkpoint effectively")
+            logger.error("=" * 70)
+            logger.error("  The U-Net architecture doesn't match the checkpoint.")
+            # logger.error(f"  Model outputs {model_out_channels} channels")
+            logger.error(f"  Checkpoint outputs {checkpoint_out_channels} channels")
+            logger.error("")
+            logger.error("  RECOMMENDED FIX:")
+            logger.error("  Update U-Net initialization to use out_channels=23")
+            logger.error("  Then add adapter: 23 → 3 channels for HOLD")
+            logger.error("=" * 70)
+
+            self.output_adapter = None
 
         self.unet.to(device)
         self.unet.eval()
@@ -567,8 +655,6 @@ class GHOP3DUNetWrapper(nn.Module):
         Load pretrained U-Net weights from unified GHOP checkpoint.
         Maps glide_model.* keys to unet.* keys for model compatibility.
         """
-        from loguru import logger
-
         logger.info(f"[GHOP3DUNetWrapper] Loading from: {checkpoint_path}")
 
         if not os.path.exists(checkpoint_path):
@@ -588,6 +674,48 @@ class GHOP3DUNetWrapper(nn.Module):
                 state_dict = checkpoint
 
             logger.info(f"  Total parameters in checkpoint: {len(state_dict)}")
+
+            # ============================================================
+            # NEW: Detect output channels from checkpoint
+            # ============================================================
+            self._checkpoint_out_channels = None
+
+            # Search for final output layer (glide_model.out.X.weight)
+            # This is the ACTUAL final convolution that produces the output
+            final_output_key = None
+            for key in state_dict.keys():
+                # Look specifically for glide_model.out.2.weight (final conv)
+                if key.startswith('glide_model.out.') and key.endswith('.weight') and state_dict[key].ndim == 5:
+                    final_output_key = key
+                    self._checkpoint_out_channels = state_dict[key].shape[0]
+                    logger.info(
+                        f"[GHOP3DUNetWrapper] Detected final output layer: {key} "
+                        f"with {self._checkpoint_out_channels} channels"
+                    )
+                    break
+
+            # Fallback: If no glide_model.out.* found, search output_blocks
+            if self._checkpoint_out_channels is None:
+                logger.warning("[GHOP3DUNetWrapper] No glide_model.out.* layer found, searching output_blocks...")
+
+                output_candidates = []
+                for key in state_dict.keys():
+                    if key.startswith('glide_model.output_blocks.') and '.out_layers.3.weight' in key:
+                        if state_dict[key].ndim == 5:
+                            output_candidates.append((key, state_dict[key].shape[0]))
+
+                if output_candidates:
+                    # Take the last output_blocks layer
+                    final_key, final_channels = sorted(output_candidates)[-1]
+                    self._checkpoint_out_channels = final_channels
+                    logger.info(
+                        f"[GHOP3DUNetWrapper] Fallback - detected output layer: {final_key} "
+                        f"with {final_channels} channels"
+                    )
+
+            if self._checkpoint_out_channels is None:
+                logger.warning("[GHOP3DUNetWrapper] Could not detect output channels, assuming 3")
+                self._checkpoint_out_channels = 3
 
             # ============================================================
             # Extract U-Net parameters with key remapping
@@ -622,6 +750,37 @@ class GHOP3DUNetWrapper(nn.Module):
             # Show sample keys
             sample_keys = list(unet_state_dict.keys())[:5]
             logger.info(f"  Sample extracted keys: {sample_keys}")
+
+            # ============================================================
+            # Validate U-Net architecture matches checkpoint
+            # ============================================================
+            if self._checkpoint_out_channels is not None:
+                # Check if model's output layer matches checkpoint
+                model_state = self.state_dict()
+
+                # Find model's final output layer
+                model_out_key = None
+                for key in model_state.keys():
+                    if key.endswith('out.2.weight') and model_state[key].ndim == 5:
+                        model_out_key = key
+                        model_out_channels = model_state[key].shape[0]
+                        break
+
+                if model_out_key and model_out_channels != self._checkpoint_out_channels:
+                    logger.warning("=" * 70)
+                    logger.warning("[GHOP3DUNetWrapper] OUTPUT CHANNEL MISMATCH DETECTED")
+                    logger.warning("=" * 70)
+                    logger.warning(f"  Checkpoint expects: {self._checkpoint_out_channels} output channels")
+                    logger.warning(f"  Model has:          {model_out_channels} output channels")
+                    logger.warning("")
+                    logger.warning("  The final output layer WILL NOT LOAD correctly!")
+                    logger.warning("  An output adapter will be created to handle this mismatch.")
+                    logger.warning("=" * 70)
+
+                    # Store this for adapter creation
+                    self._model_out_channels = model_out_channels
+                else:
+                    self._model_out_channels = None
 
             # ============================================================
             # Load weights into model
@@ -708,8 +867,39 @@ class GHOP3DUNetWrapper(nn.Module):
         return noise_pred
 
     def forward(self, x, timesteps, context=None):
-        """Forward pass (alias for predict_noise)."""
-        return self.predict_noise(x, timesteps, context)
+        """
+        Forward pass with optional output adaptation.
+
+        Args:
+            x: Latent tensor [B, C, D, H, W]
+            timesteps: Diffusion timesteps [B]
+            context: Optional conditioning (text embeddings)
+
+        Returns:
+            Denoised tensor [B, 3, D, H, W]
+        """
+        # Forward through U-Net
+        output = self.predict_noise(x, timesteps, context)
+
+        # ============================================================
+        # CHECK THIS EXISTS:
+        # ============================================================
+        if hasattr(self, 'output_adapter') and self.output_adapter is not None:
+            original_shape = output.shape
+            output = self.output_adapter(output)
+
+            # Log occasionally
+            if not hasattr(self, '_output_adapter_log_count'):
+                self._output_adapter_log_count = 0
+
+            if self._output_adapter_log_count < 3:
+                logger.info(
+                    f"[GHOP3DUNetWrapper] Output adapted: "
+                    f"{original_shape[1]} → {output.shape[1]} channels"
+                )
+                self._output_adapter_log_count += 1
+
+        return output
 
 
 # ============================================================================

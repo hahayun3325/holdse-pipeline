@@ -187,93 +187,96 @@ class HOLD(pl.LightningModule):
                 unet_use_pretrained = phase3_cfg.ghop.get('unet_use_pretrained', False)
 
                 # ============================================================
-                # CRITICAL FIX: Use separate checkpoint paths for VQ-VAE and U-Net
+                # DETERMINE CHECKPOINT PATHS
                 # ============================================================
-                # Priority 1: Command-line args (for inference/rendering)
-                # Priority 2: Config file (for training - SEPARATE paths)
-                # Priority 3: Default unified path (for backward compatibility)
+                # CORRECTED PRIORITY ORDER:
+                # 1. args.infer_ckpt - Explicit GHOP checkpoint override
+                # 2. Config file - Default GHOP checkpoint paths (RECOMMENDED)
+                # 3. args.ckpt_p - Legacy fallback (NOT recommended - this is HOLD checkpoint)
 
                 if hasattr(args, 'infer_ckpt') and args.infer_ckpt:
                     # Command-line override (use same checkpoint for both)
+                    # This is for rendering/inference with specific GHOP checkpoint
                     vqvae_checkpoint = args.infer_ckpt
                     unet_checkpoint = args.infer_ckpt
                     model_checkpoint = args.infer_ckpt
                     logger.info(f"[GHOP] Using checkpoint from args.infer_ckpt: {args.infer_ckpt}")
+
+                elif hasattr(phase3_cfg, 'ghop') and phase3_cfg.ghop.get('unified_checkpoint'):
+                    # ============================================================
+                    # USE CONFIG FILE (CORRECT PATH FOR TRAINING)
+                    # ============================================================
+                    # This is the recommended path for training
+                    # Config specifies separate GHOP checkpoint from HOLD checkpoint
+
+                    # Try unified checkpoint first (recommended)
+                    unified_path = phase3_cfg.ghop.get('unified_checkpoint')
+                    if unified_path:
+                        vqvae_checkpoint = unified_path
+                        unet_checkpoint = unified_path
+                        model_checkpoint = unified_path
+                        logger.info(f"[GHOP] Using unified checkpoint from config: {unified_path}")
+                    else:
+                        # Fall back to separate paths
+                        vqvae_checkpoint = phase3_cfg.ghop.get('vqvae_checkpoint', 'checkpoints/ghop/last.ckpt')
+                        unet_checkpoint = phase3_cfg.ghop.get('unet_checkpoint', 'checkpoints/ghop/last.ckpt')
+                        model_checkpoint = vqvae_checkpoint  # Use VQ-VAE path as default
+                        logger.info(f"[GHOP] Using separate checkpoints from config:")
+                        logger.info(f"  VQ-VAE: {vqvae_checkpoint}")
+                        logger.info(f"  U-Net: {unet_checkpoint}")
+
                 elif hasattr(args, 'ckpt_p') and args.ckpt_p:
-                    # Legacy command-line override
+                    # ============================================================
+                    # LEGACY FALLBACK (NOT RECOMMENDED)
+                    # ============================================================
+                    # args.ckpt_p is typically the HOLD checkpoint for resuming training
+                    # Using it for GHOP is NOT recommended
+
+                    logger.warning("=" * 70)
+                    logger.warning("USING HOLD CHECKPOINT FOR GHOP (NOT RECOMMENDED)")
+                    logger.warning("=" * 70)
+                    logger.warning(f"  Checkpoint: {args.ckpt_p}")
+                    logger.warning("")
+                    logger.warning("This is args.ckpt_p (from --load_ckpt), which is typically")
+                    logger.warning("a HOLD checkpoint, NOT a GHOP checkpoint.")
+                    logger.warning("")
+                    logger.warning("RECOMMENDED FIX:")
+                    logger.warning("  Set phase3.ghop.unified_checkpoint in config file to:")
+                    logger.warning("  /path/to/ghop/checkpoint/last.ckpt")
+                    logger.warning("=" * 70)
+
                     vqvae_checkpoint = args.ckpt_p
                     unet_checkpoint = args.ckpt_p
                     model_checkpoint = args.ckpt_p
                     logger.info(f"[GHOP] Using checkpoint from args.ckpt_p: {args.ckpt_p}")
+
                 else:
-                    # Use separate paths from config (recommended for training)
-                    vqvae_checkpoint = phase3_cfg.ghop.get('vqvae_checkpoint', 'checkpoints/ghop/last.ckpt')
-                    unet_checkpoint = phase3_cfg.ghop.get('unet_checkpoint', 'checkpoints/ghop/last.ckpt')
-                    model_checkpoint = phase3_cfg.ghop.get('model_checkpoint', 'checkpoints/ghop/last.ckpt')
-                    logger.info(f"[GHOP] Using VQ-VAE checkpoint from config: {vqvae_checkpoint}")
-                    logger.info(f"[GHOP] Using U-Net checkpoint from config: {unet_checkpoint}")
+                    # No checkpoint specified
+                    logger.warning("No GHOP checkpoint path specified")
+                    logger.warning("Using default path: checkpoints/ghop/last.ckpt")
+                    vqvae_checkpoint = 'checkpoints/ghop/last.ckpt'
+                    unet_checkpoint = 'checkpoints/ghop/last.ckpt'
+                    model_checkpoint = 'checkpoints/ghop/last.ckpt'
 
-                # Determine if we need the checkpoint file
                 need_checkpoint = vqvae_use_pretrained or unet_use_pretrained
-
+                logger.info(f"\nCheckpoint configuration:")
+                logger.info(f"  VQ-VAE pretrained: {vqvae_use_pretrained}")
+                logger.info(f"  U-Net pretrained: {unet_use_pretrained}")
+                logger.info(f"  Checkpoint needed: {need_checkpoint}")
                 if need_checkpoint:
-                    # Only check file existence if we're loading pretrained weights
-                    logger.info(f"Loading unified GHOP checkpoint from: {unet_checkpoint}")
-                    logger.info("  This checkpoint contains BOTH VQ-VAE and U-Net components")
+                    logger.info(f"  Checkpoint path: {model_checkpoint}")
 
                     # Verify checkpoint exists
                     if not os.path.exists(model_checkpoint):
                         raise FileNotFoundError(
                             f"GHOP checkpoint not found: {model_checkpoint}\n"
-                            f"Expected: Unified checkpoint (~167 MB) from training or pretrained GHOP\n"
-                            f"For training checkpoint: specify --infer_ckpt logs/xxx/checkpoints/last.ckpt\n"
-                            f"For pretrained GHOP: ln -s <ghop_checkpoint> checkpoints/ghop/last.ckpt"
+                            f"Please ensure the checkpoint exists at the specified path."
                         )
-
-                    # Load checkpoint once
-                    logger.info("Loading checkpoint...")
-                    unified_checkpoint = torch.load(model_checkpoint, map_location='cpu')
-
-                    if 'state_dict' not in unified_checkpoint:
-                        raise ValueError(f"Invalid checkpoint structure: missing 'state_dict'")
-
-                    state_dict = unified_checkpoint['state_dict']
-                    logger.info(f"✓ Unified checkpoint loaded: {len(state_dict)} parameters")
-
-                    # Analyze checkpoint structure
-                    vqvae_keys = [k for k in state_dict.keys() if 'first_stage_model' in k or 'encoder' in k or 'decoder' in k or 'quantize' in k or 'vqvae' in k.lower()]
-                    unet_keys = [k for k in state_dict.keys() if 'model' in k and 'first_stage' not in k or 'unet' in k.lower()]
-
-                    logger.info(f"  VQ-VAE components: {len(vqvae_keys)} parameters")
-                    logger.info(f"  U-Net components: {len(unet_keys)} parameters")
-
-                else:
-                    # Random initialization - no checkpoint needed
-                    logger.warning("")
-                    logger.warning("=" * 70)
-                    logger.warning("RUNNING WITH RANDOM INITIALIZATION")
-                    logger.warning("=" * 70)
-                    logger.warning("  VQ-VAE: Random weights (vqvae_use_pretrained=False)")
-                    logger.warning("  U-Net: Random weights (unet_use_pretrained=False)")
-                    logger.warning("")
-                    logger.warning("This is acceptable for:")
-                    logger.warning("  ✓ Sanity checks (verify pipeline works)")
-                    logger.warning("  ✓ Architecture debugging")
-                    logger.warning("  ✓ Testing data flow")
-                    logger.warning("")
-                    logger.warning("Limitations:")
-                    logger.warning("  ✗ SDS loss will not provide effective guidance")
-                    logger.warning("  ✗ GHOP prior cannot guide reconstruction")
-                    logger.warning("")
-                    logger.warning("For production training, set:")
-                    logger.warning("  vqvae_use_pretrained: true")
-                    logger.warning("  unet_use_pretrained: true")
-                    logger.warning("=" * 70)
-                    logger.warning("")
 
                 # ============================================================
                 # Initialize VQ-VAE
                 # ============================================================
+                # Determine if we need the checkpoint file
                 logger.info("Initializing VQ-VAE...")
                 self.vqvae = GHOPVQVAEWrapper(
                     vqvae_ckpt_path=vqvae_checkpoint if vqvae_use_pretrained else None,
@@ -785,7 +788,17 @@ class HOLD(pl.LightningModule):
                         finetune_start=finetune_start
                     )
                     logger.info("  ✓ Phase5Scheduler initialized successfully")
-
+                    if self.phase5_scheduler is not None:
+                        # Log the initialization message
+                        logger.info("=" * 70)
+                        logger.info("PHASE 5 SCHEDULER INITIALIZED")
+                        logger.info("=" * 70)
+                        logger.info(f"  Total iterations: {phase5_cfg.scheduler.total_iterations}")
+                        logger.info(f"  Phase 3 (SDS) start: {phase5_cfg.scheduler.phase3_start}")
+                        logger.info(f"  Phase 4 (Contact) start: {phase5_cfg.scheduler.phase4_start}")
+                        logger.info(f"  Phase 5 (Temporal) start: {phase5_cfg.scheduler.phase5_start}")
+                        logger.info(f"  Fine-tuning start: {phase5_cfg.scheduler.finetune_start}")
+                        logger.info("=" * 70)
                 # ============================================================
                 # ✅ FIX: Verify Phase Boundaries (ALL PHASES)
                 # ============================================================
@@ -1009,6 +1022,129 @@ class HOLD(pl.LightningModule):
             logger.info(f"  ✅ Phase 3 and Phase 5 are mutually exclusive (no overlap)")
 
         logger.info("[Phase Boundaries] ✅ Validation complete\n")
+
+    def _validate_ghop_checkpoint(self, checkpoint_path: str) -> bool:
+        """
+        Validate GHOP checkpoint contains required components.
+
+        Args:
+            checkpoint_path: Path to the checkpoint file
+
+        Returns:
+            bool: True if valid, raises exception if invalid
+        """
+
+        # ============================================================
+        # Step 1: File existence and size check
+        # ============================================================
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(
+                f"[GHOP Validation] Checkpoint not found: {checkpoint_path}"
+            )
+
+        file_size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
+        logger.info(f"[GHOP Validation] Checkpoint size: {file_size_mb:.1f} MB")
+
+        if file_size_mb < 10:
+            logger.warning(
+                f"[GHOP Validation] Checkpoint is very small ({file_size_mb:.1f} MB). "
+                f"Expected >100 MB for full model with optimizer state."
+            )
+
+        # ============================================================
+        # Step 2: Load and inspect state dict
+        # ============================================================
+        try:
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            logger.info("[GHOP Validation] Checkpoint loaded successfully")
+        except Exception as e:
+            raise RuntimeError(f"[GHOP Validation] Failed to load checkpoint: {e}")
+
+        # Extract state dict (handle both direct and nested formats)
+        if 'state_dict' in ckpt:
+            state_dict = ckpt['state_dict']
+        elif isinstance(ckpt, dict) and any(k.startswith('ae.model.') or k.startswith('glide_model.') for k in ckpt.keys()):
+            state_dict = ckpt
+        else:
+            raise ValueError(
+                f"[GHOP Validation] Checkpoint format unrecognized. "
+                f"Top-level keys: {list(ckpt.keys())}"
+            )
+
+        # ============================================================
+        # Step 3: Check for required key prefixes (architecture-agnostic)
+        # ============================================================
+        vqvae_keys = [k for k in state_dict.keys() if k.startswith('ae.model.')]
+        unet_keys = [k for k in state_dict.keys() if k.startswith('glide_model.')]
+        hold_keys = [k for k in state_dict.keys() if 'implicit' in k or 'nodes' in k]
+
+        logger.info(f"[GHOP Validation] Key counts:")
+        logger.info(f"  - VQ-VAE (ae.model.*):     {len(vqvae_keys)}")
+        logger.info(f"  - U-Net (glide_model.*):   {len(unet_keys)}")
+        logger.info(f"  - HOLD contamination:      {len(hold_keys)}")
+
+        # ============================================================
+        # Step 4: Validation checks
+        # ============================================================
+        issues = []
+
+        # Check 1: VQ-VAE must be present
+        if len(vqvae_keys) == 0:
+            issues.append("❌ No VQ-VAE parameters found (ae.model.* keys missing)")
+        elif len(vqvae_keys) < 50:
+            issues.append(f"⚠️  Very few VQ-VAE parameters ({len(vqvae_keys)}). Expected >50.")
+        else:
+            logger.info(f"✅ VQ-VAE parameters present ({len(vqvae_keys)} keys)")
+
+        # Check 2: U-Net must be present
+        if len(unet_keys) == 0:
+            issues.append("❌ No U-Net parameters found (glide_model.* keys missing)")
+        elif len(unet_keys) < 100:
+            issues.append(f"⚠️  Very few U-Net parameters ({len(unet_keys)}). Expected >100.")
+        else:
+            logger.info(f"✅ U-Net parameters present ({len(unet_keys)} keys)")
+
+        # Check 3: HOLD contamination
+        if len(hold_keys) > 0:
+            issues.append(
+                f"⚠️  Found {len(hold_keys)} HOLD-related keys in checkpoint. "
+                f"This might be a HOLD checkpoint, not GHOP!"
+            )
+        else:
+            logger.info("✅ No HOLD contamination detected")
+
+        # Check 4: Sample a few critical parameters to verify they're tensors
+        sample_keys = []
+        if vqvae_keys:
+            sample_keys.append(vqvae_keys[0])
+        if unet_keys:
+            sample_keys.append(unet_keys[0])
+
+        for key in sample_keys[:3]:
+            param = state_dict[key]
+            if not isinstance(param, torch.Tensor):
+                issues.append(f"❌ Parameter '{key}' is not a tensor (type: {type(param)})")
+            else:
+                logger.debug(f"✅ Sampled '{key}': shape={param.shape}, dtype={param.dtype}")
+
+        # ============================================================
+        # Step 5: Report validation result
+        # ============================================================
+        if issues:
+            error_msg = "[GHOP Validation] Checkpoint validation FAILED:\n" + "\n".join(issues)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        logger.info("=" * 70)
+        logger.info("✅ GHOP CHECKPOINT VALIDATION PASSED")
+        logger.info("=" * 70)
+        logger.info(f"  Checkpoint: {os.path.basename(checkpoint_path)}")
+        logger.info(f"  Size: {file_size_mb:.1f} MB")
+        logger.info(f"  VQ-VAE params: {len(vqvae_keys)}")
+        logger.info(f"  U-Net params: {len(unet_keys)}")
+        logger.info("=" * 70)
+
+        return True
 
     def save_misc(self):
         """Save miscellaneous outputs (meshes, camera params, etc.)."""
@@ -1895,31 +2031,65 @@ class HOLD(pl.LightningModule):
             self.memory_profiler.checkpoint("after_ghop")
 
         # ====================================================================
-        # PHASE 4: Contact Refinement (Enhanced with Phase 5 Adaptive Zones)
+        # PHASE 4: Contact Refinement (OPTIMIZED - Skip if weight=0)
         # ====================================================================
-        # ✅ FIX 2: Add end condition check to phase4_active
-        # phase4_active = (
-        #     self.phase4_enabled and
-        #     self.contact_start_iter <= self.global_step < self.contact_end_iter
-        # )
+        # OPTIMIZATION: Calculate weight BEFORE expensive operations
+        WEIGHT_THRESHOLD = 1e-6
+
+        if hasattr(self, 'phase5_enabled') and self.phase5_enabled and hasattr(self, 'phase5_scheduler'):
+            # Use scheduler weight (includes ramp-up/decay)
+            effective_contact_weight = loss_weights.get('contact', 0.0)
+            weight_source = "scheduler"
+        else:
+            # Fallback: Manual warmup from config
+            if self.global_step >= self.contact_start_iter:
+                contact_progress = min(
+                    (self.global_step - self.contact_start_iter) / max(self.contact_warmup_iters, 1),
+                    1.0
+                )
+                effective_contact_weight = self.w_contact * contact_progress
+            else:
+                effective_contact_weight = 0.0
+            weight_source = "config"
+
+        # Check if Phase 4 should run (boundaries + weight)
         phase4_active = (
-                getattr(self, 'phase4_enabled', False) and  # ← Use getattr with False default
-                self.contact_refiner is not None and  # ← Explicit None check
-                self.contact_start_iter <= self.global_step < self.contact_end_iter
+            getattr(self, 'phase4_enabled', False) and
+            self.contact_refiner is not None and
+            self.contact_start_iter <= self.global_step < self.contact_end_iter and
+            effective_contact_weight > WEIGHT_THRESHOLD  # ← OPTIMIZATION: Skip if weight=0
         )
+
+        # Log skip reason occasionally (avoid spam)
+        if not phase4_active and self.global_step % 500 == 0:
+            if not getattr(self, 'phase4_enabled', False):
+                skip_reason = "Phase 4 disabled"
+            elif self.contact_refiner is None:
+                skip_reason = "Contact refiner not initialized"
+            elif self.global_step < self.contact_start_iter:
+                skip_reason = f"Before start ({self.global_step} < {self.contact_start_iter})"
+            elif self.global_step >= self.contact_end_iter:
+                skip_reason = f"After end ({self.global_step} >= {self.contact_end_iter})"
+            elif effective_contact_weight <= WEIGHT_THRESHOLD:
+                skip_reason = f"Zero weight ({effective_contact_weight:.6f} from {weight_source})"
+            else:
+                skip_reason = "Unknown"
+            logger.debug(f"[Phase 4] SKIPPED - {skip_reason}")
 
         if phase4_active:
             try:
-                logger.debug(f"[Phase 4] Contact loss computation at step {self.global_step}")
+                logger.debug(
+                    f"[Phase 4] Running with weight {effective_contact_weight:.4f} from {weight_source}"
+                )
 
-                # Extract hand mesh
+                # ============================================================
+                # Expensive Operation 1: Mesh Extraction
+                # ============================================================
                 hand_verts, hand_faces = self._extract_hand_mesh(batch)
-
-                # Extract object mesh from SDF
                 obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
 
-                # ✅ DEBUG: Log mesh extraction results
-                if self.global_step % 50 == 0:  # Log every 50 steps
+                # Debug logging (every 50 steps)
+                if self.global_step % 50 == 0:
                     logger.info(f"[Phase 4 - Step {self.global_step}] Mesh Extraction:")
                     logger.info(f"  Hand verts: {hand_verts.shape}")
                     logger.info(f"  Hand faces: {hand_faces.shape if hand_faces is not None else 'None'}")
@@ -1928,59 +2098,57 @@ class HOLD(pl.LightningModule):
                         for b_idx, obj_v in enumerate(obj_verts_list):
                             obj_f = obj_faces_list[b_idx] if isinstance(obj_faces_list, list) else obj_faces_list[b_idx]
                             logger.info(
-                                f"  Batch {b_idx}: Object verts={obj_v.shape[0]}, faces={obj_f.shape[0] if obj_f is not None else 0}")
-
+                                f"  Batch {b_idx}: Object verts={obj_v.shape[0]}, faces={obj_f.shape[0] if obj_f is not None else 0}"
+                            )
                             if obj_v.shape[0] == 0:
                                 logger.error(f"    ❌ Empty object mesh for batch {b_idx}!")
-                    else:
-                        logger.info(f"  Object verts: {obj_verts_list.shape}")
-                        logger.info(f"  Object faces: {obj_faces_list.shape if obj_faces_list is not None else 'None'}")
 
                 # ============================================================
-                # PHASE 5 ENHANCEMENT: Adaptive Contact Zone Detection
+                # Expensive Operation 2: Adaptive Contact Zone Detection
                 # ============================================================
                 contact_zones = None
 
-                if self.phase5_enabled and hasattr(self, 'adaptive_contacts') and hasattr(self, 'phase5_scheduler'):
-                    # Check if update is needed via scheduler
-                    if self.phase5_scheduler is not None and self.phase5_scheduler.should_update_contact_zones(
-                            self.global_step):
-                        logger.debug(f"[Phase 5] Detecting adaptive contact zones at step {self.global_step}")
+                if (self.phase5_enabled and
+                    hasattr(self, 'adaptive_contacts') and
+                    hasattr(self, 'phase5_scheduler') and
+                    self.phase5_scheduler is not None and
+                    self.phase5_scheduler.should_update_contact_zones(self.global_step)):
 
-                        try:
-                            # Detect adaptive contact zones
-                            contact_zones = self.adaptive_contacts(
-                                hand_verts=hand_verts,
-                                obj_verts_list=obj_verts_list,
-                                iteration=self.global_step,
-                                batch_indices=list(range(hand_verts.shape[0]))
+                    logger.debug(f"[Phase 5] Detecting adaptive contact zones at step {self.global_step}")
+
+                    try:
+                        contact_zones = self.adaptive_contacts(
+                            hand_verts=hand_verts,
+                            obj_verts_list=obj_verts_list,
+                            iteration=self.global_step,
+                            batch_indices=list(range(hand_verts.shape[0]))
+                        )
+
+                        # Log contact statistics
+                        if self.global_step % self.log_phase5_every == 0:
+                            contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
+
+                            self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
+                            self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
+                            self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
+                            self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
+
+                            logger.info(
+                                f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
+                                f"  Mean contacts:   {contact_stats['mean']:.1f} vertices\n"
+                                f"  Range:           [{contact_stats['min']:.0f}, {contact_stats['max']:.0f}]\n"
+                                f"  Std deviation:   {contact_stats['std']:.2f}"
                             )
 
-                            # Log contact statistics
-                            if self.global_step % self.log_phase5_every == 0:
-                                contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
-
-                                self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
-                                self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
-                                self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
-                                self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
-
-                                logger.info(
-                                    f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
-                                    f"  Mean contacts:   {contact_stats['mean']:.1f} vertices\n"
-                                    f"  Range:           [{contact_stats['min']:.0f}, {contact_stats['max']:.0f}]\n"
-                                    f"  Std deviation:   {contact_stats['std']:.2f}"
-                                )
-
-                        except Exception as e:
-                            logger.warning(f"[Phase 5] Adaptive contact detection failed: {e}. Using fixed zones.")
-                            contact_zones = None
+                    except Exception as e:
+                        logger.warning(f"[Phase 5] Adaptive contact detection failed: {e}. Using fixed zones.")
+                        contact_zones = None
 
                 # ============================================================
-                # Compute contact loss with adaptive or fixed zones
+                # Expensive Operation 3: Contact Refinement
                 # ============================================================
                 batch_size = hand_verts.shape[0]
-                total_contact_loss = torch.tensor(0.0, device=self.device)  # No requires_grad for accumulator
+                total_contact_loss = torch.tensor(0.0, device=self.device)
                 num_valid_samples = 0
 
                 contact_metrics_accum = {
@@ -1993,12 +2161,12 @@ class HOLD(pl.LightningModule):
 
                 for b in range(batch_size):
                     # Get per-sample meshes
-                    h_verts = hand_verts[b]  # [778, 3]
+                    h_verts = hand_verts[b]
                     h_faces = hand_faces if hand_faces.dim() == 2 else hand_faces[b]
                     o_verts = obj_verts_list[b] if isinstance(obj_verts_list, list) else obj_verts_list[b]
                     o_faces = obj_faces_list[b] if isinstance(obj_faces_list, list) else obj_faces_list[b]
 
-                    # Skip if object mesh is empty
+                    # Skip empty meshes
                     if o_verts.shape[0] == 0:
                         logger.warning(f"[Phase 4] Empty object mesh for batch {b}, skipping")
                         continue
@@ -2006,29 +2174,24 @@ class HOLD(pl.LightningModule):
                     # Get contact zones for this sample
                     zones_b = contact_zones[b] if contact_zones is not None else None
 
-                    # ============================================================
-                    # CRITICAL FIX: Check contact_refiner's actual signature
-                    # Expected: forward(hand_verts, obj_verts, weightpen, weightmiss)
-                    # NOT: forward(hand_verts, hand_faces, obj_verts, obj_faces, contact_zones)
-                    # ============================================================
                     try:
-                        # Method 1: If contact_refiner has forward with faces
+                        # Call contact refiner
                         if hasattr(self.contact_refiner, 'forward_with_faces'):
                             contact_loss_b, contact_metrics_b = self.contact_refiner.forward_with_faces(
-                                hand_verts=h_verts,           # ✓ [778, 3] no unsqueeze
-                                hand_faces=h_faces,           # [F, 3]
-                                obj_verts=o_verts,            # ✓ [V_obj, 3] no unsqueeze
-                                obj_faces=o_faces,            # [F_obj, 3]
-                                contact_zones=zones_b,         # [K] or None
+                                hand_verts=h_verts,
+                                hand_faces=h_faces,
+                                obj_verts=o_verts,
+                                obj_faces=o_faces,
+                                contact_zones=zones_b,
                             )
                         # Method 2: Standard forward (vertex-only, no faces)
                         else:
                             contact_loss_b, contact_metrics_b = self.contact_refiner(
-                                hand_verts=h_verts,  # [778, 3]
-                                hand_faces=h_faces,  # [1538, 3]
-                                obj_verts=o_verts,   # [V_obj, 3]
-                                obj_faces=o_faces    # [F_obj, 3]
-                            )  # ✅ FIX: Added faces back (required by forward)
+                                hand_verts=h_verts,
+                                hand_faces=h_faces,
+                                obj_verts=o_verts,
+                                obj_faces=o_faces
+                            )
 
                         total_contact_loss = total_contact_loss + contact_loss_b
                         num_valid_samples += 1
@@ -2041,44 +2204,44 @@ class HOLD(pl.LightningModule):
                     except Exception as e:
                         logger.error(f"[Phase 4] Contact refiner failed for batch {b}: {e}")
                         continue
-                # Average and apply weights
+
+                # ============================================================
+                # Apply Weight and Add to Total Loss
+                # ============================================================
                 if num_valid_samples > 0:
-                    total_contact_loss /= num_valid_samples
+                    # Average over valid samples
+                    total_contact_loss = total_contact_loss / num_valid_samples
                     for key in contact_metrics_accum:
                         contact_metrics_accum[key] /= num_valid_samples
 
-                    # Progressive weight schedule (warmup from 0 to w_contact)
-                    contact_progress = min(
-                        (self.global_step - self.contact_start_iter) / self.contact_warmup_iters,
-                        1.0
-                    )
-                    # Calculate weighted contact loss
-                    base_weight = torch.tensor(self.w_contact * contact_progress, device=self.device)  # Ensure tensor
-                    weighted_contact_loss = (total_contact_loss / max(num_valid_samples, 1)) * base_weight  # Ensure tensor
+                    # Apply pre-calculated effective weight
+                    weighted_contact_loss = total_contact_loss * effective_contact_weight
 
-                    # Apply Phase 5 dynamic weighting if enabled
-                    # CONTACT FIX: Conditional detach to prevent double backward
-                    # Only detach if Phase 5 is also active (temporal loss will follow)
-                    phase5_active = (hasattr(self, 'phase5_enabled') and self.phase5_enabled and
-                                    self.global_step >= self.phase5_start_iter)
-
-                    # OPTION A: Remove detachment for direct gradient optimization
-                    # Contact loss needs to directly optimize hand pose parameters
+                    # Add to total loss
                     loss_output["loss"] = loss_output["loss"] + weighted_contact_loss
-                    logger.debug(f"[Phase 4] Contact loss with gradients (Option A strategy)")
-                    loss_output['contact_loss'] = weighted_contact_loss  # Keep gradients
+                    loss_output['contact_loss'] = weighted_contact_loss
 
-                    # Add gradient monitoring for validation
+                    logger.debug(f"[Phase 4] Contact loss with gradients")
+
+                    # Gradient monitoring
                     if self.global_step % 100 == 0:
-                        contact_grad_norm = weighted_contact_loss.grad.norm() if weighted_contact_loss.grad is not None else 0.0
-                        logger.info(f"[Phase 4 Grad Check] contact_loss grad_norm: {contact_grad_norm:.6f}")
+                        if weighted_contact_loss.grad_fn is not None:
+                            logger.info(f"[Phase 4 Grad Check] grad_fn exists: {weighted_contact_loss.grad_fn}")
+                        else:
+                            logger.warning(f"[Phase 4 Grad Check] NO grad_fn (detached?)")
 
-                    # Log metrics
+                    # Logging (FIX: Use effective_contact_weight directly, no double multiplication)
                     self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
-                    self.log('phase4/contact_weight', (base_weight * loss_weights['contact']).detach().item() if self.phase5_enabled else (self.w_contact * contact_progress))
-                    self.log('phase4/penetration', contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor) else float(contact_metrics_accum['penetration']))
-                    self.log('phase4/attraction', contact_metrics_accum['attraction'].detach().item() if isinstance(contact_metrics_accum['attraction'], torch.Tensor) else float(contact_metrics_accum['attraction']))
-                    self.log('phase4/dist_mean', contact_metrics_accum['dist_mean'].detach().item() if isinstance(contact_metrics_accum['dist_mean'], torch.Tensor) else float(contact_metrics_accum['dist_mean']))
+                    self.log('phase4/contact_weight', effective_contact_weight)  # ← FIXED: No double weighting
+                    self.log('phase4/penetration',
+                        contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor)
+                        else float(contact_metrics_accum['penetration']))
+                    self.log('phase4/attraction',
+                        contact_metrics_accum['attraction'].detach().item() if isinstance(contact_metrics_accum['attraction'], torch.Tensor)
+                        else float(contact_metrics_accum['attraction']))
+                    self.log('phase4/dist_mean',
+                        contact_metrics_accum['dist_mean'].detach().item() if isinstance(contact_metrics_accum['dist_mean'], torch.Tensor)
+                        else float(contact_metrics_accum['dist_mean']))
                     self.log('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
                     self.log('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
 
@@ -2087,13 +2250,14 @@ class HOLD(pl.LightningModule):
                         contact_type = "Adaptive" if contact_zones is not None else "Fixed"
                         logger.info(
                             f"\n[Phase 4 - Step {self.global_step}] Contact Refinement ({contact_type}):\n"
+                            f"  Applied weight:   {effective_contact_weight:.4f} (from {weight_source})\n"
                             f"  Valid samples:    {num_valid_samples}/{batch_size}\n"
                             f"  Penetration loss: {contact_metrics_accum['penetration']:.4f}\n"
                             f"  Attraction loss:  {contact_metrics_accum['attraction']:.4f}\n"
                             f"  Mean distance:    {contact_metrics_accum['dist_mean']:.4f}m\n"
                             f"  Num contacts:     {int(contact_metrics_accum['num_contacts'])}\n"
                             f"  Num penetrations: {int(contact_metrics_accum['num_penetrations'])}\n"
-                            f"  Total loss:       {weighted_contact_loss:.4f}\n"
+                            f"  Weighted loss:    {weighted_contact_loss:.4f}\n"
                         )
                 else:
                     logger.warning(
@@ -2105,6 +2269,7 @@ class HOLD(pl.LightningModule):
                 logger.error(f"[Phase 4] Contact loss computation failed: {e}")
                 import traceback
                 traceback.print_exc()
+
         if should_profile and phase4_active:
             self.memory_profiler.checkpoint("after_contact")
 
@@ -2279,8 +2444,15 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     # Step 6: Apply Phase 5 dynamic weighting
                     # =============================================================
-                    weighted_temporal = temporal_loss * loss_weights['temporal'] * self.w_temporal
-
+                    # Scheduler already provides complete weight (no config multiplication needed)
+                    if hasattr(self, 'phase5_scheduler') and self.phase5_scheduler is not None:
+                        # Use scheduler weight only
+                        weighted_temporal = temporal_loss * loss_weights['temporal']
+                        logger.debug(f"[Phase 5] Using scheduler temporal weight: {loss_weights['temporal']:.4f}")
+                    else:
+                        # Fallback: Use config weight
+                        weighted_temporal = temporal_loss * self.w_temporal
+                        logger.debug(f"[Phase 5] Using config temporal weight: {self.w_temporal:.4f}")
                     # =============================================================
                     # Step 7: Add to total loss (OPTION A: with gradients)
                     # =============================================================
@@ -3703,7 +3875,6 @@ class HOLD(pl.LightningModule):
         return hand_params
 
     def _unwrap_xdict_to_tensor(self, obj):
-        import torch
         if isinstance(obj, torch.Tensor):
             return obj
         # xdict: try values as method first, then attribute
@@ -4319,7 +4490,6 @@ class HOLD(pl.LightningModule):
                 nodes = self._modules['model'].nodes
 
         if nodes is not None:
-            from loguru import logger
             logger.info(f"[HOLD.inference_step] Found nodes at correct location, fetching checkpoint params")
             for node in nodes.values():
                 params = node.params(batch["idx"])  # Returns dict with all parameters
@@ -4335,7 +4505,6 @@ class HOLD(pl.LightningModule):
                         batch[key] = value
             logger.info(f"[HOLD.inference_step] Successfully loaded checkpoint params into batch")
         else:
-            from loguru import logger
             logger.warning("[HOLD.inference_step] ⚠️ Could not find nodes attribute!")
             logger.warning("  Checking if checkpoint preservation is enabled...")
             logger.warning("  If not, will use batch GT instead of checkpoint params")

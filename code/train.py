@@ -653,16 +653,16 @@ def main():
 
     if args.load_ckpt != "":
         # ================================================================
-        # ✅ CRITICAL: Load checkpoint with memory defragmentation
+        # TRANSFER LEARNING: Load HOLD weights only (exclude GHOP)
         # ================================================================
         print(f"\n{'='*70}")
-        print("TRANSFER LEARNING: Loading model weights only")  # ← Add this
-        print(f"{'='*70}")  # ← Add this
-        print(f"\nLoading checkpoint with defragmentation: {args.load_ckpt}")
+        print("TRANSFER LEARNING: Loading HOLD model weights")
+        print(f"{'='*70}")
+        print(f"Checkpoint: {args.load_ckpt}")
 
         # Step 1: Load checkpoint to CPU
         sd = torch.load(args.load_ckpt, map_location='cpu')["state_dict"]
-        print(f"  Loaded {len(sd)} parameters to CPU")
+        print(f"  Loaded {len(sd)} parameters from checkpoint")
 
         # Step 2: Aggressive GPU memory cleanup
         if torch.cuda.is_available():
@@ -678,21 +678,108 @@ def main():
             mem_before = torch.cuda.memory_allocated() / 1024**2
             print(f"  GPU memory before load: {mem_before:.1f} MB")
 
-        # Step 3: Load state dict (moves tensors to GPU with fresh layout)
-        model.load_state_dict(sd, strict=False)
+        # ================================================================
+        # Step 3: FILTER OUT GHOP COMPONENTS (if Phase 3 enabled)
+        # ================================================================
+        if hasattr(opt, 'phase3') and opt.phase3.get('enabled', False):
+            print("\n[FILTER] Phase 3 enabled - excluding GHOP components from checkpoint")
 
+            # Keys to exclude (GHOP components already initialized from GHOP checkpoint)
+            ghop_component_prefixes = [
+                'vqvae.',               # VQ-VAE wrapper
+                'unet.',                # U-Net wrapper (THIS IS THE KEY ONE!)
+                'hand_field_builder.',  # Hand field builder
+                'sds_loss.',            # SDS loss module
+                'ghop_manager.',        # GHOP manager
+            ]
+
+            # Get current model structure for shape validation
+            model_sd = model.state_dict()
+
+            # Filter checkpoint
+            original_count = len(sd)
+            filtered_sd = {}
+            excluded_by_prefix = []
+            excluded_by_shape = []
+
+            for key, value in sd.items():
+                # Check if key belongs to GHOP components (by prefix)
+                is_ghop_component = any(key.startswith(prefix) for prefix in ghop_component_prefixes)
+
+                if is_ghop_component:
+                    excluded_by_prefix.append(key)
+                    continue
+
+                # Check shape mismatch (catches remaining GHOP conflicts)
+                if key in model_sd and value.shape != model_sd[key].shape:
+                    excluded_by_shape.append(key)
+                    print(f"[FILTER] Shape mismatch: {key}")
+                    print(f"         Checkpoint: {value.shape} → Model: {model_sd[key].shape}")
+                    continue
+
+                # Safe to load
+                filtered_sd[key] = value
+
+            print(f"[FILTER] Results:")
+            print(f"  Original checkpoint keys: {original_count}")
+            print(f"  Excluded (GHOP prefix): {len(excluded_by_prefix)}")
+            print(f"  Excluded (shape mismatch): {len(excluded_by_shape)}")
+            print(f"  Remaining HOLD keys: {len(filtered_sd)}")
+
+            if len(excluded_by_prefix) > 0:
+                print(f"\n[FILTER] Sample excluded GHOP keys:")
+                for key in excluded_by_prefix[:5]:
+                    print(f"  - {key}")
+
+            if len(excluded_by_shape) > 0:
+                print(f"\n[FILTER] Keys with shape mismatch:")
+                for key in excluded_by_shape[:10]:
+                    print(f"  - {key}")
+
+            sd = filtered_sd
+            print(f"\n✓ Filtered checkpoint ready: {len(sd)} parameters")
+        else:
+            print("\n[FILTER] Phase 3 disabled - loading all checkpoint weights")
+
+        # ================================================================
+        # Step 4: Load filtered state dict
+        # ================================================================
+        print(f"\nLoading {len(sd)} parameters into model...")
+        missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
+
+        print(f"\n✓ Checkpoint loaded:")
+        print(f"  - Parameters loaded: {len(sd)}")
+        print(f"  - Missing in checkpoint: {len(missing_keys)}")
+        print(f"  - Unexpected in checkpoint: {len(unexpected_keys)}")
+
+        # Log missing keys breakdown (if Phase 3 enabled)
+        if hasattr(opt, 'phase3') and opt.phase3.get('enabled', False):
+            ghop_component_prefixes = ['vqvae.', 'unet.', 'hand_field_builder.', 'sds_loss.', 'ghop_manager.']
+            ghop_missing = [k for k in missing_keys if any(k.startswith(p) for p in ghop_component_prefixes)]
+            hold_missing = [k for k in missing_keys if k not in ghop_missing]
+
+            if len(ghop_missing) > 0:
+                print(f"\n✅ GHOP components not loaded from checkpoint (expected): {len(ghop_missing)}")
+                print(f"   These were initialized from GHOP checkpoint instead")
+
+            if len(hold_missing) > 0:
+                print(f"\n⚠️  HOLD components missing from checkpoint: {len(hold_missing)}")
+                if len(hold_missing) <= 10:
+                    for key in hold_missing:
+                        print(f"   - {key}")
+
+        # Step 5: Post-load cleanup
         if torch.cuda.is_available():
-            # Step 4: Post-load cleanup
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
             mem_after = torch.cuda.memory_allocated() / 1024**2
-            print(f"  GPU memory after load: {mem_after:.1f} MB")
-            print(f"  Memory allocated: {mem_after - mem_before:.1f} MB")
+            print(f"\n  GPU memory after load: {mem_after:.1f} MB")
+            print(f"  Memory increase: {mem_after - mem_before:.1f} MB")
 
-        print("✅ Checkpoint loaded with defragmentation")
-        print("✅ Training will start from epoch 0")  # ← Add this
-        print(f"{'='*70}\n")  # ← Add this
+        print(f"\n✅ Transfer learning setup complete")
+        print(f"✅ Training will start from epoch 0")
+        print(f"{'='*70}\n")
         ckpt_path = None
 
     if args.load_pose != "":

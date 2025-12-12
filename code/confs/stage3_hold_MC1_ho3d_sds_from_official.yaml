@@ -15,9 +15,9 @@ phase3:
     device: cuda
 
     # Use same checkpoint paths as Stage 2
-    unet_checkpoint: checkpoints/ghop/last.ckpt
-    unified_checkpoint: checkpoints/ghop/last.ckpt
-    vqvae_checkpoint: checkpoints/ghop/last.ckpt
+    unet_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
+    unified_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
+    vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unet_use_pretrained: true
     vqvae_use_pretrained: true
 

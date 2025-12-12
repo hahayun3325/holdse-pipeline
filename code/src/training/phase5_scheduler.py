@@ -104,32 +104,22 @@ class Phase5TrainingScheduler:
             'temporal': 0.0  # Phase 5+
         }
 
-        # ====================================================================
-        # Phase 3: SDS Guidance with Ramp-up
-        # Verified from graspsyn.py Lines 166-167: w_sds = 10
-        # ====================================================================
+        # Phase 3: SDS Guidance with corrected ramp-up
         if iteration >= self.phase3_start:
-            # Linear ramp-up over 100 iterations for stable optimization
-            rampup_progress = min((iteration - self.phase3_start) / 100, 1.0)
+            # +1 ensures boundary step has non-zero weight
+            rampup_progress = min((iteration - self.phase3_start + 1) / 100, 1.0)
             weights['sds'] = 10.0 * rampup_progress
 
-        # ====================================================================
-        # Phase 4: Contact Refinement
-        # Verified from graspsyn.py Lines 238-243: w_pen=1, w_miss=1
-        # ====================================================================
+        # Phase 4: Contact Refinement with corrected ramp-up
         if iteration >= self.phase4_start:
-            # Linear ramp-up over 100 iterations
-            rampup_progress = min((iteration - self.phase4_start) / 100, 1.0)
-            # Combined penetration + missed contact = 1.0
+            # +1 ensures step 20000 has contact=0.01 instead of 0.0
+            rampup_progress = min((iteration - self.phase4_start + 1) / 100, 1.0)
             weights['contact'] = 1.0 * rampup_progress
 
-        # ====================================================================
-        # Phase 5: Diffusion Prior + Temporal Consistency
-        # Enhanced SDS via diffusion_prior (distinct from Phase 3)
-        # ====================================================================
+        # Phase 5: Diffusion + Temporal with corrected ramp-up
         if iteration >= self.phase5_start:
-            # Linear ramp-up over 100 iterations
-            rampup_progress = min((iteration - self.phase5_start) / 100, 1.0)
+            # +1 ensures step 20500 has temporal=0.005 instead of 0.0
+            rampup_progress = min((iteration - self.phase5_start + 1) / 100, 1.0)
 
             # Enhanced diffusion prior (geometry refinement)
             weights['diffusion'] = 5.0 * rampup_progress
@@ -152,6 +142,15 @@ class Phase5TrainingScheduler:
             # Increase RGB fidelity (50% increase)
             weights['rgb'] *= (1.0 + 0.5 * decay_progress)
 
+        # DEBUG: Log weights at critical steps
+        if iteration in [0, 100, 1000, 10000, 20000, 20100, 20500, 20600, 50000, 50100]:
+            logger.info(
+                f"[SCHEDULER DEBUG] Step {iteration}: "
+                f"sds={weights['sds']:.3f}, "
+                f"contact={weights['contact']:.3f}, "
+                f"temporal={weights['temporal']:.3f}, "
+                f"diffusion={weights['diffusion']:.3f}"
+            )
         return weights
 
     def get_learning_rate_multiplier(self, iteration: int, base_lr: float = 1e-4) -> float:

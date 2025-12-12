@@ -466,7 +466,8 @@ def main():
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
         # ('logs/8ceebe9d0/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint 30-epoch
-        ('logs/ac71c88b7/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint 40-epoch
+        # ('logs/ac71c88b7/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint 40-epoch
+        ('logs/75def08b1/checkpoints/last.ckpt', 32),  # Stage 3 Checkpoint Refined Phase 4 30-epoch
         # hold_GPMF12_ho3d case
         # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
         # GHOP Official Checkpoint
