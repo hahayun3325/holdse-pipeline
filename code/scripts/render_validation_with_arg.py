@@ -460,14 +460,15 @@ def main():
         # ('logs/a0c32d3e8/checkpoints/last.ckpt', 21), # Stage 2 Checkpoint 15 epochs Refiend SDS
         # ('logs/70d907fbb/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint 30 epochs Refiend SDS
         # ('logs/482915ef4/checkpoints/last.ckpt', 23),  # Stage 2 Checkpoint 1-epoch on Official Checkpoint
-        # ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
+        ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
         # ('logs/adfdabdc0/checkpoints/last.ckpt', 25),  # Stage 2 Checkpoint 70-epoch on Official Checkpoint
         # ('logs/afb17c622/checkpoints/last.ckpt', 26),  # Stage 2 Checkpoint 70-epoch(full SDS) on Official Checkpoint
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
         # ('logs/fafeb1145/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint with updated SDS
         # ('logs/8ceebe9d0/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint 30-epoch
         # ('logs/ac71c88b7/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint 40-epoch
-        ('logs/75def08b1/checkpoints/last.ckpt', 32),  # Stage 3 Checkpoint Refined Phase 4 30-epoch
+        # ('logs/75def08b1/checkpoints/last.ckpt', 32),  # Stage 3 Checkpoint Refined Phase 4 30-epoch
+        # ('logs/33c12e63d/checkpoints/last.ckpt', 33),  # Stage 3 Checkpoint Refined GHOP ckpt loading 30-epoch
         # hold_GPMF12_ho3d case
         # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
         # GHOP Official Checkpoint
@@ -561,6 +562,7 @@ To use the script:
 python scripts/render_validation_with_arg.py --frames 50,100,150,200,250
 # Full resolution (640×480)
 python scripts/render_validation_with_arg.py --frames 0,50,100 --downsample 1
+python scripts/render_validation_with_arg.py --frames 10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30 --downsample 1
 python scripts/render_validation_with_arg.py --frames 0 --downsample 1 2>&1 | tee logs/evaluation_results/MC1_official_rendering$(date +%d%H%M%S).log
 # Half resolution (320×240) - faster for testing
 python scripts/render_validation_with_arg.py --frames 0,50,100 --downsample 2

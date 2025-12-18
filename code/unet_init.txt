@@ -1,0 +1,97 @@
+        time_embed_dim = model_channels * 4
+        self.time_embed = nn.Sequential(
+            nn.Linear(model_channels, time_embed_dim),
+            nn.SiLU(),
+            nn.Linear(time_embed_dim, time_embed_dim)
+        )
+
+        # ====================================================================
+        # Encoder (downsampling path)
+        # ====================================================================
+        self.input_blocks = nn.ModuleList([
+            nn.Conv3d(in_channels, model_channels, 3, padding=1)
+        ])
+
+        input_block_chans = [model_channels]
+        ch = model_channels
+        ds = 1  # Current downsampling level
+
+        for level, mult in enumerate(channel_mult):
+            for block_idx in range(num_res_blocks):
+                layers = [
+                    ResBlock3D(
+                        ch,
+                        model_channels * mult,
+                        time_emb_channels=time_embed_dim,
+                        dropout=dropout
+                    )
+                ]
+                ch = model_channels * mult
+
+                # Add attention if at specified resolution
+                if ds in attention_resolutions:
+                    layers.append(
+                        SpatialTransformer3D(ch, context_dim=context_dim)
+                    )
+
+                self.input_blocks.append(nn.ModuleList(layers))
+                input_block_chans.append(ch)
+
+            # Downsample (except at last level)
+            if level != len(channel_mult) - 1:
+                self.input_blocks.append(
+                    nn.ModuleList([Downsample3D(ch, use_conv=True)])
+                )
+                input_block_chans.append(ch)
+                ds *= 2
+
+        # ====================================================================
+        # Middle (bottleneck)
+        # ====================================================================
+        self.middle_block = nn.ModuleList([
+            ResBlock3D(ch, ch, time_emb_channels=time_embed_dim, dropout=dropout),
+            SpatialTransformer3D(ch, context_dim=context_dim),
+            ResBlock3D(ch, ch, time_emb_channels=time_embed_dim, dropout=dropout)
+        ])
+
+        # ====================================================================
+        # Decoder (upsampling path)
+        # ====================================================================
+        self.output_blocks = nn.ModuleList([])
+
+        for level, mult in list(enumerate(channel_mult))[::-1]:
+            for block_idx in range(num_res_blocks + 1):
+                ich = input_block_chans.pop()
+                layers = [
+                    ResBlock3D(
+                        ch + ich,
+                        model_channels * mult,
+                        time_emb_channels=time_embed_dim,
+                        dropout=dropout
+                    )
+                ]
+                ch = model_channels * mult
+
+                # Add attention if at specified resolution
+                if ds in attention_resolutions:
+                    layers.append(
+                        SpatialTransformer3D(ch, context_dim=context_dim)
+                    )
+
+                # Upsample (except at first block of each level)
+                if level and block_idx == num_res_blocks:
+                    layers.append(Upsample3D(ch, use_conv=True))
+                    ds //= 2
+
+                self.output_blocks.append(nn.ModuleList(layers))
+
+        # ====================================================================
+        # Final output projection
+        # ====================================================================
+        self.out = nn.Sequential(
+            nn.GroupNorm(32, model_channels),
+            nn.SiLU(),
+            nn.Conv3d(model_channels, out_channels, 3, padding=1)
+        )
+
+    def forward(self, x, timesteps, context=None):

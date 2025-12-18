@@ -1,0 +1,104 @@
+        self.num_resolutions = len(ch_mult)
+
+        # Input conv
+        self.conv_in = nn.Conv3d(in_channels, ch, kernel_size=3, padding=1)
+
+        # Downsampling blocks
+        self.down = nn.ModuleList()
+        in_ch = ch
+        for i_level in range(self.num_resolutions):
+            block = nn.ModuleList()
+            out_ch = ch * ch_mult[i_level]
+
+            # ResBlocks
+            for i_block in range(num_res_blocks):
+                block.append(ResBlock3D(in_ch, out_ch))
+                in_ch = out_ch
+
+            # Downsample
+            if i_level != self.num_resolutions - 1:
+                block.append(Downsample3D(in_ch))
+
+            self.down.append(block)
+
+        # Output
+        self.norm_out = nn.GroupNorm(32, in_ch)
+        self.conv_out = nn.Conv3d(in_ch, z_channels, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        """
+        Args:
+            x: [B, 1, 64, 64, 64] input SDF
+        Returns:
+            z: [B, 3, 16, 16, 16] continuous latent
+        """
+        h = self.conv_in(x)
+
+        for i_level, blocks in enumerate(self.down):
+            for block in blocks:
+                h = block(h)
+
+        h = self.norm_out(h)
+        h = F.silu(h)
+        z = self.conv_out(h)
+
+        return z
+
+
+class Decoder3D(nn.Module):
+    """3D decoder for SDF reconstruction."""
+
+    def __init__(self, out_channels=1, z_channels=3, ch=64, ch_mult=[1, 2, 4],
+                 num_res_blocks=1):
+        super().__init__()
+        self.num_resolutions = len(ch_mult)
+
+        # Input
+        in_ch = ch * ch_mult[-1]
+        self.conv_in = nn.Conv3d(z_channels, in_ch, kernel_size=3, padding=1)
+
+        # Upsampling blocks
+        self.up = nn.ModuleList()
+        for i_level in reversed(range(self.num_resolutions)):
+            block = nn.ModuleList()
+            out_ch = ch * ch_mult[i_level]
+
+            # ResBlocks
+            for i_block in range(num_res_blocks):
+                block.append(ResBlock3D(in_ch, out_ch))
+                in_ch = out_ch
+
+            # Upsample
+            if i_level != 0:
+                block.append(Upsample3D(in_ch))
+
+            self.up.append(block)
+
+        # Output
+        self.norm_out = nn.GroupNorm(32, in_ch)
+        self.conv_out = nn.Conv3d(in_ch, out_channels, kernel_size=3, padding=1)
+
+    def forward(self, z):
+        """
+        Args:
+            z: [B, 3, 16, 16, 16] quantized latent
+        Returns:
+            x: [B, 1, 64, 64, 64] reconstructed SDF
+        """
+        h = self.conv_in(z)
+
+        for i_level, blocks in enumerate(self.up):
+            for block in blocks:
+                h = block(h)
+
+        h = self.norm_out(h)
+        h = F.silu(h)
+        x = self.conv_out(h)
+
+        return x
+
+
+class ResBlock3D(nn.Module):
+    """3D residual block."""
+
+    def __init__(self, in_channels, out_channels):
