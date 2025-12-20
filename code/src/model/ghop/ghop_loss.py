@@ -15,9 +15,9 @@ import torch.nn.functional as F
 import numpy as np
 from src.model.ghop.ghop_prior import load_ghop_prior
 from loguru import logger
-import logging
+# import logging
 import traceback
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 # ============================================================================
 # PHASE 3: Core SDS Loss Implementation
@@ -168,7 +168,7 @@ class SDSLoss(nn.Module):
             logger.info(f"[SDS-SHAPE] z_t input shape: {z_t.shape}")
             logger.info(f"[SDS-SHAPE] text_emb shape: {text_emb.shape}")
 
-            eps_cond = self.unet.predict_noise(z_t, t, text_emb)
+            eps_cond = self.unet(z_t, t, text_emb)  # Calls forward() which applies 23→3 adapter
 
             # ADD THIS DEBUG AFTER FIRST U-NET:
             logger.info(f"[SDS-SHAPE] eps_cond output shape: {eps_cond.shape}")
@@ -182,7 +182,7 @@ class SDSLoss(nn.Module):
             # ✅ LOG 8: Before second U-Net call
             logger.info(f"[SDS-MEMORY] Calling U-Net (unconditional)...")
 
-            eps_uncond = self.unet.predict_noise(z_t, t, torch.zeros_like(text_emb))
+            eps_uncond = self.unet(z_t, t, torch.zeros_like(text_emb))  # Calls forward() which applies adapter
 
             # ADD THIS DEBUG AFTER SECOND U-NET:
             logger.info(f"[SDS-SHAPE] eps_uncond output shape: {eps_uncond.shape}")
@@ -200,57 +200,6 @@ class SDSLoss(nn.Module):
         mem_after_guidance = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
         logger.info(f"[SDS-MEMORY] After guidance: {mem_after_guidance:.2f} MB")
 
-        # Then add the interpolation fix right here:
-        # IF SHAPES DON'T MATCH, FIX IT:
-        if eps_theta.shape != noise.shape:
-            logger.warning(f"[SDS-SHAPE] !!! MISMATCH DETECTED !!!")
-            logger.warning(f"[SDS-SHAPE]   eps_theta: {eps_theta.shape}")
-            logger.warning(f"[SDS-SHAPE]   noise:     {noise.shape}")
-
-            # Diagnostic logging (INFO level - we see these)
-            logger.info(f"[SDS-SHAPE] BEFORE FIX:")
-            logger.info(f"[SDS-SHAPE]   eps_theta.is_contiguous(): {eps_theta.is_contiguous()}")
-            logger.info(f"[SDS-SHAPE]   eps_theta.dtype: {eps_theta.dtype}")
-            logger.info(f"[SDS-SHAPE]   eps_theta.device: {eps_theta.device}")
-            logger.info(f"[SDS-SHAPE]   eps_theta.requires_grad: {eps_theta.requires_grad}")
-
-            logger.warning(f"[SDS-SHAPE] Attempting interpolation...")
-
-            try:
-                # CRITICAL FIX: Make contiguous
-                eps_theta = eps_theta.contiguous()
-                logger.info(f"[SDS-SHAPE] After .contiguous(): {eps_theta.is_contiguous()}")
-
-                # Perform interpolation
-                eps_theta = F.interpolate(
-                    eps_theta,
-                    size=tuple(noise.shape[2:]),
-                    mode='trilinear',
-                    align_corners=False
-                )
-
-                # THIS MESSAGE WILL PROVE SUCCESS
-                logger.warning(f"[SDS-SHAPE] ✓✓✓ INTERPOLATION SUCCESS ✓✓✓")
-                logger.info(f"[SDS-SHAPE] After interpolation: {eps_theta.shape}")
-
-            except Exception as e:
-                # GUARANTEED TO LOG (using WARNING level too)
-                logger.warning(f"[SDS-SHAPE] ✗✗✗ INTERPOLATION FAILED ✗✗✗")
-                logger.warning(f"[SDS-SHAPE] Exception: {type(e).__name__}: {str(e)}")
-                logger.error(f"[SDS-SHAPE] FULL ERROR DETAILS:")
-                logger.error(f"[SDS-SHAPE]   Type: {type(e).__name__}")
-                logger.error(f"[SDS-SHAPE]   Message: {str(e)}")
-
-                # Full traceback
-                import traceback
-                logger.error(f"[SDS-SHAPE] Traceback:")
-                for line in traceback.format_exc().split('\n'):
-                    if line.strip():
-                        logger.error(f"[SDS-SHAPE]   {line}")
-
-                # Re-raise so outer handler sees it
-                raise
-
         # NOW the shapes should match:
         # ================================================================
         # Steps 6-9: SDS gradient computation (GHOP sd.py lines 102-115)
@@ -263,11 +212,29 @@ class SDSLoss(nn.Module):
         logger.info(f"[SDS-SHAPE] z_0 shape: {z_0.shape}")
         logger.info(f"[SDS-SHAPE] noise shape: {noise.shape}")
         logger.info(f"[SDS-SHAPE] eps_theta shape: {eps_theta.shape}")
-        logger.info(f"[SDS-SHAPE] w_t shape: {w_t.shape}")  # ✅ NOW SAFE
+        logger.info(f"[SDS-SHAPE] w_t shape: {w_t.shape}")
         logger.info(f"[SDS-SHAPE] w_t value range: [{w_t.min():.4f}, {w_t.max():.4f}]")
 
+        # ================================================================
+        # ✅ FIX: Resize eps_theta to match VQ-VAE latent resolution
+        # ================================================================
+        # GHOP U-Net trained on 8³ latents but HOLD uses 6³ latents.
+        # Downsample U-Net prediction to match target noise resolution.
+        if eps_theta.shape[2:] != noise.shape[2:]:
+            logger.info(
+                f"[SDS-FIX] Spatial mismatch: eps_theta {eps_theta.shape[2:]} "
+                f"vs noise {noise.shape[2:]}, applying trilinear resize"
+            )
+            eps_theta = F.interpolate(
+                eps_theta,
+                size=tuple(noise.shape[2:]),
+                mode='trilinear',
+                align_corners=False
+            )
+            logger.info(f"[SDS-FIX] Resized eps_theta to: {eps_theta.shape}")
+
         # Gradient approximation: ∇_z L_SDS = w(t) * (ε̂_θ - ε)
-        grad = weight * w_t * (eps_theta - noise)
+        grad = weight * w_t * (eps_theta - noise)  # ✅ Shapes now match!
 
         # Target with stop-gradient for backprop
         # We want: ∇_z L = ∇_z ||z_0 - (z_0 - grad)||²
@@ -298,7 +265,7 @@ class SDSLoss(nn.Module):
 
         return sds_loss, info
 
-    def compute_sds_loss(self, obj_sdf, hand_params, text_prompt, weight=1.0):
+    def compute_sds_loss(self, obj_sdf, hand_params, text_prompt, weight=1.0, iteration=0):
         """
         Wrapper method for TwoStageTrainingManager compatibility.
 
@@ -342,8 +309,8 @@ class SDSLoss(nn.Module):
             sds_loss_raw, info = self.forward(
                 object_sdf=obj_sdf,
                 hand_params=hand_params,
-                text_prompts=text_prompt,  # Now guaranteed to be valid list
-                iteration=0,
+                text_prompts=text_prompt,
+                iteration=iteration,  # ← Pass through correctly
                 weight=1.0
             )
 
