@@ -1393,6 +1393,33 @@ class HOLD(pl.LightningModule):
         # Existing preprocessing code continues...
         self.condition_training()
 
+        # ============================================================
+        # CHECKPOINT A: Batch keys immediately after loading
+        # ============================================================
+        if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
+            logger.warning(f"[CHECKPOINT A - Step {self.global_step}] After condition_training()")
+            logger.warning(f"  Batch keys: {sorted(batch.keys())}")
+            logger.warning(f"  'c2w' present: {'c2w' in batch}")
+            logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
+            if 'c2w' in batch:
+                logger.warning(f"  c2w shape: {batch['c2w'].shape}")
+            if 'c2w_n' in batch:
+                logger.warning(f"  c2w_n shape: {batch['c2w_n'].shape}")
+        # ============================================================
+        # FIX: Generate c2w from extrinsics if missing
+        # ============================================================
+        if 'c2w' not in batch and 'extrinsics' in batch:
+            try:
+                # Always use CPU for stability (GPU inverse has CUDA solver issues)
+                extrinsics_cpu = batch['extrinsics'].cpu().contiguous()
+                c2w_cpu = torch.linalg.inv(extrinsics_cpu)
+                batch['c2w'] = c2w_cpu.to(batch['extrinsics'].device)
+                logger.debug(f"[FIX] Generated c2w from extrinsics (CPU): {batch['c2w'].shape}")
+            except Exception as e:
+                logger.error(f"[FIX] Failed to generate c2w: {e}")
+                logger.error(f"[FIX] extrinsics shape={batch['extrinsics'].shape}, dtype={batch['extrinsics'].dtype}")
+                # Don't add incorrect c2w - let Phase 5 skip
+
         # ================================================================
         # ✅ CRITICAL FIX: BATCH PREPROCESSING - Handle HOLD and GHOP formats
         # ================================================================
@@ -1540,6 +1567,15 @@ class HOLD(pl.LightningModule):
                 extrinsics = torch.linalg.inv(c2w_cpu).to(c2w.device)
             batch['extrinsics'] = extrinsics
             logger.info(f"[FIX] Generated extrinsics: {extrinsics.shape}")
+            # ============================================================
+            # CHECKPOINT B: After extrinsics generation
+            # ============================================================
+            if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
+                logger.warning(f"[CHECKPOINT B - Step {self.global_step}] After extrinsics generation")
+                logger.warning(f"  'c2w' present: {'c2w' in batch}")
+                logger.warning(f"  'extrinsics' present: {'extrinsics' in batch}")
+                if 'c2w' in batch:
+                    logger.warning(f"  c2w shape: {batch['c2w'].shape}")
 
         # Get batch size and device
         B = batch['idx'].shape[0]
@@ -1615,7 +1651,14 @@ class HOLD(pl.LightningModule):
                     batch[key] = detached_tensor
 
                 logger.debug(f"  Detached: {key} (shape: {detached_tensor.shape})")
-
+        # ============================================================
+        # CHECKPOINT C: After detachment loop
+        # ============================================================
+        if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
+            logger.warning(f"[CHECKPOINT C - Step {self.global_step}] After detachment loop")
+            logger.warning(f"  'c2w' present: {'c2w' in batch}")
+            logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
+            logger.warning(f"  'extrinsics' present: {'extrinsics' in batch}")
         for key in list(batch.keys()):
             if key.endswith('_n') and torch.is_tensor(batch[key]):
                 detached_tensor = batch[key].detach()
@@ -1651,6 +1694,7 @@ class HOLD(pl.LightningModule):
         # COMPUTE BASE LOSSES
         # ================================================================
         loss_output = self.loss(batch, model_outputs)
+        total_loss = loss_output["loss"]  # base HOLD loss
 
         # ========================================
         # MANO Joint Supervision (MODIFIED)
@@ -1968,11 +2012,18 @@ class HOLD(pl.LightningModule):
                                      self.global_step >= self.phase5_start_iter)
 
                     # Always detach GHOP loss to ensure consistent graph structure across all phases
-                    weighted_ghop_detached = weighted_ghop.detach()
-                    loss_output['loss'] = loss_output['loss'] + weighted_ghop_detached
-                    logger.debug(f"[Phase 3] Detached GHOP loss (consistent strategy)")
-                    loss_output['ghop_loss'] = weighted_ghop_detached
-
+                    total_loss = total_loss + weighted_ghop  # keep gradients
+                    loss_output["loss_sds"] = weighted_ghop  # debug: grad-tracking
+                    logger.debug(f"[Phase 3] Added GHOP loss WITH GRADIENTS")
+                    loss_output['ghop_loss'] = weighted_ghop.detach()  # Detach only for logging
+                    # ============================================================
+                    # CHECKPOINT D: After Phase 3 SDS computation
+                    # ============================================================
+                    if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
+                        logger.warning(f"[CHECKPOINT D - Step {self.global_step}] After Phase 3 SDS")
+                        logger.warning(f"  'c2w' present: {'c2w' in batch}")
+                        logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
+                        logger.warning(f"  Batch keys: {sorted(batch.keys())}")
                     # ============================================================
                     # STEP 7: Log GHOP metrics
                     # ============================================================
@@ -2192,6 +2243,10 @@ class HOLD(pl.LightningModule):
                                 obj_verts=o_verts,
                                 obj_faces=o_faces
                             )
+                        logger.warning(f"[DEBUG Phase 4] contact_loss_b: {contact_loss_b}")
+                        logger.warning(f"[DEBUG Phase 4] contact_loss_b is None: {contact_loss_b is None}")
+                        if contact_loss_b is not None:
+                            logger.warning(f"[DEBUG Phase 4] contact_loss_b.item(): {contact_loss_b.item()}")
 
                         total_contact_loss = total_contact_loss + contact_loss_b
                         num_valid_samples += 1
@@ -2216,12 +2271,22 @@ class HOLD(pl.LightningModule):
 
                     # Apply pre-calculated effective weight
                     weighted_contact_loss = total_contact_loss * effective_contact_weight
+                    # ============================================================
+                    # CHECKPOINT F: Phase 4 Contact debugging
+                    # ============================================================
+                    if self.global_step in [1000, 1001, 1002, 1010, 1050, 1100]:
+                        logger.warning(f"[CHECKPOINT F - Step {self.global_step}] Phase 4 Contact")
+                        logger.warning(f"  Phase 4 enabled: {self.phase4_enabled}")
+                        logger.warning(f"  effective_contact_weight: {effective_contact_weight}")
+                        logger.warning(
+                            f"  global_step >= contact_start_iter: {self.global_step >= self.contact_start_iter}")
 
-                    # Add to total loss
-                    loss_output["loss"] = loss_output["loss"] + weighted_contact_loss
-                    loss_output['contact_loss'] = weighted_contact_loss
+                    # Line 2285 - SINGLE add to total_loss accumulator
+                    total_loss = total_loss + weighted_contact_loss              # keep gradients
+                    loss_output["loss_contact"] = weighted_contact_loss          # debug: grad-tracking
+                    loss_output['contact_loss'] = weighted_contact_loss.detach() # logging-only
 
-                    logger.debug(f"[Phase 4] Contact loss with gradients")
+                    logger.debug(f"[Phase 4] Added contact loss WITH GRADIENTS: {weighted_contact_loss.item():.6f}")
 
                     # Gradient monitoring
                     if self.global_step % 100 == 0:
@@ -2230,9 +2295,9 @@ class HOLD(pl.LightningModule):
                         else:
                             logger.warning(f"[Phase 4 Grad Check] NO grad_fn (detached?)")
 
-                    # Logging (FIX: Use effective_contact_weight directly, no double multiplication)
+                    # Logging
                     self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
-                    self.log('phase4/contact_weight', effective_contact_weight)  # ← FIXED: No double weighting
+                    self.log('phase4/contact_weight', effective_contact_weight)
                     self.log('phase4/penetration',
                         contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor)
                         else float(contact_metrics_accum['penetration']))
@@ -2318,11 +2383,15 @@ class HOLD(pl.LightningModule):
 
                     if phase3_active or phase4_active or phase5_active:
                         # Other phases active: detach to prevent graph conflicts
-                        loss_output["loss"] = loss_output["loss"] + loss_sds.detach()
+                        # loss_output["loss"] = loss_output["loss"] + loss_sds.detach()
+                        loss_output["loss"] = total_loss
+                        final_loss = total_loss
                         logger.debug(f"[Phase 2] Detached HOLD SDS loss (multi-phase mode)")
                     else:
                         # Only Phase 2: keep gradients
-                        loss_output["loss"] = loss_output["loss"] + loss_sds
+                        # loss_output["loss"] = loss_output["loss"] + loss_sds
+                        loss_output["loss"] = total_loss
+                        final_loss = total_loss
 
                     loss_output["sds_loss"] = loss_sds
 
@@ -2336,11 +2405,7 @@ class HOLD(pl.LightningModule):
         # PHASE 5: TEMPORAL CONSISTENCY FOR VIDEO SEQUENCES
         # ====================================================================
         # ✅ FIX: Ensure Phase 3 has ended before Phase 5 starts
-        phase3_still_active = (
-            self.phase3_enabled and
-            self.global_step < getattr(self, 'phase3_end_iter', 0)
-        )
-        if self.phase5_enabled and self.global_step >= self.phase5_start_iter and not phase3_still_active:
+        if self.phase5_enabled and self.global_step >= self.phase5_start_iter:
             try:
                 # Log phase transition
                 if self.global_step == self.phase5_start_iter:
@@ -2378,6 +2443,16 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     # Step 3: Verify batch contains required fields from hoi.py
                     # =============================================================
+                    # ============================================================
+                    # CHECKPOINT E: Before Phase 5 validation
+                    # ============================================================
+                    if self.global_step in [1100, 1101, 1102, 1110, 1120]:
+                        logger.warning(f"[CHECKPOINT E - Step {self.global_step}] Before Phase 5 validation")
+                        logger.warning(f"  'c2w' present: {'c2w' in batch}")
+                        logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
+                        logger.warning(f"  'hA_n' present: {'hA_n' in batch}")
+                        logger.warning(f"  All batch keys: {sorted(batch.keys())}")
+
                     required_fields = ['hA_n', 'c2w', 'c2w_n']
                     missing_fields = [f for f in required_fields if f not in batch]
 
@@ -2440,6 +2515,21 @@ class HOLD(pl.LightningModule):
                         predicted_hand_pose=predicted_pose,
                         sequence_id=sequence_id,
                     )
+                    # Add BEFORE the if statement
+                    logger.warning(f"[DEBUG Phase 5] temporal_loss: {temporal_loss}")
+                    logger.warning(f"[DEBUG Phase 5] temporal_loss is None: {temporal_loss is None}")
+                    if temporal_loss is not None:
+                        logger.warning(f"[DEBUG Phase 5] temporal_loss.item(): {temporal_loss.item()}")
+                    else:
+                        logger.warning(f"[DEBUG Phase 5] temporal_loss IS NONE - no loss to log")
+                    # Add logging
+                    if temporal_loss is not None:
+                        self.log('phase5/temporal_loss', temporal_loss.detach().item(), prog_bar=True)
+                        if self.global_step % self.log_phase5_every == 0:
+                            logger.info(
+                                f"[Phase 5 - Step {self.global_step}] Temporal loss: {temporal_loss.item():.6f}")
+                            if temporal_metrics:
+                                logger.info(f"[Phase 5] Metrics: {temporal_metrics}")
 
                     # =============================================================
                     # Step 6: Apply Phase 5 dynamic weighting
@@ -2453,13 +2543,18 @@ class HOLD(pl.LightningModule):
                         # Fallback: Use config weight
                         weighted_temporal = temporal_loss * self.w_temporal
                         logger.debug(f"[Phase 5] Using config temporal weight: {self.w_temporal:.4f}")
+
                     # =============================================================
                     # Step 7: Add to total loss (OPTION A: with gradients)
                     # =============================================================
                     # OPTION A: Remove detachment for direct gradient optimization
                     # Temporal loss needs to directly optimize hand pose smoothness
-                    loss_output['loss'] = loss_output['loss'] + weighted_temporal
-                    loss_output['temporal_loss'] = weighted_temporal  # Keep gradients
+                    # Line ~2553 - Use total_loss accumulator
+                    total_loss = total_loss + weighted_temporal                  # keep gradients
+                    loss_output["loss_temporal"] = weighted_temporal             # debug: grad-tracking
+                    loss_output['temporal_loss'] = weighted_temporal.detach()    # logging-only
+
+                    logger.debug(f"[Phase 5] Added temporal loss WITH GRADIENTS: {weighted_temporal.item():.6f}")
 
                     # Add gradient monitoring for validation
                     if self.global_step % 100 == 0:
@@ -2500,11 +2595,7 @@ class HOLD(pl.LightningModule):
                 logger.warning(f"[Phase 5] Temporal consistency computation failed: {e}")
                 import traceback
                 traceback.print_exc()
-        elif self.phase5_enabled and phase3_still_active:
-            logger.debug(
-                f"[Phase 5] SKIPPED at step {self.global_step}: "
-                f"Phase 3 still active (ends at {self.phase3_end_iter})"
-            )
+
         # Logging
         if self.global_step % self.args.log_every == 0:
             self.metrics(model_outputs, batch, self.global_step, self.current_epoch)
@@ -2520,8 +2611,8 @@ class HOLD(pl.LightningModule):
         # ====================================================================
         # ✅ CRITICAL FIX: Verify Loss is Not Zero Before Backward
         # ====================================================================
-        final_loss = loss_output.get("loss",
-                                     torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True))
+        # final_loss = loss_output.get("loss",
+        #                              torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True))
 
         # ====================================================================
         # ✅ OPTION A VALIDATION: Monitor all gradient components
@@ -2566,11 +2657,9 @@ class HOLD(pl.LightningModule):
                 )
                 loss_output["loss"] = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
             # In all cases, final_loss uses loss_output["loss"]
-            final_loss = loss_output["loss"]
+            # final_loss = loss_output["loss"]
 
         # Ensure loss has requires_grad
-        if not final_loss.requires_grad and final_loss.item() != 0.0:
-            logger.warning(f"[Step {self.global_step}] Loss doesn't require gradients (detached)")
 
         # Get phase activity status for diagnostics
         phase3_active = (
@@ -2596,7 +2685,7 @@ class HOLD(pl.LightningModule):
         # DEBUG: Loss Composition Logging (Every 100 steps)
         # ====================================================================
         if self.global_step % 100 == 0:
-            loss_base = loss_output.get('loss', torch.tensor(0.0))
+            loss_base = loss_output.get('loss/rgb', torch.tensor(0.0))  # RGB component only
             loss_ghop = loss_output.get('ghop_loss', torch.tensor(0.0))
             loss_contact = loss_output.get('contact_loss', torch.tensor(0.0))
             loss_rgb = loss_output.get('loss/rgb', torch.tensor(0.0))
@@ -2607,11 +2696,11 @@ class HOLD(pl.LightningModule):
             contact_f = to_float(loss_contact)
             rgb_f = to_float(loss_rgb)
             temporal_f = to_float(loss_temporal)
-            final_f = final_loss.item() if final_loss.numel() > 0 else 0.0
+            final_f = total_loss.item() if total_loss.numel() > 0 else 0.0  # ← CHANGED FROM final_loss
 
             logger.info(
                 f"\n[Loss Composition - Step {self.global_step}]\n"
-                f"  Base RGB loss:     {base_f:.6f}\n"
+                f"  RGB loss:          {base_f:.6f}\n"
                 f"  GHOP SDS loss:     {ghop_f:.6f}\n"
                 f"  Contact loss:      {contact_f:.6f}\n"
                 f"  Temporal loss:     {temporal_f:.6f}\n"
@@ -2635,7 +2724,7 @@ class HOLD(pl.LightningModule):
         # ====================================================================
         # CRITICAL: Check for Zero Loss at Phase Transitions
         # ====================================================================
-        loss_value = final_loss.item() if final_loss.numel() > 0 else 0.0
+        loss_value = total_loss.item() if total_loss.numel() > 0 else 0.0
 
         if abs(loss_value) < 1e-8:  # Effectively zero
             logger.warning(
@@ -2662,7 +2751,12 @@ class HOLD(pl.LightningModule):
         # ================================================================
         # GHOP FIX: Manual optimization to prevent double backward
         # ================================================================
-        final_loss = loss_output["loss"]
+        # At the END of all phase computations, before backward:
+        loss_output["loss"] = total_loss  # Write accumulator to dict
+        final_loss = total_loss  # Use accumulator for backward
+
+        # Verify this is the FINAL value used
+        logger.debug(f"[TRAIN STEP] step={self.global_step} final_loss={final_loss.item():.6f}")
         if torch.isnan(final_loss) or torch.isinf(final_loss):
             logger.warning(
                 f"[Step {self.global_step}] final_loss is NaN/Inf. "
