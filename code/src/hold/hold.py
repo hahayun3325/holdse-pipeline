@@ -1394,18 +1394,6 @@ class HOLD(pl.LightningModule):
         self.condition_training()
 
         # ============================================================
-        # CHECKPOINT A: Batch keys immediately after loading
-        # ============================================================
-        if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
-            logger.warning(f"[CHECKPOINT A - Step {self.global_step}] After condition_training()")
-            logger.warning(f"  Batch keys: {sorted(batch.keys())}")
-            logger.warning(f"  'c2w' present: {'c2w' in batch}")
-            logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
-            if 'c2w' in batch:
-                logger.warning(f"  c2w shape: {batch['c2w'].shape}")
-            if 'c2w_n' in batch:
-                logger.warning(f"  c2w_n shape: {batch['c2w_n'].shape}")
-        # ============================================================
         # FIX: Generate c2w from extrinsics if missing
         # ============================================================
         if 'c2w' not in batch and 'extrinsics' in batch:
@@ -1567,15 +1555,6 @@ class HOLD(pl.LightningModule):
                 extrinsics = torch.linalg.inv(c2w_cpu).to(c2w.device)
             batch['extrinsics'] = extrinsics
             logger.info(f"[FIX] Generated extrinsics: {extrinsics.shape}")
-            # ============================================================
-            # CHECKPOINT B: After extrinsics generation
-            # ============================================================
-            if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
-                logger.warning(f"[CHECKPOINT B - Step {self.global_step}] After extrinsics generation")
-                logger.warning(f"  'c2w' present: {'c2w' in batch}")
-                logger.warning(f"  'extrinsics' present: {'extrinsics' in batch}")
-                if 'c2w' in batch:
-                    logger.warning(f"  c2w shape: {batch['c2w'].shape}")
 
         # Get batch size and device
         B = batch['idx'].shape[0]
@@ -1651,14 +1630,7 @@ class HOLD(pl.LightningModule):
                     batch[key] = detached_tensor
 
                 logger.debug(f"  Detached: {key} (shape: {detached_tensor.shape})")
-        # ============================================================
-        # CHECKPOINT C: After detachment loop
-        # ============================================================
-        if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
-            logger.warning(f"[CHECKPOINT C - Step {self.global_step}] After detachment loop")
-            logger.warning(f"  'c2w' present: {'c2w' in batch}")
-            logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
-            logger.warning(f"  'extrinsics' present: {'extrinsics' in batch}")
+
         for key in list(batch.keys()):
             if key.endswith('_n') and torch.is_tensor(batch[key]):
                 detached_tensor = batch[key].detach()
@@ -2016,14 +1988,7 @@ class HOLD(pl.LightningModule):
                     loss_output["loss_sds"] = weighted_ghop  # debug: grad-tracking
                     logger.debug(f"[Phase 3] Added GHOP loss WITH GRADIENTS")
                     loss_output['ghop_loss'] = weighted_ghop.detach()  # Detach only for logging
-                    # ============================================================
-                    # CHECKPOINT D: After Phase 3 SDS computation
-                    # ============================================================
-                    if self.global_step in [0, 1, 1000, 1100, 1101, 1102]:
-                        logger.warning(f"[CHECKPOINT D - Step {self.global_step}] After Phase 3 SDS")
-                        logger.warning(f"  'c2w' present: {'c2w' in batch}")
-                        logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
-                        logger.warning(f"  Batch keys: {sorted(batch.keys())}")
+
                     # ============================================================
                     # STEP 7: Log GHOP metrics
                     # ============================================================
@@ -2129,6 +2094,10 @@ class HOLD(pl.LightningModule):
 
         if phase4_active:
             try:
+                # NEW: Add one-time activation log
+                if not hasattr(self, 'phase4_activated') or not self.phase4_activated:
+                    logger.info(f"[Phase 4] Contact loss ACTIVATED at step {self.global_step}")
+                    self.phase4_activated = True
                 logger.debug(
                     f"[Phase 4] Running with weight {effective_contact_weight:.4f} from {weight_source}"
                 )
@@ -2271,15 +2240,6 @@ class HOLD(pl.LightningModule):
 
                     # Apply pre-calculated effective weight
                     weighted_contact_loss = total_contact_loss * effective_contact_weight
-                    # ============================================================
-                    # CHECKPOINT F: Phase 4 Contact debugging
-                    # ============================================================
-                    if self.global_step in [1000, 1001, 1002, 1010, 1050, 1100]:
-                        logger.warning(f"[CHECKPOINT F - Step {self.global_step}] Phase 4 Contact")
-                        logger.warning(f"  Phase 4 enabled: {self.phase4_enabled}")
-                        logger.warning(f"  effective_contact_weight: {effective_contact_weight}")
-                        logger.warning(
-                            f"  global_step >= contact_start_iter: {self.global_step >= self.contact_start_iter}")
 
                     # Line 2285 - SINGLE add to total_loss accumulator
                     total_loss = total_loss + weighted_contact_loss              # keep gradients
@@ -2287,13 +2247,6 @@ class HOLD(pl.LightningModule):
                     loss_output['contact_loss'] = weighted_contact_loss.detach() # logging-only
 
                     logger.debug(f"[Phase 4] Added contact loss WITH GRADIENTS: {weighted_contact_loss.item():.6f}")
-
-                    # Gradient monitoring
-                    if self.global_step % 100 == 0:
-                        if weighted_contact_loss.grad_fn is not None:
-                            logger.info(f"[Phase 4 Grad Check] grad_fn exists: {weighted_contact_loss.grad_fn}")
-                        else:
-                            logger.warning(f"[Phase 4 Grad Check] NO grad_fn (detached?)")
 
                     # Logging
                     self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
@@ -2443,15 +2396,6 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     # Step 3: Verify batch contains required fields from hoi.py
                     # =============================================================
-                    # ============================================================
-                    # CHECKPOINT E: Before Phase 5 validation
-                    # ============================================================
-                    if self.global_step in [1100, 1101, 1102, 1110, 1120]:
-                        logger.warning(f"[CHECKPOINT E - Step {self.global_step}] Before Phase 5 validation")
-                        logger.warning(f"  'c2w' present: {'c2w' in batch}")
-                        logger.warning(f"  'c2w_n' present: {'c2w_n' in batch}")
-                        logger.warning(f"  'hA_n' present: {'hA_n' in batch}")
-                        logger.warning(f"  All batch keys: {sorted(batch.keys())}")
 
                     required_fields = ['hA_n', 'c2w', 'c2w_n']
                     missing_fields = [f for f in required_fields if f not in batch]

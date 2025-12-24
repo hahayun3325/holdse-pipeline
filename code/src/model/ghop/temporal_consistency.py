@@ -121,6 +121,56 @@ class TemporalConsistencyModule(nn.Module):
             logger.info(f"[Temporal] forward() called (step unknown)")
         logger.debug(f"[Temporal] Sample keys: {list(sample.keys())}")
         batch_size = predicted_hand_pose.shape[0]
+        hA_next_gt = sample.get('hA_n', None)
+        # FIX: Squeeze extra dimensions IMMEDIATELY
+        if hA_next_gt is not None:
+            original_shape = hA_next_gt.shape
+            while hA_next_gt.ndim > 2:
+                if hA_next_gt.shape[1] == 1:
+                    hA_next_gt = hA_next_gt.squeeze(1)
+                else:
+                    break
+            if original_shape != hA_next_gt.shape:
+                logger.warning(f"[Temporal] Squeezed hA_next_gt: {original_shape} → {hA_next_gt.shape}")
+        c2w_current = sample.get('c2w', None)
+        c2w_next = sample.get('c2w_n', None)
+        # FIX: Squeeze camera tensors to remove extra singleton dimensions
+        if c2w_current is not None:
+            original_shape = c2w_current.shape
+            # Expected: [B, 4, 4], might be [B, 1, 4, 4]
+            while c2w_current.ndim > 3:
+                if c2w_current.shape[1] == 1:
+                    c2w_current = c2w_current.squeeze(1)
+                else:
+                    break
+            if original_shape != c2w_current.shape:
+                logger.warning(f"[Temporal] Squeezed c2w_current: {original_shape} → {c2w_current.shape}")
+
+        if c2w_next is not None:
+            original_shape = c2w_next.shape
+            # Expected: [B, 4, 4], might be [B, 1, 4, 4]
+            while c2w_next.ndim > 3:
+                if c2w_next.shape[1] == 1:
+                    c2w_next = c2w_next.squeeze(1)
+                else:
+                    break
+            if original_shape != c2w_next.shape:
+                logger.warning(f"[Temporal] Squeezed c2w_next: {original_shape} → {c2w_next.shape}")
+
+        # Validate batch sizes
+        # Validate batch sizes and adjust to minimum
+        actual_batch_size = batch_size
+        if hA_next_gt is not None and hA_next_gt.shape[0] < batch_size:
+            actual_batch_size = hA_next_gt.shape[0]
+            logger.warning(
+                f"[Temporal] Batch size mismatch: predicted_hand_pose has {batch_size} samples, "
+                f"but hA_n has {hA_next_gt.shape[0]} samples. Processing only {actual_batch_size} samples."
+            )
+        elif hA_next_gt is None:
+            # No ground truth next frame - can still compute acceleration from history
+            actual_batch_size = batch_size
+            logger.debug(f"[Temporal] No hA_n available, will compute acceleration loss only")
+
         device = predicted_hand_pose.device
 
         if sequence_id is None:
@@ -166,13 +216,8 @@ class TemporalConsistencyModule(nn.Module):
             'adaptive_weight': 1.0
         }
 
-        # Extract ground truth next frame poses from hoi.py Lines 204-206
-        hA_next_gt = sample.get('hA_n', None)  # [B, 45]
-        c2w_current = sample.get('c2w', None)  # [B, 4, 4]
-        c2w_next = sample.get('c2w_n', None)  # [B, 4, 4]
-
         # Compute losses for each batch element
-        for b in range(batch_size):
+        for b in range(actual_batch_size):
             hA_pred = predicted_hand_pose[b]  # [45]
 
             # =================================================================
@@ -194,7 +239,11 @@ class TemporalConsistencyModule(nn.Module):
 
                 # Expected velocity from ground truth next frame
                 if hA_next_gt is not None:
-                    velocity_expected = hA_next_gt[b] - hA_pred
+                    if b < hA_next_gt.shape[0]:
+                        velocity_expected = hA_next_gt[b] - hA_pred
+                    else:
+                        logger.debug(f"[Temporal] Skipping batch element {b} (out of bounds)")
+                        continue
 
                     # Velocity smoothness loss
                     velocity_loss = F.mse_loss(velocity_current, velocity_expected)
@@ -241,7 +290,9 @@ class TemporalConsistencyModule(nn.Module):
             # =================================================================
             if (c2w_current is not None and
                     c2w_next is not None and
-                    len(self.camera_history[sequence_id]) > 0):
+                    len(self.camera_history[sequence_id]) > 0 and
+                    b < c2w_current.shape[0] and  # ← ADD THIS
+                    b < c2w_next.shape[0]):  # ← ADD THIS
                 c2w_prev = self.camera_history[sequence_id][-1]  # [4, 4]
 
                 # ================================================================
@@ -287,11 +338,11 @@ class TemporalConsistencyModule(nn.Module):
                 ).item()  # ← Convert to Python float
                 self.velocity_history[sequence_id].append(velocity_mag)
 
-        # Average over batch
-        if batch_size > 0:
-            total_loss = total_loss / batch_size
+        # Average over batch (use actual_batch_size, not batch_size)
+        if actual_batch_size > 0:
+            total_loss = total_loss / actual_batch_size
             for key in ['velocity', 'acceleration', 'camera_motion', 'adaptive_weight']:
-                metrics[key] /= batch_size
+                metrics[key] /= actual_batch_size
 
         return total_loss, metrics
 
