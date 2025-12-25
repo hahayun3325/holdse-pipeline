@@ -115,7 +115,7 @@ class ResBlock3D(nn.Module):
         if self.use_time_emb:
             self.emb_layers = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(time_emb_channels, out_channels)
+                nn.Linear(time_emb_channels, 2 * out_channels)
             )
 
         # Second conv block
@@ -142,10 +142,11 @@ class ResBlock3D(nn.Module):
         """
         h = self.in_layers(x)
 
-        # Add time embedding if provided
+        # Add time embedding if provided (FiLM: scale and shift)
         if self.use_time_emb and emb is not None:
-            emb_out = self.emb_layers(emb)[:, :, None, None, None]
-            h = h + emb_out
+            emb_out = self.emb_layers(emb)  # Shape: (B, 2*out_channels)
+            scale, shift = emb_out.chunk(2, dim=1)  # Each: (B, out_channels)
+            h = h * (1 + scale[:, :, None, None, None]) + shift[:, :, None, None, None]
 
         h = self.out_layers(h)
 
@@ -558,27 +559,59 @@ class GHOP3DUNetWrapper(nn.Module):
         # ============================================================
         # Initialize U-Net with CHECKPOINT architecture
         # ============================================================
-        if config is None:
-            self.unet = GHOP3DUNet(
-                in_channels=3,
-                out_channels=checkpoint_out_channels,  # ← Use detected value (23)
-                model_channels=64,
-                num_res_blocks=2,
-                attention_resolutions=[4, 2],
-                channel_mult=[1, 2, 3],
-                dropout=0.0,
-                context_dim=768
-            )
-        else:
-            # Update config to match checkpoint
-            if 'out_channels' in config:
-                config['out_channels'] = checkpoint_out_channels
-            self.unet = GHOP3DUNet(**config)
+        default_arch_config = {
+            'in_channels': 3,
+            'out_channels': checkpoint_out_channels,
+            'model_channels': 64,
+            'num_res_blocks': 3,            # ← Changed from 2
+            'attention_resolutions': [4, 2],
+            'channel_mult': [1, 2, 3],       # ← Changed from [1, 2, 3]
+            'dropout': 0.0,
+            'context_dim': 768
+        }
 
-        logger.info(f"[GHOP3DUNetWrapper] Initialized U-Net with out_channels={checkpoint_out_channels}")
+        # If checkpoint exists, try to detect its architecture
+        if unet_ckpt_path and os.path.exists(unet_ckpt_path):
+            logger.info(f"[GHOP3DUNetWrapper] Detecting checkpoint architecture...")
+            detected_arch = self._detect_checkpoint_architecture(unet_ckpt_path)
+
+            if detected_arch:
+                # Override defaults with detected values
+                for key, value in detected_arch.items():
+                    default_arch_config[key] = value
+                logger.info(f"[GHOP3DUNetWrapper] ✓ Using detected architecture")
+                logger.info(f"  - channel_mult: {default_arch_config['channel_mult']}")
+                logger.info(f"  - model_channels: {default_arch_config['model_channels']}")
+            else:
+                logger.warning(f"[GHOP3DUNetWrapper] ✗ Detection failed, using default architecture")
+                logger.warning(f"  - channel_mult: {default_arch_config['channel_mult']}")
+
+        # Override with explicit config if provided
+        if config is not None:
+            logger.info(f"[GHOP3DUNetWrapper] Applying explicit config overrides")
+            default_arch_config.update(config)
+            # Ensure output channels match checkpoint
+            if 'out_channels' not in config:
+                default_arch_config['out_channels'] = checkpoint_out_channels
+
+        # Initialize U-Net with final architecture
+        logger.info(f"[GHOP3DUNetWrapper] Initializing U-Net with:")
+        logger.info(f"  - in_channels: {default_arch_config['in_channels']}")
+        logger.info(f"  - out_channels: {default_arch_config['out_channels']}")
+        logger.info(f"  - model_channels: {default_arch_config['model_channels']}")
+        logger.info(f"  - channel_mult: {default_arch_config['channel_mult']}")
+        logger.info(f"  - num_res_blocks: {default_arch_config['num_res_blocks']}")
+
+        self.unet = GHOP3DUNet(**default_arch_config)
+
+        logger.info(f"[GHOP3DUNetWrapper] Initialized U-Net with architecture-matched config")
 
         # ============================================================
-        # Load checkpoint (now architecture matches!)
+        # Load checkpoint (architecture now matches!)
+        # ============================================================
+        # NOTE: _detect_checkpoint_architecture was already called above
+        # before U-Net initialization, so the model architecture should
+        # now match the checkpoint perfectly.
         # ============================================================
         if unet_ckpt_path:
             self._load_checkpoint(unet_ckpt_path)
@@ -822,6 +855,65 @@ class GHOP3DUNetWrapper(nn.Module):
             logger.error("Continuing with randomly initialized U-Net...")
             import traceback
             traceback.print_exc()
+
+    def _detect_checkpoint_architecture(self, checkpoint_path):
+        """
+        Detect U-Net architecture from checkpoint parameters.
+
+        Based on analysis of GHOP official checkpoint:
+        - 12 input_blocks with progression: 128→256→384 channels
+        - 3 ResBlocks per level (num_res_blocks=3)
+        - channel_mult=[2, 4, 6] (not [1, 2, 3]!)
+        """
+        try:
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            state_dict = ckpt.get('state_dict', ckpt)
+
+            # Verify this is a GHOP checkpoint by checking middle block
+            middle_key = 'glide_model.middle_block.0.emb_layers.1.weight'
+            if middle_key in state_dict:
+                middle_channels = state_dict[middle_key].shape[0]
+                logger.info(f"[Arch Detect] Middle block channels: {middle_channels}")
+
+                if middle_channels == 384:
+                    # GHOP Official Architecture (verified 2025-12-24)
+                    detected_config = {
+                        'model_channels': 64,
+                        'channel_mult': [1, 2, 3],  # ← REVERT from [2, 4, 6]
+                        'num_res_blocks': 3,         # ← CORRECTED from 2
+                        'attention_resolutions': [4, 2]
+                    }
+
+                    # Verify by checking input_blocks[1] (should be 128)
+                    verify_key = 'glide_model.input_blocks.1.0.emb_layers.1.weight'
+                    if verify_key in state_dict:
+                        level0_channels = state_dict[verify_key].shape[0]
+                        expected = 64 * detected_config['channel_mult'][0]  # 64 × 2 = 128
+
+                        if level0_channels == expected:
+                            logger.info(f"[Arch Detect] ✓ Detected: GHOP Official Architecture")
+                            logger.info(f"  - channel_mult: [2, 4, 6]")
+                            logger.info(f"  - num_res_blocks: 3")
+                            logger.info(f"  - Verified: input_blocks[1]={level0_channels} == expected={expected}")
+                            return detected_config
+                        else:
+                            logger.warning(f"[Arch Detect] Verification failed: {level0_channels} != {expected}")
+                            return None
+                    else:
+                        logger.warning(f"[Arch Detect] Cannot verify - key not found: {verify_key}")
+                        return None
+                else:
+                    logger.warning(f"[Arch Detect] Unknown middle_channels={middle_channels}")
+                    return None
+            else:
+                logger.warning(f"[Arch Detect] Middle block key not found")
+                return None
+
+        except Exception as e:
+            logger.error(f"[Arch Detect] Detection failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
 
     def predict_noise(self, noisy_latent, timestep, text_emb=None):
         """

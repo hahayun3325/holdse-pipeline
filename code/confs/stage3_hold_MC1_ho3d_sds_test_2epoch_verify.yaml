@@ -1,0 +1,263 @@
+# Save as: confs/stage3_hold_MC1_ho3d_sds_test_10epoch.yaml
+# ================================================================
+# Stage 3: 10-EPOCH TEST
+# Testing SDS integration over longer training period
+# ================================================================
+
+# ================================================================
+# PHASE 3: SDS GUIDANCE (7.5 EPOCHS)
+# ================================================================
+phase3:
+  enabled: true
+
+  # GHOP Checkpoints - UNCHANGED
+  ghop:
+    config_path: checkpoints/ghop/config.yaml
+    device: cuda
+    unet_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
+    unified_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
+    vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
+    unet_use_pretrained: true
+    vqvae_use_pretrained: true
+
+  grid_resolution: 24
+  spatial_lim: 1.5
+
+  # Phase 3 Boundaries - ENDS AT EPOCH 7.5
+  phase3_start_iter: 0
+  phase3_end_iter: 1499         # FIXED: End at epoch 0.75
+
+  # SDS Configuration - UNCHANGED
+  sds:
+    diffusion_steps: 1000
+    guidance_scale: 3.0
+    max_step_ratio: 0.98
+    min_step_ratio: 0.02
+    noise_schedule: linear
+    prediction_respacing: 50
+
+  sds_iters: 1
+  use_modular_init: true
+
+  # Weight - INCREASED FOR 10 EPOCHS
+  w_sds: 7.5                      # CHANGED: 5.0 → 7.5
+
+  warmup_iters: 0
+
+# ================================================================
+# PHASE 4: CONTACT REFINEMENT (9 EPOCHS)
+# ================================================================
+phase4:
+  enabled: true
+
+  # Phase boundaries - SCALED TO 10 EPOCHS
+  contact_start_iter: 1500        # FIXED: Start at epoch 0.75 (when Phase 3 ends)
+  contact_end_iter: 3000          # FIXED: End at epoch 1.5 (when Phase 5 starts)
+  contact_warmup_iters: 300     # FIXED: 0.15 epoch warmup (scaled to phase length)
+
+  # Thresholds - UNCHANGED
+  contact_thresh: 0.20
+  collision_thresh: 0.08
+
+  # Contact weights - UNCHANGED
+  w_contact: 1.0
+  w_penetration: 100.0
+  w_attraction: 10.0
+  w_damping: 0.0
+
+  mesh_resolution: 64           # CHANGED: 128 → 64 (reduces 2GB to 500MB)
+  mesh_padding: 0.1
+
+  log_contact_every: 100          # CHANGED: 50 → 100
+
+# ================================================================
+# PHASE 5: TEMPORAL CONSISTENCY (2.5 EPOCHS)
+# ================================================================
+phase5:
+  enabled: true
+
+  phase5_start_iter: 3000       # Start at epoch 1.5
+
+  # Scheduler - SCALED TO 10 EPOCHS
+  use_scheduler: true
+  scheduler:
+    total_iterations: 4000      # 2 epochs total
+    warmup_iters: 0
+    phase3_start: 0
+    phase4_start: 1500            # FIXED: Match contact_start_iter
+    phase5_start: 3000
+    finetune_start: 3500
+
+  # Temporal weights - UNCHANGED
+  w_temporal: 0.01
+  w_velocity: 0.005
+  w_acceleration: 0.005
+  w_camera_motion: 0.001
+
+  # Adaptive contacts - UNCHANGED
+  adaptive_contacts:
+    enabled: true
+    k_neighbors: 5
+    contact_threshold: 0.10
+    update_frequency: 50
+    cache_size: 50              # CHANGED: 200 → 50 (reduces 500MB to 125MB)
+
+  temporal:
+    history_size: 5             # CHANGED: 10 → 5 (reduces memory by 50%)
+    velocity_weight: 1.0
+    acceleration_weight: 0.5
+
+  log_phase5_every: 100           # CHANGED: 50 → 100
+
+# ================================================================
+# SCENE & MODEL (UNCHANGED)
+# ================================================================
+scene_bounding_sphere: 6.0
+
+model:
+  density:
+    params_init:
+      beta: 0.1
+    beta_min: 0.0001
+
+  ray_sampler:
+    near: 0.0
+    N_samples: 64
+    N_samples_eval: 128
+    N_samples_extra: 32
+    eps: 0.1
+    beta_iters: 10
+    max_total_iters: 5
+    N_samples_inverse_sphere: 32
+    add_tiny: 0.000001
+
+  implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: pose
+
+  rendering_network:
+    feature_vector_size: 256
+    mode: pose
+    d_in: 270
+    d_out: 3
+    dims: [256, 256, 256, 256]
+    weight_norm: true
+    multires_view: 0
+    d_implicit_features: 256
+
+  bg_implicit_network:
+    feature_vector_size: 256
+    d_in: 4
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: none
+    bias: 0.0
+    skip_in: [4]
+    weight_norm: false
+    multires: 10
+    cond: frame
+    dim_frame_encoding: 32
+
+  bg_rendering_network:
+    feature_vector_size: 256
+    mode: nerf_frame_encoding
+    d_in: 259
+    d_out: 3
+    dims: [128]
+    weight_norm: false
+    multires_view: 4
+    dim_frame_encoding: 32
+    multires_xyz: 42
+    d_implicit_features: 171
+
+# ================================================================
+# DATASET (UNCHANGED)
+# ================================================================
+dataset:
+  dataset_path: data/hold_MC1_ho3d/build
+  seq_name: hold_MC1_ho3d
+
+  train:
+    type: train
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 4
+
+  valid:
+    type: val
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 512
+    enabled: false
+
+# ================================================================
+# LOSS (UNCHANGED)
+# ================================================================
+loss:
+  w_rgb: 1.0
+  w_mask: 0.1
+  w_eikonal: 1.0
+  w_smooth: 0.005
+  w_temporal: 1.0
+  rgb_loss_type: "l1"
+
+# ================================================================
+# TRAINING - 10 EPOCHS
+# ================================================================
+training:
+  num_epochs: 2                 # CHANGED: Test with just 2 epochs
+  max_steps: 4000               # CHANGED: 2 × 2000 steps
+  eval_every_epoch: 2             # CHANGED: Validate every 2 epochs
+  log_every: 50                   # CHANGED: 20 → 50
+  gradient_clip: 1.0
+
+# ================================================================
+# OPTIMIZER + SCHEDULER
+# ================================================================
+optimizer:
+  lr: 0.0001
+  type: "adam"
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+# NEW: Learning rate scheduler
+scheduler:
+  type: "cosine"
+  T_max: 20000
+  eta_min: 0.00001
+  warmup_steps: 2000
+
+# ================================================================
+# EXPERIMENT - 10 EPOCH TEST
+# ================================================================
+experiment:
+  name: 'stage3_2epoch_verify'    # CHANGED: Descriptive test name
+
+# ================================================================
+# CHECKPOINT - SAME STARTING POINT
+# ================================================================
+checkpoint:
+  resume_from: 'outputs/stage2_official_cb20a1702_FIXED/checkpoints/last.ckpt'
+  load_optimizer: false
+  load_scheduler: false
+
+callbacks:
+  checkpoint:
+    monitor: "train_loss"
+    mode: "min"
+    save_top_k: 3
+    every_n_epochs: 1           # CHANGED: Save every epoch for testing
+    save_last: true
+    dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_2epoch_verify/checkpoints"  # CHANGED: Absolute path + new directory
+    filename: "epoch{epoch:02d}-loss{train_loss:.2f}"
