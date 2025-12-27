@@ -314,14 +314,40 @@ def main():
     args, opt = parser_args()
     print("Working dir:", os.getcwd())
 
+    # ================================================================
+    # Read checkpoint callback config from YAML (if available)
+    # ================================================================
+    checkpoint_config = opt.get('callbacks', {}).get('checkpoint', {})
+
+    # Use config values with fallbacks to CLI args
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         dirpath=op.join(args.log_dir, "checkpoints/"),
-        filename="{epoch:04d}-{loss}",
-        save_last=True,
-        save_top_k=-1,
-        every_n_epochs=args.eval_every_epoch,
+        filename=checkpoint_config.get('filename', "{epoch:04d}-{loss}"),
+        save_last=checkpoint_config.get('save_last', True),
+        save_top_k=checkpoint_config.get('save_top_k', 3),  # ✅ From config, not -1
+        every_n_epochs=checkpoint_config.get('every_n_epochs', args.eval_every_epoch),  # ✅ Config priority
+        monitor=checkpoint_config.get('monitor', None),  # ✅ Enable metric monitoring
+        mode=checkpoint_config.get('mode', 'min'),
         verbose=True,
     )
+
+    # Log what was configured
+    logger.info("=" * 70)
+    logger.info("CHECKPOINT CALLBACK CONFIGURATION")
+    logger.info("=" * 70)
+    logger.info(f"  dirpath: {checkpoint_callback.dirpath}")
+    logger.info(f"  save_top_k: {checkpoint_callback.save_top_k}")
+    logger.info(f"  every_n_epochs: {checkpoint_callback.every_n_epochs}")
+    logger.info(f"  monitor: {checkpoint_callback.monitor}")
+    logger.info(f"  mode: {checkpoint_callback.mode}")
+    logger.info(f"  save_last: {checkpoint_callback.save_last}")
+
+    if checkpoint_callback.every_n_epochs is None:
+        logger.warning("⚠️  WARNING: every_n_epochs is None!")
+        logger.warning("    Checkpoints will NEVER be saved automatically.")
+        logger.warning("    Set in config or use --eval_every_epoch CLI flag")
+
+    logger.info("=" * 70)
 
     # ================================================================
     # ✅ CRITICAL: Mixed Precision Trainer with Memory Optimization

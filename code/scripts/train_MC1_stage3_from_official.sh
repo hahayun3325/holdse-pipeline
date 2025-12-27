@@ -9,8 +9,8 @@ STAGE2_CKPT="logs/afb17c622/checkpoints/last.ckpt" # Stage 2 Checkpoint 70-epoch
 SEQ_NAME="hold_MC1_ho3d"
 #STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_from_official.yaml"
 #STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_1epoch.yaml"
-STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_10epoch.yaml"
-#STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_2epoch_verify.yaml"
+#STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_10epoch.yaml"
+STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_2epoch_verify.yaml"
 
 echo "=================================================="
 echo "STAGE 3: Boundary-Based Training (No Scheduler)"
@@ -33,10 +33,10 @@ python train.py \
     --case $SEQ_NAME \
     --no-comet \
     --gpu_id 0 \
-    --num_epoch 10 \
+    --num_epoch 2 \
     --no-pin-memory
 
 echo "✅ STAGE 3 COMPLETE (boundary mode)"
 
 # chmod +x scripts/train_MC1_stage3_from_official.sh
-# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to10_hold_MC1_ho3d_infer_official_loadingUnet_$(date +%Y%m%d_%H%M%S).log
+# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to2_hold_MC1_ho3d_infer_official_loadingUnet_$(date +%Y%m%d_%H%M%S).log

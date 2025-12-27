@@ -183,95 +183,240 @@ class Upsample3D(nn.Module):
             x = self.conv(x)
         return x
 
+# ============================================================================
+# GHOP Transformer Components (from original GHOP codebase)
+# Source: /home/fredcui/Projects/ghop/ddpm3d/models/attention.py
+# ============================================================================
+
+def zero_module(module):
+    """Zero out the parameters of a module and return it."""
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
+
+def Normalize(in_channels, num_groups=32):
+    """GroupNorm wrapper matching GHOP convention."""
+    return nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
+
+def init_weights(m):
+    """Initialize weights for conv/linear layers."""
+    if isinstance(m, (nn.Conv3d, nn.Linear)):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+class CrossAttention(nn.Module):
+    """
+    Multi-head cross-attention with separate Q/K/V projections.
+    Matches GHOP checkpoint structure with to_q, to_k, to_v parameters.
+    """
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0):
+        super().__init__()
+        inner_dim = dim_head * heads
+        context_dim = context_dim or query_dim
+
+        self.scale = dim_head ** -0.5
+        self.heads = heads
+
+        # Separate projections (matches checkpoint)
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, query_dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x, context=None, mask=None):
+        h = self.heads
+
+        q = self.to_q(x)
+        context = context if context is not None else x
+        k = self.to_k(context)
+        v = self.to_v(context)
+
+        # Reshape for multi-head attention
+        # Use einops if available, otherwise manual reshape
+        try:
+            from einops import rearrange
+            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        except ImportError:
+            # Manual reshape as fallback
+            b, n, _ = q.shape
+            q = q.view(b, n, h, -1).permute(0, 2, 1, 3).reshape(b * h, n, -1)
+            k = k.view(b, -1, h, k.shape[-1] // h).permute(0, 2, 1, 3).reshape(b * h, -1, k.shape[-1] // h)
+            v = v.view(b, -1, h, v.shape[-1] // h).permute(0, 2, 1, 3).reshape(b * h, -1, v.shape[-1] // h)
+
+        # Attention computation
+        sim = torch.einsum('b i d, b j d -> b i j', q, k) * self.scale
+
+        if mask is not None:
+            mask = mask.reshape(mask.shape[0], -1)
+            max_neg_value = -torch.finfo(sim.dtype).max
+            mask = mask[:, None, :].repeat(h, 1, 1)
+            sim.masked_fill_(~mask, max_neg_value)
+
+        attn = sim.softmax(dim=-1)
+        out = torch.einsum('b i j, b j d -> b i d', attn, v)
+
+        # Reshape back
+        try:
+            from einops import rearrange
+            out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        except ImportError:
+            b = x.shape[0]
+            n = out.shape[1]
+            out = out.view(b, h, n, -1).permute(0, 2, 1, 3).reshape(b, n, -1)
+
+        return self.to_out(out)
+
+class GEGLU(nn.Module):
+    """Gated Linear Unit with GELU activation (used in feedforward)."""
+    def __init__(self, dim_in, dim_out):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out * 2)
+
+    def forward(self, x):
+        x, gate = self.proj(x).chunk(2, dim=-1)
+        return x * F.gelu(gate)
+
+class FeedForward(nn.Module):
+    """
+    Feedforward network with optional GLU gating.
+    Matches GHOP checkpoint ff.net structure.
+    """
+    def __init__(self, dim, dim_out=None, mult=4, glu=True, dropout=0.0):
+        super().__init__()
+        inner_dim = int(dim * mult)
+        dim_out = dim_out or dim
+
+        project_in = GEGLU(dim, inner_dim) if glu else nn.Sequential(
+            nn.Linear(dim, inner_dim),
+            nn.GELU()
+        )
+
+        self.net = nn.Sequential(
+            project_in,
+            nn.Dropout(dropout),
+            nn.Linear(inner_dim, dim_out)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class BasicTransformerBlock(nn.Module):
+    """
+    Full transformer block matching GHOP checkpoint structure.
+    Contains: self-attention + cross-attention + feedforward, each with pre-LayerNorm.
+    """
+    def __init__(self, dim, n_heads, d_head, dropout=0.0, context_dim=None, gated_ff=True, checkpoint=True):
+        super().__init__()
+        self.attn1 = CrossAttention(
+            query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout
+        )  # Self-attention
+        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+        self.attn2 = CrossAttention(
+            query_dim=dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout
+        )  # Cross-attention
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim)
+        self.checkpoint = checkpoint
+
+    def forward(self, x, context=None):
+        # Use gradient checkpointing if enabled (saves memory during training)
+        if self.checkpoint and self.training:
+            return torch.utils.checkpoint.checkpoint(self._forward, x, context)
+        else:
+            return self._forward(x, context)
+
+    def _forward(self, x, context=None):
+        # Pre-norm transformer architecture
+        x = self.attn1(self.norm1(x)) + x
+        x = self.attn2(self.norm2(x), context=context) + x
+        x = self.ff(self.norm3(x)) + x
+        return x
+
 class SpatialTransformer3D(nn.Module):
     """
-    3D Spatial Transformer with cross-attention for text conditioning.
-    Simplified version without full multi-head attention.
+    3D Spatial Transformer matching GHOP checkpoint architecture.
+    Uses full BasicTransformerBlock with separate Q/K/V projections and feedforward.
+
+    Architecture:
+    1. GroupNorm normalization
+    2. Conv3D projection (in_channels → inner_dim)
+    3. Reshape to sequence (b c d h w → b (d h w) c)
+    4. Apply transformer blocks
+    5. Reshape back to spatial (b (d h w) c → b c d h w)
+    6. Conv3D projection (inner_dim → in_channels)
+    7. Residual connection
     """
-    def __init__(self, channels, context_dim=768, num_heads=8):
+    def __init__(self, in_channels, n_heads, d_head, depth=1, dropout=0.0, context_dim=None):
         super().__init__()
-        self.channels = channels
-        self.num_heads = num_heads
+        self.in_channels = in_channels
+        inner_dim = n_heads * d_head
+        self.norm = Normalize(in_channels)
 
-        # Layer norm
-        self.norm = nn.GroupNorm(32, channels)
-
-        # Self-attention
-        self.attn = nn.MultiheadAttention(
-            embed_dim=channels,
-            num_heads=num_heads,
-            batch_first=True
+        # Project input to inner dimension
+        self.proj_in = nn.Conv3d(
+            in_channels, inner_dim, kernel_size=1, stride=1, padding=0
         )
 
-        # Cross-attention projections
-        self.query_proj = nn.Linear(channels, context_dim)      # ← ADD THIS: channels → 768
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=context_dim,  # 768
-            num_heads=num_heads,
-            batch_first=True
-        )
-        self.output_proj = nn.Linear(context_dim, channels)     # ← RENAME from context_proj
+        # Stack of transformer blocks
+        self.transformer_blocks = nn.ModuleList([
+            BasicTransformerBlock(
+                inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim
+            )
+            for d in range(depth)
+        ])
 
-        # Feed-forward
-        self.ff = nn.Sequential(
-            nn.Linear(channels, channels * 4),
-            nn.GELU(),
-            nn.Linear(channels * 4, channels)
+        # Project back to original channels (zero-initialized for stability)
+        self.proj_out = zero_module(
+            nn.Conv3d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
         )
+
+        # Initialize weights
+        self.apply(init_weights)
 
     def forward(self, x, context=None):
         """
         Args:
-            x: (B, C, D, H, W)
-            context: (B, seq_len, context_dim) optional text embeddings
+            x: (B, C, D, H, W) spatial tensor
+            context: (B, seq_len, context_dim) optional conditioning
         Returns:
-            out: (B, C, D, H, W)
+            (B, C, D, H, W) transformed spatial tensor
         """
-        B, C, D, H, W = x.shape
-        print(f"[ST DEBUG] Input: B={B}, C={C}, D={D}, H={H}, W={W}")  # ADD
+        b, c, d, h, w = x.shape
+        x_in = x
 
-        # Reshape to sequence
-        x_flat = x.view(B, C, -1).transpose(1, 2)  # (B, D*H*W, C=channels)
+        # Normalize and project to inner dimension
+        x = self.norm(x)
+        x = self.proj_in(x)
 
-        # Add this check:
-        tokens = D * H * W
-        print(f"[ST DEBUG] tokens calculated: {tokens}, x_flat.shape[1]: {x_flat.shape[1]}")
+        # Reshape to sequence format for transformer
+        try:
+            from einops import rearrange
+            x = rearrange(x, 'b c d h w -> b (d h w) c')
+        except ImportError:
+            # Fallback without einops
+            x = x.permute(0, 2, 3, 4, 1).reshape(b, d * h * w, -1)
 
-        # Self-attention
-        x_norm = self.norm(x).view(B, C, -1).transpose(1, 2)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x_flat = x_flat + attn_out
+        # Apply transformer blocks
+        for block in self.transformer_blocks:
+            x = block(x, context=context)
 
-        # Cross-attention to context
-        if context is not None:
-            # Project query from channels to context_dim (768)
-            query_768 = self.query_proj(x_flat)  # (B, D*H*W, channels) → (B, D*H*W, 768)
+        # Reshape back to spatial format
+        try:
+            from einops import rearrange
+            x = rearrange(x, 'b (d h w) c -> b c d h w', d=d, h=h, w=w)
+        except ImportError:
+            # Fallback without einops
+            x = x.reshape(b, d, h, w, -1).permute(0, 4, 1, 2, 3)
 
-            # Cross-attention in 768-dim space
-            cross_out, _ = self.cross_attn(query_768, context, context)  # All 768-dim
-
-            # Project output back to channels
-            cross_out = self.output_proj(cross_out)  # (B, D*H*W, 768) → (B, D*H*W, channels)
-
-            x_flat = x_flat + cross_out
-
-        # Feed-forward
-        x_flat = x_flat + self.ff(x_flat)
-
-        # Before final reshape, verify x_flat is the right shape:
-        print(f"[ST DEBUG] Before final reshape: x_flat.shape={x_flat.shape}")
-        print(f"[ST DEBUG] Expected: ({B}, {tokens}, {C})")
-
-        out = x_flat.transpose(1, 2)  # (B, D*H*W, C) → (B, C, D*H*W)
-        print(f"[ST DEBUG] After transpose: out.shape={out.shape}")
-
-        out = out.view(B, C, D, H, W)
-        print(f"[ST DEBUG] After view: out.shape={out.shape}")
-
-        if out.ndim != 5:
-            raise RuntimeError(f"SpatialTransformer output has {out.ndim} dims, expected 5!")
-
-        return out
+        # Project back to original channels and add residual
+        x = self.proj_out(x)
+        return x + x_in
 
 
 # ============================================================================
@@ -313,7 +458,7 @@ class GHOP3DUNet(nn.Module):
         # Encoder (downsampling path)
         # ====================================================================
         self.input_blocks = nn.ModuleList([
-            nn.Conv3d(in_channels, model_channels, 3, padding=1)
+            nn.ModuleList([nn.Conv3d(in_channels, model_channels, 3, padding=1)])
         ])
 
         input_block_chans = [model_channels]
@@ -334,8 +479,20 @@ class GHOP3DUNet(nn.Module):
 
                 # Add attention if at specified resolution
                 if ds in attention_resolutions:
+                    # Calculate attention heads based on channel dimensions
+                    # Pattern: d_head=16, n_heads varies by stage (8 for 128ch, 12 for 192ch)
+                    d_head = 16  # From checkpoint analysis: num_head_channels=16
+                    n_heads = ch // d_head
+
                     layers.append(
-                        SpatialTransformer3D(ch, context_dim=context_dim)
+                        SpatialTransformer3D(
+                            in_channels=ch,
+                            n_heads=n_heads,
+                            d_head=d_head,
+                            depth=1,
+                            dropout=dropout,
+                            context_dim=context_dim
+                        )
                     )
 
                 self.input_blocks.append(nn.ModuleList(layers))
@@ -352,9 +509,20 @@ class GHOP3DUNet(nn.Module):
         # ====================================================================
         # Middle (bottleneck)
         # ====================================================================
+        # Middle block attention configuration
+        d_head = 16
+        n_heads = ch // d_head
+
         self.middle_block = nn.ModuleList([
             ResBlock3D(ch, ch, time_emb_channels=time_embed_dim, dropout=dropout),
-            SpatialTransformer3D(ch, context_dim=context_dim),
+            SpatialTransformer3D(
+                in_channels=ch,
+                n_heads=n_heads,
+                d_head=d_head,
+                depth=1,
+                dropout=dropout,
+                context_dim=context_dim
+            ),
             ResBlock3D(ch, ch, time_emb_channels=time_embed_dim, dropout=dropout)
         ])
 
@@ -378,8 +546,19 @@ class GHOP3DUNet(nn.Module):
 
                 # Add attention if at specified resolution
                 if ds in attention_resolutions:
+                    # Calculate attention heads based on channel dimensions
+                    d_head = 16
+                    n_heads = ch // d_head
+
                     layers.append(
-                        SpatialTransformer3D(ch, context_dim=context_dim)
+                        SpatialTransformer3D(
+                            in_channels=ch,
+                            n_heads=n_heads,
+                            d_head=d_head,
+                            depth=1,
+                            dropout=dropout,
+                            context_dim=context_dim
+                        )
                     )
 
                 # Upsample (except at first block of each level)
@@ -536,31 +715,40 @@ class GHOP3DUNetWrapper(nn.Module):
         super().__init__()
 
         # ============================================================
-        # Detect checkpoint architecture BEFORE initialization
+        # Detect checkpoint input/output channels BEFORE initialization
         # ============================================================
-        checkpoint_out_channels = 3  # Default for random init
+        checkpoint_out_channels = 3  # Default
+        checkpoint_in_channels = 3   # Default
 
         if unet_ckpt_path and os.path.exists(unet_ckpt_path):
-            # Peek at checkpoint to detect output channels
+            logger.info("[GHOP3DUNetWrapper] Detecting checkpoint I/O channels...")
             ckpt = torch.load(unet_ckpt_path, map_location='cpu')
             state_dict = ckpt.get('state_dict', ckpt)
 
+            # Detect output channels
             for key in state_dict.keys():
                 if key == 'glide_model.out.2.weight' and state_dict[key].ndim == 5:
                     checkpoint_out_channels = state_dict[key].shape[0]
                     logger.info(
-                        f"[GHOP3DUNetWrapper] Detected checkpoint expects "
-                        f"{checkpoint_out_channels} output channels"
+                        f"[GHOP3DUNetWrapper] Detected output: {checkpoint_out_channels} channels"
                     )
                     break
 
-            del ckpt, state_dict  # Free memory
+            # Detect input channels
+            for key in state_dict.keys():
+                if key == 'glide_model.input_blocks.0.0.weight' and state_dict[key].ndim == 5:
+                    checkpoint_in_channels = state_dict[key].shape[1]
+                    logger.info(
+                        f"[GHOP3DUNetWrapper] Detected input: {checkpoint_in_channels} channels"
+                    )
+                    break
 
+            del ckpt, state_dict  # Single cleanup
         # ============================================================
         # Initialize U-Net with CHECKPOINT architecture
         # ============================================================
         default_arch_config = {
-            'in_channels': 3,
+            'in_channels': checkpoint_in_channels,
             'out_channels': checkpoint_out_channels,
             'model_channels': 64,
             'num_res_blocks': 3,            # ← Changed from 2
@@ -573,18 +761,46 @@ class GHOP3DUNetWrapper(nn.Module):
         # If checkpoint exists, try to detect its architecture
         if unet_ckpt_path and os.path.exists(unet_ckpt_path):
             logger.info(f"[GHOP3DUNetWrapper] Detecting checkpoint architecture...")
-            detected_arch = self._detect_checkpoint_architecture(unet_ckpt_path)
 
-            if detected_arch:
-                # Override defaults with detected values
+            try:
+                detected_arch = self._detect_checkpoint_architecture(unet_ckpt_path)
+
+                # ✅ DEBUG: Log what was detected
+                logger.info(f"[GHOP3DUNetWrapper] Detected architecture keys: {list(detected_arch.keys())}")
+
+                # Merge detected config
                 for key, value in detected_arch.items():
                     default_arch_config[key] = value
-                logger.info(f"[GHOP3DUNetWrapper] ✓ Using detected architecture")
-                logger.info(f"  - channel_mult: {default_arch_config['channel_mult']}")
+
+                # ✅ DEBUG: Log what's in config after merge
+                logger.info(f"[GHOP3DUNetWrapper] Config after merge: {list(default_arch_config.keys())}")
+                logger.info(f"[GHOP3DUNetWrapper] attention_resolutions in config: {'attention_resolutions' in default_arch_config}")
+                if 'attention_resolutions' in default_arch_config:
+                    logger.info(f"  Value: {default_arch_config['attention_resolutions']}")
+
+                logger.info(f"[GHOP3DUNetWrapper] ✓ Using detected architecture from checkpoint")
                 logger.info(f"  - model_channels: {default_arch_config['model_channels']}")
-            else:
-                logger.warning(f"[GHOP3DUNetWrapper] ✗ Detection failed, using default architecture")
-                logger.warning(f"  - channel_mult: {default_arch_config['channel_mult']}")
+                logger.info(f"  - channel_mult: {default_arch_config['channel_mult']}")
+                logger.info(f"  - num_res_blocks: {default_arch_config['num_res_blocks']}")  # ADD THIS LINE
+                logger.info(f"  - attention_resolutions: {default_arch_config.get('attention_resolutions', 'NOT SET')}")  # ADD THIS
+            except Exception as e:
+                # ❌ CRITICAL: Detection completely failed - cannot proceed safely
+                logger.error(f"[GHOP3DUNetWrapper] ❌ Architecture detection failed: {e}")
+                logger.error(f"Cannot initialize U-Net with incompatible architecture!")
+                logger.error(f"Checkpoint path: {unet_ckpt_path}")
+                logger.error(f"\nThis will cause parameter loading failures and OOM errors.")
+                logger.error(f"Please verify checkpoint is valid GHOP checkpoint.")
+
+                # Show what would be used as fallback
+                logger.error(f"\nFallback architecture (likely INCOMPATIBLE):")
+                logger.error(f"  - model_channels: {default_arch_config['model_channels']}")
+                logger.error(f"  - channel_mult: {default_arch_config['channel_mult']}")
+
+                raise RuntimeError(
+                    f"U-Net architecture detection failed. Cannot safely initialize with "
+                    f"default architecture as it will cause shape mismatches. "
+                    f"Original error: {e}"
+                )
 
         # Override with explicit config if provided
         if config is not None:
@@ -601,10 +817,27 @@ class GHOP3DUNetWrapper(nn.Module):
         logger.info(f"  - model_channels: {default_arch_config['model_channels']}")
         logger.info(f"  - channel_mult: {default_arch_config['channel_mult']}")
         logger.info(f"  - num_res_blocks: {default_arch_config['num_res_blocks']}")
+        logger.info(f"  - attention_resolutions: {default_arch_config.get('attention_resolutions', 'NOT SET')}")  # ADD THIS
 
+        # ✅ DEBUG: Print FULL config being passed
+        logger.info(f"[GHOP3DUNetWrapper] Full config keys being passed: {list(default_arch_config.keys())}")
         self.unet = GHOP3DUNet(**default_arch_config)
 
         logger.info(f"[GHOP3DUNetWrapper] Initialized U-Net with architecture-matched config")
+
+        # ============================================================
+        # VALIDATE: Count created parameters
+        # ============================================================
+        total_unet_params = sum(1 for _ in self.unet.state_dict().keys())
+        logger.info(f"[GHOP3DUNetWrapper] U-Net has {total_unet_params} parameters")
+
+        # Count blocks for validation
+        input_blocks_count = len(self.unet.input_blocks)
+        output_blocks_count = len(self.unet.output_blocks)
+        logger.info(f"[GHOP3DUNetWrapper] Architecture summary:")
+        logger.info(f"  - Input blocks: {input_blocks_count}")
+        logger.info(f"  - Output blocks: {output_blocks_count}")
+        logger.info(f"  - Middle block layers: {len(self.unet.middle_block)}")
 
         # ============================================================
         # Load checkpoint (architecture now matches!)
@@ -672,6 +905,38 @@ class GHOP3DUNetWrapper(nn.Module):
             logger.error("=" * 70)
 
             self.output_adapter = None
+
+        # ============================================================
+        # INPUT ADAPTER: Convert HOLD input (3) to checkpoint expected (23)
+        # ============================================================
+        expected_in_channels = 3  # What HOLD provides
+
+        if checkpoint_in_channels != expected_in_channels:
+            self.input_adapter = nn.Conv3d(
+                in_channels=expected_in_channels,  # 3 from HOLD
+                out_channels=checkpoint_in_channels,  # 23 for checkpoint
+                kernel_size=1,
+                padding=0,
+                bias=True
+            )
+
+            # Initialize: replicate first 3 channels, zero-pad remaining 20
+            with torch.no_grad():
+                self.input_adapter.weight.zero_()
+                # Copy RGB channels to first 3 output channels
+                for i in range(min(expected_in_channels, checkpoint_in_channels)):
+                    self.input_adapter.weight[i, i, 0, 0, 0] = 1.0
+                # Remaining 20 channels stay zero (placeholder for missing modalities)
+                self.input_adapter.bias.zero_()
+
+            logger.info(
+                f"[GHOP3DUNetWrapper] Created input adapter: "
+                f"{expected_in_channels} → {checkpoint_in_channels} channels"
+            )
+
+            self.input_adapter.to(device)
+        else:
+            self.input_adapter = None
 
         self.unet.to(device)
         self.unet.eval()
@@ -832,10 +1097,106 @@ class GHOP3DUNetWrapper(nn.Module):
             logger.info(f"  Missing in checkpoint: {len(missing_in_ckpt)}")
             logger.info(f"  Unexpected in checkpoint: {len(unexpected_in_ckpt)}")
 
-            # Load matching keys only
-            filtered_state_dict = {k: v for k, v in unet_state_dict.items() if k in model_keys}
+            # ============================================================
+            # DIAGNOSTIC: Analyze what's missing
+            # ============================================================
+            if len(unexpected_in_ckpt) > 0:
+                logger.warning("=" * 70)
+                logger.warning("[DIAGNOSTIC] Analyzing unexpected checkpoint parameters")
+                logger.warning("=" * 70)
 
-            missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
+                # Categorize unexpected keys
+                transformer_unexpected = [k for k in unexpected_in_ckpt if 'transformer_blocks' in k]
+                resblock_unexpected = [k for k in unexpected_in_ckpt if
+                                       any(x in k for x in ['in_layers', 'out_layers', 'emb_layers'])]
+                other_unexpected = [k for k in unexpected_in_ckpt if
+                                    k not in transformer_unexpected and k not in resblock_unexpected]
+
+                logger.warning(f"  Transformer-related: {len(transformer_unexpected)}")
+                logger.warning(f"  ResBlock-related: {len(resblock_unexpected)}")
+                logger.warning(f"  Other: {len(other_unexpected)}")
+
+                if len(transformer_unexpected) > 0:
+                    logger.warning(f"\n  Sample transformer unexpected keys:")
+                    for key in sorted(transformer_unexpected)[:5]:
+                        logger.warning(f"    {key}")
+
+                if len(resblock_unexpected) > 0:
+                    logger.warning(f"\n  Sample ResBlock unexpected keys:")
+                    for key in sorted(resblock_unexpected)[:5]:
+                        logger.warning(f"    {key}")
+
+                if len(other_unexpected) > 0:
+                    logger.warning(f"\n  Sample other unexpected keys:")
+                    for key in sorted(other_unexpected)[:5]:
+                        logger.warning(f"    {key}")
+
+                # Check if model is missing entire layers
+                logger.warning(f"\n  Checking model architecture completeness:")
+
+                # Count layers in checkpoint vs model
+                ckpt_input_blocks = len(set([k.split('.')[1] for k in ckpt_keys if k.startswith('unet.input_blocks.')]))
+                model_input_blocks = len(
+                    set([k.split('.')[1] for k in model_keys if k.startswith('unet.input_blocks.')]))
+
+                ckpt_output_blocks = len(
+                    set([k.split('.')[1] for k in ckpt_keys if k.startswith('unet.output_blocks.')]))
+                model_output_blocks = len(
+                    set([k.split('.')[1] for k in model_keys if k.startswith('unet.output_blocks.')]))
+
+                logger.warning(f"    Input blocks - Checkpoint: {ckpt_input_blocks}, Model: {model_input_blocks}")
+                logger.warning(f"    Output blocks - Checkpoint: {ckpt_output_blocks}, Model: {model_output_blocks}")
+
+                if ckpt_input_blocks != model_input_blocks or ckpt_output_blocks != model_output_blocks:
+                    logger.error("    ❌ ARCHITECTURE MISMATCH: Model has different number of blocks than checkpoint!")
+                    logger.error("    This explains why parameters don't load fully.")
+
+                logger.warning("=" * 70)
+
+            # ============================================================
+            # STRATEGY A: Load with size-mismatch tolerance
+            # ============================================================
+            # Filter out keys with shape mismatches
+            compatible_state_dict = {}
+            incompatible_keys = []
+
+            for key, value in unet_state_dict.items():
+                if key in model_keys:
+                    model_param = model_state[key]
+                    if model_param.shape == value.shape:
+                        compatible_state_dict[key] = value
+                    else:
+                        incompatible_keys.append(
+                            f"{key}: checkpoint {value.shape} vs model {model_param.shape}"
+                        )
+                        logger.warning(f"  Shape mismatch: {key}")
+                        logger.warning(f"    Checkpoint: {value.shape}")
+                        logger.warning(f"    Model:      {model_param.shape}")
+
+            if len(incompatible_keys) > 0:
+                logger.warning(f"  Found {len(incompatible_keys)} parameters with shape mismatches")
+                logger.warning(f"  These will NOT be loaded (keeping random initialization)")
+
+            logger.info(f"  Loading {len(compatible_state_dict)} compatible parameters...")
+
+            try:
+                missing_keys, unexpected_keys = self.load_state_dict(compatible_state_dict, strict=False)
+
+                # Calculate actual loaded count
+                actually_loaded = len(compatible_state_dict) - len(missing_keys)
+                logger.info(f"  ✅ Actually loaded: {actually_loaded}/{len(unet_state_dict)} parameters")
+
+                if actually_loaded < len(unet_state_dict) * 0.9:  # Less than 90% loaded
+                    logger.error("=" * 70)
+                    logger.error("⚠️  WARNING: Less than 90% of checkpoint parameters loaded!")
+                    logger.error(f"  Expected: {len(unet_state_dict)}")
+                    logger.error(f"  Loaded:   {actually_loaded}")
+                    logger.error(f"  Missing:  {len(unet_state_dict) - actually_loaded}")
+                    logger.error("=" * 70)
+            except RuntimeError as e:
+                logger.error(f"❌ Loading failed even with compatible keys: {e}")
+                logger.error("This indicates a deeper architecture mismatch")
+                raise
 
             if len(matching_keys) > 0:
                 logger.info(f"✅ [U-Net] Successfully loaded {len(matching_keys)} parameters")
@@ -858,69 +1219,320 @@ class GHOP3DUNetWrapper(nn.Module):
 
     def _detect_checkpoint_architecture(self, checkpoint_path):
         """
-        Detect U-Net architecture from checkpoint parameters.
-
+        Detect U-Net architecture from checkpoint structure.
+        Trust checkpoint architecture over config defaults.
         Based on analysis of GHOP official checkpoint:
         - 12 input_blocks with progression: 128→256→384 channels
         - 3 ResBlocks per level (num_res_blocks=3)
         - channel_mult=[2, 4, 6] (not [1, 2, 3]!)
         """
         try:
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
-            state_dict = ckpt.get('state_dict', ckpt)
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            state_dict = checkpoint.get('state_dict', checkpoint)
 
-            # Verify this is a GHOP checkpoint by checking middle block
-            middle_key = 'glide_model.middle_block.0.emb_layers.1.weight'
-            if middle_key in state_dict:
+            logger.info(f"[Arch Detect] Analyzing checkpoint structure...")
+
+            # ============================================================
+            # Step 1: Find all input block convolution layers
+            # ============================================================
+            input_block_info = {}
+
+            for key in state_dict.keys():
+                # Match pattern: glide_model.input_blocks.{block_id}.{layer_id}.weight
+                if key.startswith('glide_model.input_blocks.') and key.endswith('.weight'):
+                    tensor = state_dict[key]
+
+                    # Only consider 3D convolutions (5D tensors: out_ch, in_ch, D, H, W)
+                    if tensor.ndim == 5:
+                        # Extract block ID
+                        parts = key.split('.')
+                        block_id = int(parts[2])  # glide_model.input_blocks.{block_id}.layer.weight
+                        out_channels = tensor.shape[0]
+
+                        # Store first conv layer for each block
+                        if block_id not in input_block_info:
+                            input_block_info[block_id] = {
+                                'out_channels': out_channels,
+                                'key': key
+                            }
+
+            logger.info(f"[Arch Detect] Found {len(input_block_info)} input blocks with convolutions")
+
+            if len(input_block_info) == 0:
+                raise ValueError("No input block convolutions found in checkpoint")
+
+            # ============================================================
+            # Step 2: Extract channel progression from ALL blocks
+            # ============================================================
+            # Sort by block ID and get ALL blocks (not just first 6!)
+            sorted_blocks = sorted(input_block_info.items())
+
+            # Get output channels for ALL blocks
+            channel_sequence = [info['out_channels'] for block_id, info in sorted_blocks]
+
+            logger.info(f"[Arch Detect] Channel progression (all blocks): {channel_sequence}")
+            logger.info(f"[Arch Detect] Total blocks analyzed: {len(sorted_blocks)}")
+
+            # Warn if suspiciously few blocks found
+            if len(sorted_blocks) < 8:
+                logger.warning(
+                    f"[Arch Detect] Only {len(sorted_blocks)} input blocks found. "
+                    f"Typical U-Net has 9-15 blocks. Checkpoint may be incomplete."
+                )
+
+            # First block determines base model_channels
+            model_channels = channel_sequence[0]
+
+            # ============================================================
+            # Step 3: Detect channel_mult from unique channel values
+            # ============================================================
+            # Find unique channel counts (represent different resolution stages)
+            unique_channels = []
+            seen = set()
+            for ch in channel_sequence:
+                if ch not in seen:
+                    unique_channels.append(ch)
+                    seen.add(ch)
+
+            # Calculate multipliers relative to base
+            channel_mult = tuple(ch // model_channels for ch in unique_channels)
+
+            logger.info(f"[Arch Detect] Detected architecture:")
+            logger.info(f"  - model_channels: {model_channels}")
+            logger.info(f"  - channel_mult: {channel_mult}")
+            logger.info(f"  - unique_channels: {unique_channels}")
+
+            # ============================================================
+            # Step 3.5: VALIDATE against middle block
+            # ============================================================
+            middle_block_keys = [k for k in state_dict.keys()
+                                 if 'glide_model.middle_block.' in k
+                                 and 'in_layers.2.weight' in k
+                                 and state_dict[k].ndim == 5]
+
+            if middle_block_keys:
+                middle_key = middle_block_keys[0]
                 middle_channels = state_dict[middle_key].shape[0]
-                logger.info(f"[Arch Detect] Middle block channels: {middle_channels}")
+                expected_middle = model_channels * max(channel_mult)
 
-                if middle_channels == 384:
-                    # GHOP Official Architecture (verified 2025-12-24)
-                    detected_config = {
-                        'model_channels': 64,
-                        'channel_mult': [1, 2, 3],  # ← REVERT from [2, 4, 6]
-                        'num_res_blocks': 3,         # ← CORRECTED from 2
-                        'attention_resolutions': [4, 2]
-                    }
+                logger.info(f"[Arch Detect] Middle block validation:")
+                logger.info(f"  Found: {middle_channels} channels")
+                logger.info(f"  Expected: {expected_middle} channels")
 
-                    # Verify by checking input_blocks[1] (should be 128)
-                    verify_key = 'glide_model.input_blocks.1.0.emb_layers.1.weight'
-                    if verify_key in state_dict:
-                        level0_channels = state_dict[verify_key].shape[0]
-                        expected = 64 * detected_config['channel_mult'][0]  # 64 × 2 = 128
+                if middle_channels != expected_middle:
+                    logger.error(
+                        f"[Arch Detect] ❌ MISMATCH! Detection found channel_mult={channel_mult} "
+                        f"but middle_block has {middle_channels} channels (expected {expected_middle})"
+                    )
+                    raise ValueError(
+                        f"Architecture detection failed validation: "
+                        f"middle_block={middle_channels} != expected={expected_middle}"
+                    )
 
-                        if level0_channels == expected:
-                            logger.info(f"[Arch Detect] ✓ Detected: GHOP Official Architecture")
-                            logger.info(f"  - channel_mult: [2, 4, 6]")
-                            logger.info(f"  - num_res_blocks: 3")
-                            logger.info(f"  - Verified: input_blocks[1]={level0_channels} == expected={expected}")
-                            return detected_config
-                        else:
-                            logger.warning(f"[Arch Detect] Verification failed: {level0_channels} != {expected}")
-                            return None
-                    else:
-                        logger.warning(f"[Arch Detect] Cannot verify - key not found: {verify_key}")
-                        return None
-                else:
-                    logger.warning(f"[Arch Detect] Unknown middle_channels={middle_channels}")
-                    return None
+                logger.info(f"[Arch Detect] ✓ Validation passed")
+
+            # ============================================================
+            # Step 4: Detect num_res_blocks from MIDDLE BLOCK (definitive)
+            # ============================================================
+            # Middle block always uses same num_res_blocks as input/output stages
+            middle_block_keys = [k for k in state_dict.keys()
+                                 if k.startswith('glide_model.middle_block.')]
+
+            # Extract ResBlock IDs from middle block
+            middle_res_block_ids = set()
+            for key in middle_block_keys:
+                # Pattern: glide_model.middle_block.{res_block_id}.layer.weight
+                parts = key.split('.')
+                if len(parts) >= 3:
+                    try:
+                        block_id = int(parts[2])
+                        middle_res_block_ids.add(block_id)
+                    except ValueError:
+                        continue
+
+            # Number of res blocks = number of unique IDs
+            num_res_blocks = len(middle_res_block_ids)
+
+            if num_res_blocks == 0:
+                logger.warning(
+                    f"[Arch Detect] Could not detect num_res_blocks from middle_block. "
+                    f"Using fallback estimation."
+                )
+                # Fallback: estimate from input_blocks structure
+                # Count how many blocks exist at first channel stage
+                first_stage_channels = unique_channels[0]
+                first_stage_blocks = [bid for bid, ch in sorted_blocks if ch == first_stage_channels]
+                # Subtract 1 for initial conv (block 0), rest are res blocks
+                num_res_blocks = max(2, len(first_stage_blocks) - 1)
             else:
-                logger.warning(f"[Arch Detect] Middle block key not found")
-                return None
+                logger.info(f"[Arch Detect] ✓ Detected num_res_blocks from middle_block: {num_res_blocks}")
+                logger.info(f"  Middle block ResBlock IDs: {sorted(middle_res_block_ids)}")
+
+            logger.info(f"  - num_res_blocks (detected): {num_res_blocks}")
+
+            # ============================================================
+            # Step 5: Validate total input blocks should match
+            # ============================================================
+            # ============================================================
+            # Validate: Total input blocks should match
+            # ============================================================
+            # With num_res_blocks per stage + downsamples + initial conv
+            # Expected blocks = 1 (initial) + sum(num_res_blocks per stage) + (num_stages - 1) downsamples
+            num_stages = len(channel_mult)
+
+            # Simplified: each stage has (num_res_blocks + 1 downsample), except last stage
+            expected_blocks = 1  # initial conv
+            for i in range(num_stages):
+                expected_blocks += num_res_blocks
+                if i < num_stages - 1:  # Add downsample except for last stage
+                    expected_blocks += 1
+
+            actual_blocks = len(sorted_blocks)
+
+            logger.info(f"\n[Arch Detect] Input blocks validation:")
+            logger.info(f"  Actual input blocks in checkpoint: {actual_blocks}")
+            logger.info(f"  Expected with detected architecture: {expected_blocks}")
+
+            if abs(actual_blocks - expected_blocks) > 2:  # Allow small tolerance
+                logger.warning(
+                    f"[Arch Detect] ⚠️  Block count mismatch! "
+                    f"Actual={actual_blocks}, Expected={expected_blocks}. "
+                    f"Architecture detection may be incomplete."
+                )
+            else:
+                logger.info(f"[Arch Detect] ✓ Block count validation passed")
+
+            # ============================================================
+            # Step 6: Detect attention configuration from checkpoint
+            # ============================================================
+            logger.info(f"[Arch Detect] Analyzing attention layer configuration...")
+
+            # Find input blocks with transformer attention
+            attention_input_blocks = set()
+            for key in state_dict.keys():
+                if 'glide_model.input_blocks' in key and 'transformer_blocks' in key:
+                    block_id = int(key.split('.')[2])
+                    attention_input_blocks.add(block_id)
+
+            logger.info(f"[Arch Detect] Found attention in input_blocks: {sorted(attention_input_blocks)}")
+
+            # Map blocks to stages to determine attention_resolutions
+            # With num_res_blocks and channel_mult, determine which stages have attention
+            attention_stages = set()
+            block_to_stage_map = {}
+            current_block = 0
+
+            # Initial conv
+            current_block += 1
+
+            # For each stage
+            for stage_idx, mult in enumerate(channel_mult):
+                stage_start = current_block
+                # Res blocks in this stage
+                for res_idx in range(num_res_blocks):
+                    block_to_stage_map[current_block] = stage_idx
+                    if current_block in attention_input_blocks:
+                        attention_stages.add(stage_idx)
+                    current_block += 1
+
+                # Downsample (except last stage)
+                if stage_idx < len(channel_mult) - 1:
+                    current_block += 1
+
+            logger.info(f"[Arch Detect] Block to stage mapping: {block_to_stage_map}")
+            logger.info(f"[Arch Detect] Stages with attention: {sorted(attention_stages)}")
+
+            # Convert stage indices to attention_resolutions
+            # attention_resolutions uses downsampling factors
+            # Stage 0 = resolution factor 1 (no downsample)
+            # Stage 1 = resolution factor 2 (one downsample)
+            # Stage 2 = resolution factor 4 (two downsamples)
+            # etc.
+            if attention_stages:
+                attention_resolutions = tuple(2 ** stage_idx for stage_idx in sorted(attention_stages))
+                logger.info(f"[Arch Detect] Detected attention_resolutions: {attention_resolutions}")
+            else:
+                attention_resolutions = tuple()
+                logger.info(f"[Arch Detect] No attention layers detected")
+
+            # Check for transformer blocks (vs simple attention)
+            has_transformer = any('transformer_blocks' in k for k in state_dict.keys()
+                                  if 'glide_model.' in k)
+
+            # Count transformer depth and heads
+            if has_transformer:
+                # Find a sample transformer block to inspect
+                sample_keys = [k for k in state_dict.keys()
+                              if 'transformer_blocks.0.attn1.to_q.weight' in k]
+                if sample_keys:
+                    sample_key = sample_keys[0]
+                    to_q_weight = state_dict[sample_key]
+                    # Shape is typically [inner_dim, channels]
+                    # inner_dim = num_heads * head_dim
+                    # Common: 8 heads with head_dim = channels / 8
+                    inner_dim = to_q_weight.shape[0]
+                    channels = to_q_weight.shape[1]
+                    num_head_channels = channels // 8  # Common default
+                    transformer_depth = 1  # Count by checking max transformer_blocks.X
+
+                    # Find max transformer depth
+                    for key in state_dict.keys():
+                        if 'transformer_blocks.' in key:
+                            depth_match = key.split('transformer_blocks.')[1].split('.')[0]
+                            try:
+                                depth = int(depth_match) + 1
+                                transformer_depth = max(transformer_depth, depth)
+                            except ValueError:
+                                pass
+
+                    logger.info(f"[Arch Detect] Transformer configuration:")
+                    logger.info(f"  - transformer_depth: {transformer_depth}")
+                    logger.info(f"  - num_head_channels: {num_head_channels}")
+                    logger.info(f"  - context_dim (estimated): {inner_dim}")
+                else:
+                    transformer_depth = 1
+                    num_head_channels = -1
+            else:
+                transformer_depth = 1
+                num_head_channels = -1
+
+            # ============================================================
+            # Return detected configuration
+            # ============================================================
+            # Only return parameters that GHOP3DUNet.__init__() accepts
+            # Supported params: model_channels, channel_mult, num_res_blocks, attention_resolutions
+            supported_config = {
+                'model_channels': model_channels,
+                'channel_mult': list(channel_mult),
+                'num_res_blocks': num_res_blocks,
+                'attention_resolutions': list(attention_resolutions),
+            }
+
+            logger.info(f"\n[Arch Detect] Returning configuration:")
+            for key, value in supported_config.items():
+                logger.info(f"  - {key}: {value}")
+
+            # Log extra detected info (for debugging) but don't return it
+            if has_transformer:
+                logger.info(f"\n[Arch Detect] Additional detected settings (informational):")
+                logger.info(f"  - transformer_depth: {transformer_depth}")
+                logger.info(f"  - num_head_channels: {num_head_channels}")
+                logger.info(f"  - use_spatial_transformer: {has_transformer}")
+
+            return supported_config
 
         except Exception as e:
             logger.error(f"[Arch Detect] Detection failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return None
+            raise
 
     def predict_noise(self, noisy_latent, timestep, text_emb=None):
         """
         Predict noise for SDS loss computation.
 
         Args:
-            noisy_latent: (B, 3, 16, 16, 16) noisy latent
+            noisy_latent: (B, 3, 16, 16, 16) noisy latent from HOLD
             timestep: (B,) or scalar timestep(s)
             text_emb: (B, 768) OR (B, seq_len, 768) text embeddings (optional)
 
@@ -935,23 +1547,29 @@ class GHOP3DUNetWrapper(nn.Module):
             timestep = timestep.unsqueeze(0).expand(noisy_latent.shape[0])
 
         # ============================================================
-        # FIX: Ensure context has correct shape for cross-attention
-        # PyTorch MultiheadAttention expects: [seq_len, batch, embed_dim]
-        # But we may receive: [batch, embed_dim]
+        # NEW: Apply input adapter (3 → 23 channels)
+        # ============================================================
+        if hasattr(self, 'input_adapter') and self.input_adapter is not None:
+            original_shape = noisy_latent.shape
+            noisy_latent = self.input_adapter(noisy_latent)
+
+            # Log occasionally for debugging
+            if not hasattr(self, '_input_adapter_log_count'):
+                self._input_adapter_log_count = 0
+
+            if self._input_adapter_log_count < 3:
+                logger.info(
+                    f"[GHOP3DUNetWrapper] Input adapted: "
+                    f"{original_shape[1]} → {noisy_latent.shape[1]} channels"
+                )
+                self._input_adapter_log_count += 1
+
+        # ============================================================
+        # Prepare text embeddings for cross-attention
         # ============================================================
         if text_emb is not None:
             if text_emb.ndim == 2:
-                # Shape: (B, 768) -> (B, 1, 768) for single token
-                # Then transpose to (1, B, 768) for attention
-                text_emb = text_emb.unsqueeze(1)  # (B, 1, 768)
-
-            # Ensure shape is (B, seq_len, embed_dim)
-            if text_emb.shape[0] == noisy_latent.shape[0]:
-                # Shape is (B, seq_len, embed_dim) - correct
-                pass
-            else:
-                # May need transposing depending on your attention implementation
-                pass
+                text_emb = text_emb.unsqueeze(1)  # (B, 768) → (B, 1, 768)
 
         with torch.no_grad():
             noise_pred = self.unet(noisy_latent, timestep, text_emb)
