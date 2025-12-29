@@ -345,6 +345,8 @@ class HOLD(pl.LightningModule):
                 )
                 logger.info(f"✓ GHOP SDS Loss Module initialized (iterations: {self.sds_loss.start_iter} to {self.sds_loss.end_iter})")
 
+
+
                 # ============================================================
                 # Initialize Two-Stage Training Manager
                 # ============================================================
@@ -368,7 +370,7 @@ class HOLD(pl.LightningModule):
                 if hasattr(self, 'ghop_manager') and self.ghop_manager is not None:
                     logger.info("✅ GHOP Manager: INITIALIZED")
                     logger.info(f"   Manager type: {type(self.ghop_manager).__name__}")
-                    logger.info(f"   Has SDS loss module: {hasattr(self.ghop_manager, 'sds_loss_module')}")
+                    logger.info(f"   Has SDS loss module: {hasattr(self.ghop_manager, 'sds_loss')}")
 
                     # Verify sub-components
                     if hasattr(self, 'vqvae'):
@@ -1776,18 +1778,6 @@ class HOLD(pl.LightningModule):
                         logger.debug("[Joint Loss] GT joints not computed, skipping supervision")
             except Exception as e:
                 logger.warning(f"[Joint Loss] Failed: {e}")
-        # Example: log base and extra losses if present
-        rgb_loss = loss_output.get("loss/rgb", None)
-        contact_loss = loss_output.get("contact_loss", None)
-        ghop_loss = loss_output.get("ghop_loss", None)
-
-        if (self.global_step % 50) == 0:
-            logger.debug(
-                f"[LOSS COMPONENTS] step={self.global_step} "
-                f"rgb={float(rgb_loss) if rgb_loss is not None else 'NA'} "
-                f"ghop={float(ghop_loss) if ghop_loss is not None else 'NA'} "
-                f"contact={float(contact_loss) if contact_loss is not None else 'NA'}"
-            )
 
         if should_profile:
             self.memory_profiler.checkpoint("after_loss")
@@ -1988,6 +1978,7 @@ class HOLD(pl.LightningModule):
                     loss_output["loss_sds"] = weighted_ghop  # debug: grad-tracking
                     logger.debug(f"[Phase 3] Added GHOP loss WITH GRADIENTS")
                     loss_output['ghop_loss'] = weighted_ghop.detach()  # Detach only for logging
+                    logger.warning(f"[DEBUG] Line 1978 executed: ghop_loss = {loss_output['ghop_loss'].item():.6f}")
 
                     # ============================================================
                     # STEP 7: Log GHOP metrics
@@ -2022,6 +2013,8 @@ class HOLD(pl.LightningModule):
                     logger.warning(f"[GHOP] ❌ Extraction failed at step {self.global_step}: {e}")
                     ghop_info["error"] = str(e)
                     zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+                    logger.warning(
+                        f"[DEBUG] Line 2013 about to overwrite ghop_loss (current: {loss_output.get('ghop_loss', 'NOT SET')})")
                     loss_output["ghop_loss"] = zero_loss
 
                 except Exception as e:
@@ -2711,6 +2704,25 @@ class HOLD(pl.LightningModule):
             # - Return a zero loss tensor (so Lightning's machinery still works).
             safe_zero = torch.tensor(0.0, device=final_loss.device, requires_grad=False)
             return {"loss": safe_zero}
+
+        # ================================================================
+        # COMPREHENSIVE LOSS LOGGING - After all components computed
+        # ================================================================
+        if (self.global_step % 50) == 0:
+            # Extract all loss components
+            rgb_loss = loss_output.get("loss/rgb", None)
+            ghop_loss = loss_output.get("loss_sds", None)  # From Phase 3
+            contact_loss = loss_output.get("contact_loss", None)  # From Phase 4
+            temporal_loss = loss_output.get("temporal_loss", None)  # From Phase 5
+
+            logger.debug(
+                f"[LOSS COMPONENTS] step={self.global_step} "
+                f"rgb={float(rgb_loss) if rgb_loss is not None else 'NA'} "
+                f"ghop={float(ghop_loss) if ghop_loss is not None else 'NA'} "
+                f"contact={float(contact_loss) if contact_loss is not None else 'NA'} "
+                f"temporal={float(temporal_loss) if temporal_loss is not None else 'NA'} "
+                f"total={float(total_loss):.4f}"
+            )
 
         # Get optimizer
         opt = self.optimizers()
