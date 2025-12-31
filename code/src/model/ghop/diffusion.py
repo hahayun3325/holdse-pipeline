@@ -810,6 +810,39 @@ class GHOP3DUNetWrapper(nn.Module):
             if 'out_channels' not in config:
                 default_arch_config['out_channels'] = checkpoint_out_channels
 
+        # ============================================================
+        # PRE-INITIALIZATION: Adjust input channels for GroupNorm compatibility
+        # ============================================================
+        expected_in_channels = 3  # What HOLD provides
+
+        if checkpoint_in_channels != expected_in_channels:
+            logger.info(f"[GHOP3DUNetWrapper] PRE-INIT: Checking input channel compatibility")
+            logger.info(f"[GHOP3DUNetWrapper] Checkpoint expects: {checkpoint_in_channels} channels")
+            logger.info(f"[GHOP3DUNetWrapper] HOLD provides: {expected_in_channels} channels")
+
+            # Check GroupNorm compatibility
+            if checkpoint_in_channels % 32 != 0:
+                logger.warning(f"[GHOP3DUNetWrapper] ⚠️ {checkpoint_in_channels} not divisible by 32")
+                logger.warning(f"[GHOP3DUNetWrapper] U-Net uses GroupNorm(num_groups=32)")
+
+                # Round up to next multiple of 32
+                target_channels = ((checkpoint_in_channels // 32) + 1) * 32
+                logger.warning(f"[GHOP3DUNetWrapper] Adjusting U-Net to {target_channels} input channels")
+
+                # ✅ CRITICAL: Update config BEFORE U-Net initialization
+                default_arch_config['in_channels'] = target_channels
+
+                logger.info(f"[GHOP3DUNetWrapper] ✅ Config updated: in_channels = {target_channels}")
+            else:
+                target_channels = checkpoint_in_channels
+                logger.info(f"[GHOP3DUNetWrapper] ✅ {checkpoint_in_channels} is compatible with GroupNorm")
+        else:
+            target_channels = expected_in_channels
+            logger.info(f"[GHOP3DUNetWrapper] No input adapter needed")
+
+        # Store target channels for adapter creation later
+        self._target_input_channels = target_channels
+
         # Initialize U-Net with final architecture
         logger.info(f"[GHOP3DUNetWrapper] Initializing U-Net with:")
         logger.info(f"  - in_channels: {default_arch_config['in_channels']}")
@@ -826,6 +859,37 @@ class GHOP3DUNetWrapper(nn.Module):
         logger.info(f"[GHOP3DUNetWrapper] Initialized U-Net with architecture-matched config")
 
         # ============================================================
+        # POST-INITIALIZATION VALIDATION
+        # ============================================================
+        logger.info("\n" + "="*70)
+        logger.info("[GHOP3DUNetWrapper] POST-INITIALIZATION VALIDATION")
+        logger.info("="*70)
+
+        # Check first layer's GroupNorm
+        first_block = self.unet.input_blocks[0]
+
+        # Find GroupNorm in first block
+        for name, module in first_block.named_modules():
+            if isinstance(module, nn.GroupNorm):
+                logger.info(f"Found GroupNorm in first block:")
+                logger.info(f"  - num_groups: {module.num_groups}")
+                logger.info(f"  - num_channels: {module.num_channels}")
+
+                if module.num_channels % module.num_groups != 0:
+                    logger.error(f"  ❌ INCOMPATIBLE: {module.num_channels} % {module.num_groups} = {module.num_channels % module.num_groups}")
+                    logger.error(f"  This indicates the fix didn't work - U-Net still has wrong channel count!")
+                    raise RuntimeError(
+                        f"U-Net GroupNorm incompatibility: {module.num_channels} channels "
+                        f"not divisible by {module.num_groups} groups. "
+                        f"Input adapter adjustment failed to apply before U-Net initialization."
+                    )
+                else:
+                    logger.info(f"  ✅ COMPATIBLE: {module.num_channels} % {module.num_groups} = 0")
+                break
+
+        logger.info("="*70 + "\n")
+
+        # ============================================================
         # VALIDATE: Count created parameters
         # ============================================================
         total_unet_params = sum(1 for _ in self.unet.state_dict().keys())
@@ -838,6 +902,23 @@ class GHOP3DUNetWrapper(nn.Module):
         logger.info(f"  - Input blocks: {input_blocks_count}")
         logger.info(f"  - Output blocks: {output_blocks_count}")
         logger.info(f"  - Middle block layers: {len(self.unet.middle_block)}")
+
+        # ============================================================
+        # VALIDATE: Ensure adapters are compatible with checkpoint loading
+        # ============================================================
+        if checkpoint_in_channels != default_arch_config['in_channels']:
+            logger.warning("="*70)
+            logger.warning("[GHOP3DUNetWrapper] ARCHITECTURE MISMATCH WARNING")
+            logger.warning("="*70)
+            logger.warning(f"  Checkpoint expects: {checkpoint_in_channels} input channels")
+            logger.warning(f"  U-Net initialized with: {default_arch_config['in_channels']} input channels")
+            logger.warning("")
+            logger.warning("  This means checkpoint's first layer weights CANNOT be loaded!")
+            logger.warning("  First layer will use RANDOM initialization.")
+            logger.warning("")
+            logger.warning("  IMPACT: SDS loss quality will be degraded.")
+            logger.warning("  RECOMMENDATION: Fine-tune first layer or use compatible architecture.")
+            logger.warning("="*70 + "\n")
 
         # ============================================================
         # Load checkpoint (architecture now matches!)
@@ -907,36 +988,42 @@ class GHOP3DUNetWrapper(nn.Module):
             self.output_adapter = None
 
         # ============================================================
-        # INPUT ADAPTER: Convert HOLD input (3) to checkpoint expected (23)
+        # INPUT ADAPTER: Create adapter using pre-computed target channels
         # ============================================================
         expected_in_channels = 3  # What HOLD provides
 
-        if checkpoint_in_channels != expected_in_channels:
+        if hasattr(self, '_target_input_channels') and self._target_input_channels != expected_in_channels:
             self.input_adapter = nn.Conv3d(
-                in_channels=expected_in_channels,  # 3 from HOLD
-                out_channels=checkpoint_in_channels,  # 23 for checkpoint
+                in_channels=expected_in_channels,      # 3 from HOLD
+                out_channels=self._target_input_channels,  # 32 (pre-computed)
                 kernel_size=1,
                 padding=0,
                 bias=True
             )
 
-            # Initialize: replicate first 3 channels, zero-pad remaining 20
+            # Initialize: replicate first 3 channels, zero-pad remaining
             with torch.no_grad():
                 self.input_adapter.weight.zero_()
-                # Copy RGB channels to first 3 output channels
-                for i in range(min(expected_in_channels, checkpoint_in_channels)):
+                for i in range(min(expected_in_channels, self._target_input_channels)):
                     self.input_adapter.weight[i, i, 0, 0, 0] = 1.0
-                # Remaining 20 channels stay zero (placeholder for missing modalities)
                 self.input_adapter.bias.zero_()
 
             logger.info(
                 f"[GHOP3DUNetWrapper] Created input adapter: "
-                f"{expected_in_channels} → {checkpoint_in_channels} channels"
+                f"{expected_in_channels} → {self._target_input_channels} channels"
             )
+
+            if self._target_input_channels != checkpoint_in_channels:
+                logger.warning(
+                    f"[GHOP3DUNetWrapper] Note: U-Net has {self._target_input_channels} input channels "
+                    f"but checkpoint has {checkpoint_in_channels}"
+                )
+                logger.warning(f"[GHOP3DUNetWrapper] First layer will use random weights")
 
             self.input_adapter.to(device)
         else:
             self.input_adapter = None
+            logger.info(f"[GHOP3DUNetWrapper] No input adapter created")
 
         self.unet.to(device)
         self.unet.eval()
@@ -1532,12 +1619,13 @@ class GHOP3DUNetWrapper(nn.Module):
         Predict noise for SDS loss computation.
 
         Args:
-            noisy_latent: (B, 3, 16, 16, 16) noisy latent from HOLD
+            noisy_latent: (B, C, D, H, W) noisy latent - ALREADY ADAPTED by forward()
+                          C = 32 after input adapter, or 3 if called directly
             timestep: (B,) or scalar timestep(s)
             text_emb: (B, 768) OR (B, seq_len, 768) text embeddings (optional)
 
         Returns:
-            noise_pred: (B, 3, 16, 16, 16) predicted noise
+            noise_pred: (B, C, D, H, W) predicted noise
         """
         # Ensure timestep is a tensor
         if isinstance(timestep, int):
@@ -1547,22 +1635,26 @@ class GHOP3DUNetWrapper(nn.Module):
             timestep = timestep.unsqueeze(0).expand(noisy_latent.shape[0])
 
         # ============================================================
-        # NEW: Apply input adapter (3 → 23 channels)
+        # ❌ REMOVED: Input adapter application
         # ============================================================
+        # The input adapter is now ONLY applied in forward()
+        # If predict_noise() is called directly from external code,
+        # the caller must ensure the input has the correct channel count
+
+        # ✅ ADD VALIDATION: Check if input has expected channels
         if hasattr(self, 'input_adapter') and self.input_adapter is not None:
-            original_shape = noisy_latent.shape
-            noisy_latent = self.input_adapter(noisy_latent)
+            expected_channels = self.input_adapter.out_channels  # Should be 32
 
-            # Log occasionally for debugging
-            if not hasattr(self, '_input_adapter_log_count'):
-                self._input_adapter_log_count = 0
-
-            if self._input_adapter_log_count < 3:
-                logger.info(
-                    f"[GHOP3DUNetWrapper] Input adapted: "
-                    f"{original_shape[1]} → {noisy_latent.shape[1]} channels"
-                )
-                self._input_adapter_log_count += 1
+            if noisy_latent.shape[1] != expected_channels:
+                # Log warning but don't fail - this might be intentional
+                if not hasattr(self, '_predict_noise_channel_warning_shown'):
+                    logger.warning(
+                        f"[predict_noise] Input has {noisy_latent.shape[1]} channels, "
+                        f"but U-Net expects {expected_channels} channels. "
+                        f"If this is called from forward(), this indicates a bug. "
+                        f"If called directly, ensure input is pre-adapted."
+                    )
+                    self._predict_noise_channel_warning_shown = True
 
         # ============================================================
         # Prepare text embeddings for cross-attention
@@ -1571,6 +1663,9 @@ class GHOP3DUNetWrapper(nn.Module):
             if text_emb.ndim == 2:
                 text_emb = text_emb.unsqueeze(1)  # (B, 768) → (B, 1, 768)
 
+        # ============================================================
+        # Forward through U-Net (expects 32 channels after adapter)
+        # ============================================================
         with torch.no_grad():
             noise_pred = self.unet(noisy_latent, timestep, text_emb)
 
@@ -1578,36 +1673,70 @@ class GHOP3DUNetWrapper(nn.Module):
 
     def forward(self, x, timesteps, context=None):
         """
-        Forward pass with optional output adaptation.
+        Forward pass with input/output adaptation.
 
         Args:
-            x: Latent tensor [B, C, D, H, W]
+            x: Latent tensor [B, 3, D, H, W] from VQ-VAE
             timesteps: Diffusion timesteps [B]
             context: Optional conditioning (text embeddings)
 
         Returns:
             Denoised tensor [B, 3, D, H, W]
         """
-        # Forward through U-Net
-        output = self.predict_noise(x, timesteps, context)
+        # ✅ ADD THIS AT ENTRY:
+        if not hasattr(self, '_forward_log_count'):
+            self._forward_log_count = 0
+
+        if self._forward_log_count < 3:  # Log first 3 calls
+            logger.info(f"[UNET-FORWARD] === Entry ===")
+            logger.info(f"[UNET-FORWARD] Input x shape: {x.shape}")
+            logger.info(f"[UNET-FORWARD] Expected: [B, 3, 6/8, 6/8, 6/8]")
 
         # ============================================================
-        # CHECK THIS EXISTS:
+        # APPLY INPUT ADAPTER (3 → 32 channels)
+        # ============================================================
+        if hasattr(self, 'input_adapter') and self.input_adapter is not None:
+            original_shape = x.shape
+            x = self.input_adapter(x)  # [B, 3, ...] → [B, 32, ...]
+
+            if self._forward_log_count < 3:
+                logger.info(f"[UNET-FORWARD] Input adapted: {original_shape[1]} → {x.shape[1]} channels")
+                logger.info(f"[UNET-FORWARD] Now calling U-Net with {x.shape[1]}-channel input")
+
+        # ============================================================
+        # FORWARD THROUGH U-NET
+        # ============================================================
+        if self._forward_log_count < 3:
+            logger.info(f"[UNET-FORWARD] Calling self.predict_noise(x={x.shape}, t={timesteps.shape})")
+
+        try:
+            output = self.predict_noise(x, timesteps, context)
+
+            if self._forward_log_count < 3:
+                logger.info(f"[UNET-FORWARD] U-Net output shape: {output.shape}")
+
+        except RuntimeError as e:
+            if "num_groups" in str(e):
+                logger.error(f"[UNET-FORWARD] ❌ GroupNorm error: {e}")
+                logger.error(f"[UNET-FORWARD] Input shape to U-Net: {x.shape}")
+                logger.error(f"[UNET-FORWARD] This means input_adapter fix didn't work!")
+                raise
+            else:
+                raise
+
+        # ============================================================
+        # APPLY OUTPUT ADAPTER (23/32 → 3 channels)
         # ============================================================
         if hasattr(self, 'output_adapter') and self.output_adapter is not None:
             original_shape = output.shape
             output = self.output_adapter(output)
 
-            # Log occasionally
-            if not hasattr(self, '_output_adapter_log_count'):
-                self._output_adapter_log_count = 0
+            if self._forward_log_count < 3:
+                logger.info(f"[UNET-FORWARD] Output adapted: {original_shape[1]} → {output.shape[1]} channels")
 
-            if self._output_adapter_log_count < 3:
-                logger.info(
-                    f"[GHOP3DUNetWrapper] Output adapted: "
-                    f"{original_shape[1]} → {output.shape[1]} channels"
-                )
-                self._output_adapter_log_count += 1
+        if self._forward_log_count < 3:
+            logger.info(f"[UNET-FORWARD] === Exit: returning {output.shape} ===\n")
+            self._forward_log_count += 1
 
         return output
 

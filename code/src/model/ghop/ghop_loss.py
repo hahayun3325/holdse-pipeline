@@ -168,6 +168,11 @@ class SDSLoss(nn.Module):
             logger.info(f"[SDS-SHAPE] z_t input shape: {z_t.shape}")
             logger.info(f"[SDS-SHAPE] text_emb shape: {text_emb.shape}")
 
+            # ✅ ADD THIS NEW DEBUG - Check what U-Net wrapper receives:
+            logger.info(f"[SDS-SHAPE] About to call self.unet.forward()")
+            logger.info(f"[SDS-SHAPE] U-Net wrapper type: {type(self.unet).__name__}")
+            logger.info(f"[SDS-SHAPE] Check U-Net wrapper's internal concatenation logic")
+
             eps_cond = self.unet(z_t, t, text_emb)  # Calls forward() which applies 23→3 adapter
 
             # ADD THIS DEBUG AFTER FIRST U-NET:
@@ -515,6 +520,10 @@ class GHOPSDSLoss:
             )
 
             logger.warning(f"[GHOP-COMPUTE] forward() returned: sds_loss={sds_loss}")
+            # ✅ ADD THIS ADDITIONAL INFO:
+            logger.warning(f"[GHOP-COMPUTE] sds_info keys: {list(sds_info.keys())}")
+            if 'error' in sds_info:
+                logger.error(f"[GHOP-COMPUTE] ERROR in sds_info: {sds_info['error']}")
 
         # Legacy: Use ghop_prior
         else:

@@ -345,7 +345,72 @@ class HOLD(pl.LightningModule):
                 )
                 logger.info(f"✓ GHOP SDS Loss Module initialized (iterations: {self.sds_loss.start_iter} to {self.sds_loss.end_iter})")
 
+                # ============================================================
+                # PHASE 3 SHAPE VERIFICATION TEST
+                # ============================================================
+                logger.info("\n" + "=" * 70)
+                logger.info("PHASE 3 ARCHITECTURE VERIFICATION")
+                logger.info("=" * 70)
 
+                try:
+                    # Create test tensors
+                    test_sdf = torch.randn(1, 1, 64, 64, 64, device='cuda')
+                    test_hand = {
+                        'pose': torch.randn(1, 48, device='cuda'),
+                        'shape': torch.randn(1, 10, device='cuda'),
+                        'trans': torch.randn(1, 3, device='cuda')
+                    }
+
+                    logger.info("Testing component dimensions:")
+
+                    # Test 1: Hand field output
+                    with torch.no_grad():
+                        test_hand_field = self.hand_field_builder(hand_params=test_hand)
+                        logger.info(f"  Hand field output: {test_hand_field.shape}")
+                        logger.info(f"    Expected: [1, 15, 64, 64, 64]")
+                        if test_hand_field.shape[1] != 15:
+                            logger.error(f"    ❌ Wrong channel count! Expected 15, got {test_hand_field.shape[1]}")
+
+                    # Test 2: VQ-VAE encode output
+                    with torch.no_grad():
+                        test_z0, _, _ = self.vqvae.encode(test_sdf, test_hand_field)
+                        logger.info(f"  VQ-VAE latent output: {test_z0.shape}")
+                        logger.info(f"    Expected: [1, 3, 6, 6, 6] or [1, 3, 8, 8, 8]")
+                        if test_z0.shape[1] != 3:
+                            logger.error(f"    ❌ Wrong channel count! Expected 3, got {test_z0.shape[1]}")
+
+                    # Test 3: U-Net input (this is where the 23-channel error happens)
+                    with torch.no_grad():
+                        test_t = torch.tensor([500], device='cuda')
+                        test_text = torch.zeros(1, 77, 768, device='cuda')
+
+                        logger.info(f"  Calling U-Net with:")
+                        logger.info(f"    z_t shape: {test_z0.shape}")
+                        logger.info(f"    timestep: {test_t.shape}")
+                        logger.info(f"    text_emb: {test_text.shape}")
+
+                        try:
+                            test_output = self.unet(test_z0, test_t, test_text)
+                            logger.info(f"  ✅ U-Net output: {test_output.shape}")
+                        except Exception as e:
+                            logger.error(f"  ❌ U-Net FAILED: {e}")
+                            logger.error(f"     This is the 23-channel error - U-Net wrapper concatenates incorrectly")
+
+                            # Extract channel count from error message
+                            if "got input of shape" in str(e):
+                                import re
+                                match = re.search(r'\[(\d+), (\d+), (\d+), (\d+), (\d+)\]', str(e))
+                                if match:
+                                    actual_channels = int(match.group(2))
+                                    logger.error(f"     Actual channels entering U-Net: {actual_channels}")
+                                    logger.error(f"     Required channels (divisible by 32): 32, 64, 96, ...")
+                                    logger.error(f"     Delta: need +{32 - (actual_channels % 32)} channels")
+
+                    logger.info("=" * 70 + "\n")
+                except Exception as e:
+                    logger.error(f"❌ Shape verification test failed: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
                 # ============================================================
                 # Initialize Two-Stage Training Manager
