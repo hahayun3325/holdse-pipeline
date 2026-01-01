@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jutils import mesh_utils, hand_utils
 from jutils.hand_utils import DistanceField
+from loguru import logger
 
 
 class GHOPPriorModule(nn.Module):
@@ -408,6 +409,11 @@ class TwoStageTrainingManager:
 
     def get_stage_weights(self, iteration):
         """Return constant SDS weight (phase scheduling handled in HOLD)."""
+        # ================================================================
+        # 🔍 CRITICAL: Log weight computation
+        # ================================================================
+        logger.critical(f"[GET-STAGE-WEIGHTS] Called with iteration {iteration}")
+
         return {
             'sds_weight': self.max_sds_weight,  # Use full weight
             'contact_weight': 0.0,              # Phase 4 handles contact
@@ -431,11 +437,21 @@ class TwoStageTrainingManager:
             losses: Dict with loss components {'sds': ..., 'contact': ...}
             info: Dict with diagnostic information
         """
+        # ================================================================
+        # 🔍 CRITICAL: Log that compute_losses was called
+        # ================================================================
+        logger.critical(f"[TWO-STAGE-MANAGER] compute_losses() ENTRY at iteration {iteration}")
+
         weights = self.get_stage_weights(iteration)
         device = object_sdf.device
 
-        total_loss = torch.tensor(0.0, device=device, requires_grad=False)
+        # ================================================================
+        # 🔍 CRITICAL: Log weights to see if SDS is enabled
+        # ================================================================
+        logger.critical(f"[TWO-STAGE-MANAGER] weights['sds_weight'] = {weights['sds_weight']}")
+        logger.critical(f"[TWO-STAGE-MANAGER] weights: {weights}")
 
+        total_loss = torch.tensor(0.0, device=device, requires_grad=False)
         losses = {}
         info = {
             'stage': weights['stage'],
@@ -446,6 +462,13 @@ class TwoStageTrainingManager:
 
         # SDS loss
         if weights['sds_weight'] > 0:
+            # ================================================================
+            # 🔍 CRITICAL: Confirm we entered SDS branch
+            # ================================================================
+            logger.critical(f"[TWO-STAGE-MANAGER] SDS weight > 0, computing SDS loss...")
+            logger.critical(f"[TWO-STAGE-MANAGER] self.sds_loss exists: {hasattr(self, 'sds_loss')}")
+            logger.critical(f"[TWO-STAGE-MANAGER] self.sds_loss type: {type(self.sds_loss) if hasattr(self, 'sds_loss') else 'MISSING'}")
+
             # Normalize text prompts
             if text_prompts is None:
                 text_prompts = ["a hand grasping an object"]
@@ -460,6 +483,8 @@ class TwoStageTrainingManager:
                 # Unknown type, use default
                 text_prompts = ["a hand grasping an object"]
 
+            logger.critical(f"[TWO-STAGE-MANAGER] About to call self.sds_loss.compute()...")
+
             try:
                 # ============================================================
                 # CRITICAL FIX: Pass hand_params directly (not hand_pose)
@@ -469,15 +494,28 @@ class TwoStageTrainingManager:
                     obj_sdf=object_sdf,
                     hand_params=hand_params,
                     object_category=text_prompts[0] if len(text_prompts) == 1 else text_prompts,
-                    iteration=iteration  # ← CRITICAL: Add this parameter!
+                    iteration=iteration
                 )
+
+                logger.critical(f"[TWO-STAGE-MANAGER] self.sds_loss.compute() returned successfully!")
+                logger.critical(f"[TWO-STAGE-MANAGER] sds_loss = {sds_loss}")
+
                 losses['sds'] = sds_loss
                 info.update({f'sds_{k}': v for k, v in sds_info.items()})
 
             except Exception as e:
-                print(f"Warning: SDS loss computation failed: {e}")
+                logger.critical(f"[TWO-STAGE-MANAGER] ❌ EXCEPTION in sds_loss.compute()!")
+                logger.critical(f"[TWO-STAGE-MANAGER] Exception: {e}")
+                import traceback
+                logger.critical(f"[TWO-STAGE-MANAGER] Traceback:\n{traceback.format_exc()}")
+
                 losses['sds'] = torch.tensor(0.0, device=device, requires_grad=False)
                 info['sds_error'] = str(e)
+        else:
+            # ================================================================
+            # 🔍 CRITICAL: Log when SDS is skipped
+            # ================================================================
+            logger.critical(f"[TWO-STAGE-MANAGER] SDS weight is 0, SKIPPING SDS computation")
 
         # ================================================================
         # Contact loss computation
@@ -513,6 +551,14 @@ class TwoStageTrainingManager:
             info['total_loss'] = total_loss.item()
         else:
             info['total_loss'] = float(total_loss)
+
+        # ================================================================
+        # 🔍 DEBUG BLOCK 6: Final Summary
+        # ================================================================
+        if iteration % 50 == 0:
+            logger.info(f"[SDS Pipeline - Step {iteration}] ========== FINAL SUMMARY ==========")
+            logger.info(f"  Total loss: {total_loss.item():.6f}")
+            logger.info(f"  Loss breakdown: {[(k, v.item() if isinstance(v, torch.Tensor) else v) for k, v in losses.items()]}")
 
         return losses, info
 

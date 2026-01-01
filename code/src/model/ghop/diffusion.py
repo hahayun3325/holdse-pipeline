@@ -603,8 +603,7 @@ class GHOP3DUNet(nn.Module):
         hs = []
         h = x
 
-        for i, module_list in enumerate(self.input_blocks):  # ADD enumerate
-            # ADD THIS:
+        for i, module_list in enumerate(self.input_blocks):
             print(f"[UNET DEBUG] --- Encoder block {i}: h.shape={h.shape} ---")
             if isinstance(module_list, nn.Conv3d):
                 h = module_list(h)
@@ -613,14 +612,16 @@ class GHOP3DUNet(nn.Module):
                     if isinstance(layer, ResBlock3D):
                         h = layer(h, emb)
                     elif isinstance(layer, SpatialTransformer3D):
-                        # ADD THIS:
                         print(f"[UNET DEBUG] Before ST (encoder): h.shape={h.shape}")
                         h = layer(h, context)
                         print(f"[UNET DEBUG] After ST (encoder): h.shape={h.shape}")
                     elif isinstance(layer, Downsample3D):
                         h = layer(h)
+                    elif isinstance(layer, nn.Conv3d):  # ✅ ADD THIS!
+                        print(f"[UNET DEBUG] Applying Conv3d: {h.shape[1]} → {layer.out_channels} channels")
+                        h = layer(h)
+                        print(f"[UNET DEBUG] After Conv3d: h.shape={h.shape}")
 
-            # ADD THIS:
             print(f"[UNET DEBUG] Appending to hs: h.shape={h.shape}, h.ndim={h.ndim}")
             hs.append(h)
 
@@ -690,6 +691,9 @@ class GHOP3DUNet(nn.Module):
                     h = layer(h, context)
                     print(f"[UNET DEBUG] After ST (decoder): h.shape={h.shape}")
                 elif isinstance(layer, Upsample3D):
+                    h = layer(h)
+                elif isinstance(layer, nn.Conv3d):
+                    print(f"[UNET DEBUG] Applying Conv3d (decoder): {h.shape[1]} → {layer.out_channels} channels")
                     h = layer(h)
 
         # ADD THIS AT END:
@@ -811,31 +815,41 @@ class GHOP3DUNetWrapper(nn.Module):
                 default_arch_config['out_channels'] = checkpoint_out_channels
 
         # ============================================================
-        # PRE-INITIALIZATION: Adjust input channels for GroupNorm compatibility
+        # PRE-INITIALIZATION: Detect input channels from checkpoint
         # ============================================================
         expected_in_channels = 3  # What HOLD provides
 
         if checkpoint_in_channels != expected_in_channels:
-            logger.info(f"[GHOP3DUNetWrapper] PRE-INIT: Checking input channel compatibility")
+            logger.info(f"[GHOP3DUNetWrapper] PRE-INIT: Input channel mismatch detected")
             logger.info(f"[GHOP3DUNetWrapper] Checkpoint expects: {checkpoint_in_channels} channels")
             logger.info(f"[GHOP3DUNetWrapper] HOLD provides: {expected_in_channels} channels")
 
-            # Check GroupNorm compatibility
-            if checkpoint_in_channels % 32 != 0:
-                logger.warning(f"[GHOP3DUNetWrapper] ⚠️ {checkpoint_in_channels} not divisible by 32")
-                logger.warning(f"[GHOP3DUNetWrapper] U-Net uses GroupNorm(num_groups=32)")
+            # ✅ USE CHECKPOINT'S EXACT VALUE - No rounding needed!
+            # The first conv (input_blocks.0.0) is a regular Conv3d without GroupNorm,
+            # so it can accept ANY number of input channels.
+            # GroupNorm operates on the OUTPUT of the first conv (64 channels), not the input.
+            target_channels = checkpoint_in_channels  # Use 23 exactly
 
-                # Round up to next multiple of 32
-                target_channels = ((checkpoint_in_channels // 32) + 1) * 32
-                logger.warning(f"[GHOP3DUNetWrapper] Adjusting U-Net to {target_channels} input channels")
+            # ✅ CRITICAL: Update U-Net architecture to match checkpoint
+            default_arch_config['in_channels'] = target_channels
+            logger.info(
+                f"[GHOP3DUNetWrapper] ✅ U-Net architecture updated: in_channels = {target_channels}"
+            )
 
-                # ✅ CRITICAL: Update config BEFORE U-Net initialization
-                default_arch_config['in_channels'] = target_channels
-
-                logger.info(f"[GHOP3DUNetWrapper] ✅ Config updated: in_channels = {target_channels}")
-            else:
-                target_channels = checkpoint_in_channels
-                logger.info(f"[GHOP3DUNetWrapper] ✅ {checkpoint_in_channels} is compatible with GroupNorm")
+            logger.info(
+                f"[GHOP3DUNetWrapper] Input adapter will convert: "
+                f"{expected_in_channels} → {target_channels} channels"
+            )
+            logger.info(
+                f"[GHOP3DUNetWrapper] U-Net first conv will be initialized as: {target_channels} → 64 channels"
+            )
+            logger.info(
+                f"[GHOP3DUNetWrapper] This allows checkpoint's first conv to load correctly"
+            )
+            logger.info(
+                f"[GHOP3DUNetWrapper] Note: GroupNorm operates on first conv OUTPUT "
+                f"(64 channels), not input ({target_channels} channels)"
+            )
         else:
             target_channels = expected_in_channels
             logger.info(f"[GHOP3DUNetWrapper] No input adapter needed")

@@ -455,10 +455,21 @@ class GHOPSDSLoss:
         hand_shape=None,
         hand_trans=None
     ):
+        # ================================================================
+        # 🔍 ABSOLUTE FIRST LINE: Confirm we got called
+        # ================================================================
+        logger.critical(f"[GHOP-COMPUTE-ENTRY] ============================================")
+        logger.critical(f"[GHOP-COMPUTE-ENTRY] compute() CALLED at iteration {iteration}")
+        logger.critical(f"[GHOP-COMPUTE-ENTRY] obj_sdf shape: {obj_sdf.shape}")
+        logger.critical(f"[GHOP-COMPUTE-ENTRY] start_iter: {self.start_iter}, end_iter: {self.end_iter}")
+        logger.critical(f"[GHOP-COMPUTE-ENTRY] About to check should_apply()...")
+
         # ============================================================
         # CRITICAL DIAGNOSTIC: Log iteration values
         # ============================================================
         should_apply_result = self.should_apply(iteration)
+
+        logger.critical(f"[GHOP-COMPUTE-ENTRY] should_apply returned: {should_apply_result}")
 
         if not should_apply_result:
             logger.warning(f"[GHOP-COMPUTE] ❌ REJECTED! Reason:")

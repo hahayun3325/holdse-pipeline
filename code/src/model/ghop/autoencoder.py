@@ -97,6 +97,11 @@ class Encoder3D(nn.Module):
 
             self.down.append(block)
 
+        self.mid = nn.Module()
+        self.mid.block_1 = ResBlock3D(in_ch, in_ch)
+        # self.mid.attn_1 = AttnBlock3D(in_ch)  # Need to implement this
+        self.mid.block_2 = ResBlock3D(in_ch, in_ch)
+
         # Output
         self.norm_out = nn.GroupNorm(32, in_ch)
         self.conv_out = nn.Conv3d(in_ch, z_channels, kernel_size=3, padding=1)
@@ -408,16 +413,36 @@ class GHOPVQVAEWrapper(nn.Module):
             if key.startswith('ae.model.'):
                 new_key = key.replace('ae.model.', '', 1)
 
-                if any(pattern in new_key for pattern in [
-                    'encoder.',
-                    'decoder.',
-                    'quantize.',
-                    'quant_conv',
-                    'post_quant'
-                ]):
-                    vqvae_state_dict[new_key] = value
+                # ================================================================
+                # FIX: Remove restrictive filtering - load ALL ae.model.* keys
+                # ================================================================
+                # The checkpoint contains other important keys like mean, std, viz
+                # that are needed for proper VQ-VAE operation
+
+                # Skip visualization and wrapper components (not needed for inference)
+                if new_key.startswith('viz.') or new_key.startswith('hand_wrapper.'):
+                    continue
+
+                vqvae_state_dict[new_key] = value
 
         logger.info(f"  Extracted VQ-VAE parameters: {len(vqvae_state_dict)} (from {len(state_dict)} total)")
+
+        # ================================================================
+        # DIAGNOSTIC: Log which keys were extracted
+        # ================================================================
+        if len(vqvae_state_dict) > 0:
+            sample_keys = list(vqvae_state_dict.keys())[:10]
+            logger.info(f"  Sample extracted keys: {sample_keys}")
+
+            # Count keys by component
+            component_counts = {}
+            for key in vqvae_state_dict.keys():
+                component = key.split('.')[0]
+                component_counts[component] = component_counts.get(component, 0) + 1
+
+            logger.info(f"  Keys by component: {component_counts}")
+        else:
+            logger.warning("  ⚠️  NO VQ-VAE keys extracted!")
 
         # ============================================================
         # STEP 3: Handle input channel mismatch
