@@ -2044,6 +2044,7 @@ class HOLD(pl.LightningModule):
                     logger.debug(f"[Phase 3] Added GHOP loss WITH GRADIENTS")
                     loss_output['ghop_loss'] = weighted_ghop.detach()  # Detach only for logging
                     logger.warning(f"[DEBUG] Line 1978 executed: ghop_loss = {loss_output['ghop_loss'].item():.6f}")
+                    loss_output["loss/sds"] = weighted_ghop  # ← Match logging convention
 
                     # ============================================================
                     # STEP 7: Log GHOP metrics
@@ -2099,6 +2100,7 @@ class HOLD(pl.LightningModule):
                 logger.info(f"    global_step % sds_iters == 0: {(self.global_step % getattr(self, 'sds_iters', 1)) == 0}")
 
             zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
+            loss_output["loss/sds"] = zero_loss  # ← Add this
             loss_output["ghop_loss"] = zero_loss
 
         if should_profile and self.phase3_enabled:

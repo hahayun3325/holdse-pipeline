@@ -160,6 +160,18 @@ class SDSLoss(nn.Module):
             # Get text embeddings (currently placeholder)
             text_emb = self._get_text_embeddings(text_prompts, B, device)
 
+            # ✅ ADD THESE DEBUG LINES:
+            logger.critical(f"[TEXT-DEBUG] text_prompts: {text_prompts}")
+            logger.critical(f"[TEXT-DEBUG] text_emb shape: {text_emb.shape}")
+            logger.critical(f"[TEXT-DEBUG] text_emb mean: {text_emb.mean().item():.6f}")
+            logger.critical(f"[TEXT-DEBUG] text_emb std: {text_emb.std().item():.6f}")
+            logger.critical(f"[TEXT-DEBUG] text_emb norm: {text_emb.norm().item():.6f}")
+            logger.critical(
+                f"[TEXT-DEBUG] text_emb min/max: [{text_emb.min().item():.6f}, {text_emb.max().item():.6f}]")
+
+            # Sample first 5 values to see if real embeddings
+            logger.critical(f"[TEXT-DEBUG] text_emb[0,0,:5]: {text_emb[0, 0, :5].cpu().tolist()}")
+
             # ✅ LOG 6: Before first U-Net call
             mem_before_unet1 = torch.cuda.memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
             logger.info(f"[SDS-MEMORY] Calling U-Net (conditional)...")
