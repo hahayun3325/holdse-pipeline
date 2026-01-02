@@ -330,6 +330,148 @@ class HOLD(pl.LightningModule):
                 logger.info("✓ Hand Field Builder initialized")
 
                 # ============================================================
+                # Load GHOP Checkpoint for CLIP Text Encoder
+                # ============================================================
+                logger.info("Loading GHOP checkpoint for CLIP text encoder...")
+
+                # The checkpoint path was already determined above (model_checkpoint variable)
+                # We need to load it to extract the CLIP encoder (cond_stage_model)
+                if need_checkpoint and os.path.exists(model_checkpoint):
+                    logger.info(f"Loading GHOP checkpoint: {model_checkpoint}")
+                    ghop_checkpoint = torch.load(model_checkpoint, map_location='cuda')
+
+                    # ============================================================
+                    # Create Minimal Prior Wrapper with CLIP Encoder
+                    # ============================================================
+                    class MinimalGHOPPrior:
+                        """
+                        Minimal wrapper providing text encoding interface for SDSLoss.
+                        Extracts and uses CLIP encoder from GHOP checkpoint.
+                        """
+                        def __init__(self, checkpoint, device='cuda'):
+                            self.device = device
+
+                            # Extract state dict
+                            if 'state_dict' in checkpoint:
+                                state_dict = checkpoint['state_dict']
+                            else:
+                                state_dict = checkpoint
+
+                            # Try to load CLIP encoder from checkpoint
+                            try:
+                                # Import CLIP encoder class from GHOP codebase
+                                from ldm.modules.encoders.modules import FrozenCLIPEmbedder
+
+                                self.clip_encoder = FrozenCLIPEmbedder().to(device)
+
+                                # Filter CLIP encoder weights (keys starting with 'cond_stage_model.')
+                                clip_state = {
+                                    k.replace('cond_stage_model.', ''): v
+                                    for k, v in state_dict.items()
+                                    if k.startswith('cond_stage_model.')
+                                }
+
+                                if clip_state:
+                                    # Load filtered weights
+                                    missing, unexpected = self.clip_encoder.load_state_dict(clip_state, strict=False)
+                                    logger.info(f"✓ Loaded CLIP encoder from checkpoint")
+                                    logger.info(f"  - Loaded parameters: {len(clip_state)}")
+                                    if missing:
+                                        logger.info(f"  - Missing keys: {len(missing)}")
+                                    if unexpected:
+                                        logger.info(f"  - Unexpected keys: {len(unexpected)}")
+                                else:
+                                    logger.warning("No CLIP encoder found in checkpoint, using pretrained CLIP")
+                                    # Fall back to Hugging Face CLIP
+                                    from transformers import CLIPTokenizer, CLIPTextModel
+                                    self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+                                    self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+                                    self.use_hf_clip = True
+
+                                self.clip_encoder.eval()
+                                self.use_hf_clip = False
+
+                            except ImportError:
+                                # If FrozenCLIPEmbedder not available, use Hugging Face CLIP
+                                logger.warning("FrozenCLIPEmbedder not available, using Hugging Face CLIP")
+                                from transformers import CLIPTokenizer, CLIPTextModel
+
+                                self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+                                self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+                                self.clip_encoder.eval()
+                                self.use_hf_clip = True
+
+                        def encode_text(self, text_prompts):
+                            """
+                            Encode text prompts using CLIP encoder.
+
+                            Args:
+                                text_prompts: List of text strings
+
+                            Returns:
+                                text_embeddings: (B, 1, 768) tensor for U-Net conditioning
+                            """
+                            with torch.no_grad():
+                                if self.use_hf_clip:
+                                    # Hugging Face CLIP path
+                                    inputs = self.tokenizer(
+                                        text_prompts,
+                                        padding=True,
+                                        truncation=True,
+                                        max_length=77,
+                                        return_tensors="pt"
+                                    ).to(self.device)
+
+                                    outputs = self.clip_encoder(**inputs)
+                                    # Use pooled output (CLS token embedding)
+                                    embeddings = outputs.pooler_output  # (B, 768)
+                                else:
+                                    # FrozenCLIPEmbedder path (original GHOP encoder)
+                                    embeddings = self.clip_encoder.encode(text_prompts)  # (B, 768)
+
+                                # Add sequence dimension for U-Net cross-attention
+                                return embeddings.unsqueeze(1)  # (B, 1, 768)
+
+                    # Create the prior module
+                    self.ghop_prior = MinimalGHOPPrior(ghop_checkpoint, device='cuda')
+                    logger.info("✓ GHOP Prior Module initialized with CLIP encoder from checkpoint")
+
+                else:
+                    # No checkpoint available - use Hugging Face CLIP directly
+                    logger.warning("No GHOP checkpoint available, initializing CLIP from Hugging Face")
+
+                    class SimpleGHOPPrior:
+                        """Fallback CLIP encoder using Hugging Face transformers."""
+                        def __init__(self, device='cuda'):
+                            from transformers import CLIPTokenizer, CLIPTextModel
+
+                            self.device = device
+                            self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+                            self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+                            self.clip_encoder.eval()
+
+                            logger.info("✓ Initialized CLIP encoder from Hugging Face")
+
+                        def encode_text(self, text_prompts):
+                            """Encode text using Hugging Face CLIP."""
+                            with torch.no_grad():
+                                inputs = self.tokenizer(
+                                    text_prompts,
+                                    padding=True,
+                                    truncation=True,
+                                    max_length=77,
+                                    return_tensors="pt"
+                                ).to(self.device)
+
+                                outputs = self.clip_encoder(**inputs)
+                                embeddings = outputs.pooler_output  # (B, 768)
+
+                                return embeddings.unsqueeze(1)  # (B, 1, 768)
+
+                    self.ghop_prior = SimpleGHOPPrior(device='cuda')
+                    logger.info("✓ GHOP Prior Module initialized with Hugging Face CLIP")
+
+                # ============================================================
                 # Initialize SDS Loss Module
                 # ============================================================
                 logger.info("Initializing GHOP SDS Loss Module...")
@@ -337,6 +479,7 @@ class HOLD(pl.LightningModule):
                     vqvae_wrapper=self.vqvae,
                     unet_wrapper=self.unet,
                     hand_field_builder=self.hand_field_builder,
+                    prior_module=self.ghop_prior,           # ← Now properly initialized
                     sds_weight=phase3_cfg.get('w_sds', 10.0),
                     guidance_scale=phase3_cfg.sds.get('guidance_scale', 4.0),
                     start_iter=phase3_cfg.get('phase3_start_iter', 0),
@@ -1985,10 +2128,23 @@ class HOLD(pl.LightningModule):
                     # STEP 3: Get text prompt
                     # ============================================================
                     category = batch.get('category', batch.get('object_category', 'Object'))
+
+                    # DEBUG: Check what we got
+                    logger.debug(f"[TEXT-PROMPT] Raw category from batch: {repr(category)}")
+                    logger.debug(f"[TEXT-PROMPT] Available keys: {list(batch.keys())}")
+
                     if isinstance(category, (list, tuple)):
                         category = category[0]
 
+                    # Clean category string
+                    category = str(category).strip("()[]'\"")
+
+                    # Remove "a hand grasping a" prefix if already present
+                    if "a hand grasping a" in category.lower():
+                        category = category.split("a hand grasping a", 1)[-1].strip()
+
                     text_prompt = f"a hand grasping a {category}"
+                    logger.debug(f"[TEXT-PROMPT] Final prompt: {repr(text_prompt)}")
 
                     # ============================================================
                     # STEP 4: Compute SDS loss via ghop_manager

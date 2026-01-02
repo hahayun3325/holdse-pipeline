@@ -34,6 +34,7 @@ class SDSLoss(nn.Module):
                  vqvae_wrapper,
                  unet_wrapper,
                  hand_field_builder,
+                 prior_module,  # ← ADD THIS PARAMETER
                  guidance_scale=4.0,
                  min_step_ratio=0.02,
                  max_step_ratio=0.98,
@@ -43,6 +44,7 @@ class SDSLoss(nn.Module):
             vqvae_wrapper: GHOPVQVAEWrapper instance for encoding
             unet_wrapper: GHOP3DUNetWrapper instance for noise prediction
             hand_field_builder: HandFieldBuilder instance
+            prior_module: GHOPPriorModule instance for CLIP text encoding
             guidance_scale: Classifier-free guidance scale (default: 4.0)
             min_step_ratio: Minimum timestep ratio (default: 0.02 = step 20/1000)
             max_step_ratio: Maximum timestep ratio (default: 0.98 = step 980/1000)
@@ -53,6 +55,7 @@ class SDSLoss(nn.Module):
         self.vqvae = vqvae_wrapper
         self.unet = unet_wrapper
         self.hand_field = hand_field_builder
+        self.prior_module = prior_module  # ← ADD THIS LINE
         self.guidance_scale = guidance_scale
 
         # ================================================================
@@ -360,7 +363,7 @@ class SDSLoss(nn.Module):
 
     def _get_text_embeddings(self, prompts, batch_size, device):
         """
-        Generate text embeddings for conditioning.
+        Generate CLIP text embeddings for conditioning.
 
         Args:
             prompts: List of text strings or None
@@ -368,20 +371,57 @@ class SDSLoss(nn.Module):
             device: Target device
 
         Returns:
-            text_emb: (B, 77, 768) text embeddings
-
-        TODO: Integrate CLIP text encoder when available:
-            from transformers import CLIPTextModel, CLIPTokenizer
-            tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-            text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
+            text_emb: (B, 77, 768) text embeddings for U-Net conditioning
         """
-        # Placeholder: return zero embeddings
-        # In production, replace with actual CLIP embeddings
-        if prompts is None:
+        # ============================================================
+        # Handle None/empty prompts
+        # ============================================================
+        if prompts is None or len(prompts) == 0:
             prompts = ["a hand grasping an object"] * batch_size
+            logger.warning(f"[TEXT-EMB] No prompts provided, using default: '{prompts[0]}'")
 
-        # Standard CLIP embedding shape: (B, 77, 768)
-        return torch.zeros(batch_size, 77, 768, device=device)
+        # Ensure list format
+        if isinstance(prompts, str):
+            prompts = [prompts] * batch_size
+
+        # Pad to batch size if needed
+        if len(prompts) < batch_size:
+            logger.warning(f"[TEXT-EMB] Only {len(prompts)} prompts for batch_size={batch_size}, repeating last")
+            prompts = prompts + [prompts[-1]] * (batch_size - len(prompts))
+
+        # ============================================================
+        # Get CLIP embeddings from prior module
+        # ============================================================
+        # Note: GHOPPriorModule.encode_text() returns (N, 1, 768)
+        # U-Net expects (B, 77, 768) for cross-attention
+
+        clip_emb = self.prior_module.encode_text(prompts)  # (B, 1, 768)
+
+        # Log CLIP encoder output
+        logger.debug(f"[TEXT-EMB] CLIP output shape: {clip_emb.shape}")
+        logger.debug(f"[TEXT-EMB] CLIP norm: {clip_emb.norm().item():.4f}")
+
+        # ============================================================
+        # Expand to U-Net expected format (77 sequence length)
+        # ============================================================
+        # Standard CLIP text tokens: 77 positions (1 start + 75 tokens + 1 end)
+        # Since we only have 1 embedding per prompt, repeat across sequence
+        if clip_emb.shape[1] == 1:
+            # Expand (B, 1, 768) → (B, 77, 768)
+            text_emb = clip_emb.expand(-1, 77, -1).contiguous()
+        else:
+            text_emb = clip_emb
+
+        # Verify non-zero embeddings
+        emb_norm = text_emb.norm().item()
+        if emb_norm < 1e-6:
+            logger.error(f"[TEXT-EMB] ⚠️ WARNING: Text embeddings are near-zero (norm={emb_norm:.6f})!")
+            logger.error(f"[TEXT-EMB] This suggests CLIP encoder is not working correctly.")
+            logger.error(f"[TEXT-EMB] Prompts: {prompts[:3]}...")
+        else:
+            logger.debug(f"[TEXT-EMB] ✅ Non-zero embeddings: norm={emb_norm:.4f}")
+
+        return text_emb
 
     def compute_with_cfg_scale(self, object_sdf, hand_params, text_prompts,
                                iteration, weight, cfg_scale):
@@ -408,6 +448,7 @@ class GHOPSDSLoss:
         vqvae_wrapper=None,
         unet_wrapper=None,
         hand_field_builder=None,
+        prior_module=None,  # ← ADD THIS
         ghop_checkpoint=None,
         sds_weight=5000.0,
         guidance_scale=4.0,
@@ -438,6 +479,7 @@ class GHOPSDSLoss:
                 vqvae_wrapper=vqvae_wrapper,
                 unet_wrapper=unet_wrapper,
                 hand_field_builder=hand_field_builder,
+                prior_module=prior_module,        # ← ADD THIS LINE
                 guidance_scale=guidance_scale
             )
             print("[GHOPSDSLoss] Using Phase 3 SDSLoss implementation")
