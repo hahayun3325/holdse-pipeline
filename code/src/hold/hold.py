@@ -338,6 +338,9 @@ class HOLD(pl.LightningModule):
                 # We need to load it to extract the CLIP encoder (cond_stage_model)
                 if need_checkpoint and os.path.exists(model_checkpoint):
                     logger.info(f"Loading GHOP checkpoint: {model_checkpoint}")
+                    logger.critical(f"[INIT] Using MinimalGHOPPrior path (checkpoint exists)")
+                    logger.critical(f"[INIT] Checkpoint path: {model_checkpoint}")
+
                     ghop_checkpoint = torch.load(model_checkpoint, map_location='cuda')
 
                     # ============================================================
@@ -364,11 +367,11 @@ class HOLD(pl.LightningModule):
 
                                 self.clip_encoder = FrozenCLIPEmbedder().to(device)
 
-                                # Filter CLIP encoder weights (keys starting with 'cond_stage_model.')
+                                # Filter CLIP encoder weights
                                 clip_state = {
-                                    k.replace('cond_stage_model.', ''): v
+                                    k.replace('glide_model.text_cond_model.', ''): v
                                     for k, v in state_dict.items()
-                                    if k.startswith('cond_stage_model.')
+                                    if k.startswith('glide_model.text_cond_model.')
                                 }
 
                                 if clip_state:
@@ -384,8 +387,8 @@ class HOLD(pl.LightningModule):
                                     logger.warning("No CLIP encoder found in checkpoint, using pretrained CLIP")
                                     # Fall back to Hugging Face CLIP
                                     from transformers import CLIPTokenizer, CLIPTextModel
-                                    self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-                                    self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+                                    self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+                                    self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
                                     self.use_hf_clip = True
 
                                 self.clip_encoder.eval()
@@ -396,8 +399,8 @@ class HOLD(pl.LightningModule):
                                 logger.warning("FrozenCLIPEmbedder not available, using Hugging Face CLIP")
                                 from transformers import CLIPTokenizer, CLIPTextModel
 
-                                self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-                                self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+                                self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+                                self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
                                 self.clip_encoder.eval()
                                 self.use_hf_clip = True
 
@@ -411,6 +414,8 @@ class HOLD(pl.LightningModule):
                             Returns:
                                 text_embeddings: (B, 1, 768) tensor for U-Net conditioning
                             """
+                            logger.info(f"[MINIMAL-GHOP-CLIP] Encoding {len(text_prompts)} prompts")
+
                             with torch.no_grad():
                                 if self.use_hf_clip:
                                     # Hugging Face CLIP path
@@ -425,9 +430,14 @@ class HOLD(pl.LightningModule):
                                     outputs = self.clip_encoder(**inputs)
                                     # Use pooled output (CLS token embedding)
                                     embeddings = outputs.pooler_output  # (B, 768)
+
+                                    # ADD DIAGNOSTIC:
+                                    logger.info(f"[MINIMAL-GHOP-CLIP] HF CLIP output shape: {embeddings.shape}")
+                                    logger.info(f"[MINIMAL-GHOP-CLIP] Dimension: {embeddings.shape[-1]} (expected: 768)")
                                 else:
                                     # FrozenCLIPEmbedder path (original GHOP encoder)
                                     embeddings = self.clip_encoder.encode(text_prompts)  # (B, 768)
+                                    logger.info(f"[MINIMAL-GHOP-CLIP] Frozen CLIP output shape: {embeddings.shape}")
 
                                 # Add sequence dimension for U-Net cross-attention
                                 return embeddings.unsqueeze(1)  # (B, 1, 768)
@@ -439,37 +449,77 @@ class HOLD(pl.LightningModule):
                 else:
                     # No checkpoint available - use Hugging Face CLIP directly
                     logger.warning("No GHOP checkpoint available, initializing CLIP from Hugging Face")
+                    logger.critical(f"[INIT] Using SimpleGHOPPrior path (no checkpoint)")
+                    # ============================================================
+                    # Initialize GHOP Prior Module (for CLIP text encoding)
+                    # ============================================================
+                    logger.info("Initializing GHOP Prior Module with Hugging Face CLIP...")
 
                     class SimpleGHOPPrior:
-                        """Fallback CLIP encoder using Hugging Face transformers."""
+                        """CLIP text encoder wrapper using Hugging Face transformers."""
                         def __init__(self, device='cuda'):
                             from transformers import CLIPTokenizer, CLIPTextModel
 
                             self.device = device
-                            self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-                            self.clip_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-                            self.clip_encoder.eval()
+                            # CORRECT (outputs 768 dims to match GHOP U-Net):
+                            self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+                            self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
+                            self.text_encoder.eval()
 
-                            logger.info("✓ Initialized CLIP encoder from Hugging Face")
+                            logger.info("✓ Initialized CLIP text encoder from Hugging Face")
 
                         def encode_text(self, text_prompts):
-                            """Encode text using Hugging Face CLIP."""
+                            """
+                            Encode text prompts using CLIP.
+
+                            Args:
+                                text_prompts: List of text strings
+
+                            Returns:
+                                text_embeddings: (B, 1, 768) tensor
+                            """
+                            # ============================================================
+                            # CRITICAL: Validate input format
+                            # ============================================================
+                            # Check if prompts are strings
+                            if not isinstance(text_prompts, list):
+                                logger.error(f"[CLIP] Invalid input type: {type(text_prompts)}, expected list")
+                                raise TypeError(f"Expected list, got {type(text_prompts)}")
+
+                            for i, prompt in enumerate(text_prompts):
+                                if not isinstance(prompt, str):
+                                    logger.error(f"[CLIP] Prompt {i} is not a string: {type(prompt)} = {repr(prompt)}")
+                                    raise TypeError(f"Prompt {i} must be string, got {type(prompt)}: {repr(prompt)}")
+
+                            logger.debug(f"[CLIP] Encoding {len(text_prompts)} prompts: {text_prompts[:2]}")  # Log first 2
+
                             with torch.no_grad():
-                                inputs = self.tokenizer(
-                                    text_prompts,
-                                    padding=True,
-                                    truncation=True,
-                                    max_length=77,
-                                    return_tensors="pt"
-                                ).to(self.device)
+                                try:
+                                    inputs = self.tokenizer(
+                                        text_prompts,
+                                        padding=True,
+                                        truncation=True,
+                                        max_length=77,
+                                        return_tensors="pt"
+                                    ).to(self.device)
 
-                                outputs = self.clip_encoder(**inputs)
-                                embeddings = outputs.pooler_output  # (B, 768)
+                                    outputs = self.text_encoder(**inputs)
+                                    embeddings = outputs.pooler_output  # (B, 768) or (B, 512)
 
-                                return embeddings.unsqueeze(1)  # (B, 1, 768)
+                                    logger.info(f"[CLIP-DEBUG] pooler_output shape: {embeddings.shape}")
+                                    logger.info(f"[CLIP-DEBUG] Expected: (B, 768) for ViT-L/14, (B, 512) for ViT-B/32")
+                                    if embeddings.shape[-1] != 768:
+                                        logger.error(f"[CLIP-DEBUG] ❌ WRONG CLIP MODEL! Got {embeddings.shape[-1]} dims, need 768!")
+
+                                    return embeddings.unsqueeze(1)  # (B, 1, 768)
+
+                                except Exception as e:
+                                    logger.error(f"[CLIP] Encoding failed: {e}")
+                                    logger.error(f"[CLIP] Input prompts: {text_prompts}")
+                                    raise
 
                     self.ghop_prior = SimpleGHOPPrior(device='cuda')
-                    logger.info("✓ GHOP Prior Module initialized with Hugging Face CLIP")
+                    logger.info("✓ GHOP Prior Module initialized")
 
                 # ============================================================
                 # Initialize SDS Loss Module
@@ -2127,24 +2177,79 @@ class HOLD(pl.LightningModule):
                     # ============================================================
                     # STEP 3: Get text prompt
                     # ============================================================
-                    category = batch.get('category', batch.get('object_category', 'Object'))
+                    # The dataset already provides properly formatted prompts
+                    # Priority: use pre-formatted prompts > manual construction
 
-                    # DEBUG: Check what we got
-                    logger.debug(f"[TEXT-PROMPT] Raw category from batch: {repr(category)}")
-                    logger.debug(f"[TEXT-PROMPT] Available keys: {list(batch.keys())}")
+                    # Check if batch has pre-formatted prompts
+                    if 'text_prompt' in batch and batch['text_prompt'] is not None:
+                        # Use dataset's pre-formatted prompt
+                        text_prompts = batch['text_prompt']
+                        logger.debug(f"[TEXT-PROMPT] Using pre-formatted prompt from dataset")
 
-                    if isinstance(category, (list, tuple)):
-                        category = category[0]
+                    elif 'text_prompt_detailed' in batch and batch['text_prompt_detailed'] is not None:
+                        # Use detailed prompts if available
+                        text_prompts = batch['text_prompt_detailed']
+                        logger.debug(f"[TEXT-PROMPT] Using detailed prompt from dataset")
 
-                    # Clean category string
-                    category = str(category).strip("()[]'\"")
+                    else:
+                        # Fallback: construct manually from category
+                        category = batch.get('category', batch.get('object_category', 'Object'))
 
-                    # Remove "a hand grasping a" prefix if already present
-                    if "a hand grasping a" in category.lower():
-                        category = category.split("a hand grasping a", 1)[-1].strip()
+                        logger.debug(f"[TEXT-PROMPT] Raw category from batch: {repr(category)}")
 
-                    text_prompt = f"a hand grasping a {category}"
-                    logger.debug(f"[TEXT-PROMPT] Final prompt: {repr(text_prompt)}")
+                        # Handle list of tuples: [('Cheez-It Box',), ('Cheez-It Box',)]
+                        if isinstance(category, list):
+                            # Extract first element if list
+                            if len(category) > 0:
+                                category = category[0]
+                            else:
+                                category = 'Object'
+
+                        # Handle single tuple: ('Cheez-It Box',)
+                        if isinstance(category, tuple):
+                            category = category[0] if len(category) > 0 else 'Object'
+
+                        # Clean string
+                        category = str(category).strip()
+
+                        # Remove any remaining artifacts
+                        category = category.strip("()[]'\"")
+
+                        # Remove duplicate prefix if present
+                        if "a hand grasping a" in category.lower():
+                            category = category.split("a hand grasping a", 1)[-1].strip()
+
+                        text_prompts = [f"a hand grasping a {category}"] * B
+                        logger.debug(f"[TEXT-PROMPT] Manually constructed prompt from category")
+
+                    # Ensure text_prompts is a list
+                    if isinstance(text_prompts, str):
+                        text_prompts = [text_prompts] * B
+                    elif not isinstance(text_prompts, list):
+                        text_prompts = list(text_prompts)
+
+                    # Verify batch size matches
+                    if len(text_prompts) != B:
+                        logger.warning(f"[TEXT-PROMPT] Prompt count ({len(text_prompts)}) != batch size ({B}), repeating first")
+                        text_prompts = [text_prompts[0]] * B
+
+                    logger.debug(f"[TEXT-PROMPT] Final prompts (raw): {text_prompts}")  # ← RENAMED
+
+                    # ============================================================
+                    # CRITICAL FIX: Unwrap tuple prompts from dataset
+                    # ============================================================
+                    # Dataset returns: [('prompt text',), ('prompt text',)]
+                    # CLIP needs: ['prompt text', 'prompt text']
+
+                    cleaned_prompts = []
+                    for prompt in text_prompts:
+                        if isinstance(prompt, tuple):
+                            # Unwrap tuple: ('text',) -> 'text'
+                            prompt = prompt[0] if len(prompt) > 0 else ''
+                        cleaned_prompts.append(str(prompt))
+
+                    text_prompts = cleaned_prompts
+                    logger.debug(f"[TEXT-PROMPT] Cleaned prompts (after unwrapping): {text_prompts}")  # ← MOVED HERE
 
                     # ============================================================
                     # STEP 4: Compute SDS loss via ghop_manager
@@ -2160,8 +2265,6 @@ class HOLD(pl.LightningModule):
                     else:
                         B = hand_params.shape[0]  # ✅ Fallback for tensor input
 
-                    text_prompts = [text_prompt] * B
-
                     # Call ghop_manager with correct signature
                     ghop_losses, ghop_info = self.ghop_manager.compute_losses(
                         object_sdf=object_sdf,        # [B, 1, 64, 64, 64]
@@ -2169,6 +2272,11 @@ class HOLD(pl.LightningModule):
                         text_prompts=text_prompts,    # List[str]
                         iteration=self.global_step    # int
                     )
+
+                    # After line 2259, ADD:
+                    logger.info(f"[GHOP-DEBUG] compute_losses returned: ghop_losses keys={list(ghop_losses.keys())}")
+                    logger.info(f"[GHOP-DEBUG] SDS loss value: {ghop_losses.get('sds', 'KEY NOT FOUND')}")
+                    logger.info(f"[GHOP-DEBUG] Info dict: {ghop_info}")
 
                     # ============================================================
                     # STEP 5: Apply Phase 5 dynamic weighting if enabled

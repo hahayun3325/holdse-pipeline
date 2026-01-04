@@ -73,3 +73,43 @@ if __name__ == "__main__":
     print("\nUsage:")
     print("  python inspect_data_structure.py ./data/hold_MC1_ho3d/build/data.npy")
     print("  python inspect_data_structure.py ./data/hold_mug1_itw/build/data.npy")
+
+# import numpy as np
+#
+# data = np.load('data/hold_MC1_ho3d/build/data.npy', allow_pickle=True).item()
+#
+# print("="*60)
+# print("ENTITIES STRUCTURE")
+# print("="*60)
+#
+# # Inspect right (hand)
+# print("\nentities['right']:")
+# right = data['entities']['right']
+# if isinstance(right, dict):
+#     print(f"  Type: dict")
+#     print(f"  Keys: {list(right.keys())}")
+#     for k, v in right.items():
+#         if isinstance(v, np.ndarray):
+#             print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+#         else:
+#             print(f"    {k}: {type(v)}")
+# else:
+#     print(f"  Type: {type(right)}")
+#     if hasattr(right, 'shape'):
+#         print(f"  Shape: {right.shape}")
+#
+# # Inspect object
+# print("\nentities['object']:")
+# obj = data['entities']['object']
+# if isinstance(obj, dict):
+#     print(f"  Type: dict")
+#     print(f"  Keys: {list(obj.keys())}")
+#     for k, v in obj.items():
+#         if isinstance(v, np.ndarray):
+#             print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+#         else:
+#             print(f"    {k}: {type(v)}")
+# else:
+#     print(f"  Type: {type(obj)}")
+#     if hasattr(obj, 'shape'):
+#         print(f"  Shape: {obj.shape}")

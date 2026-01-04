@@ -1706,6 +1706,17 @@ class GHOP3DUNetWrapper(nn.Module):
             logger.info(f"[UNET-FORWARD] Input x shape: {x.shape}")
             logger.info(f"[UNET-FORWARD] Expected: [B, 3, 6/8, 6/8, 6/8]")
 
+            # ✅ TEXT CONDITIONING DEBUG
+            logger.critical(f"[UNET-TEXT] === Checking text conditioning ===")
+            logger.critical(f"[UNET-TEXT] Received context: {type(context)}")
+            if context is not None:
+                logger.critical(f"[UNET-TEXT] Context shape: {context.shape}")
+                logger.critical(f"[UNET-TEXT] Context norm: {context.norm().item():.4f}")
+                logger.critical(f"[UNET-TEXT] Context mean: {context.mean().item():.6f}")
+                logger.critical(f"[UNET-TEXT] Context std: {context.std().item():.6f}")
+            else:
+                logger.critical(f"[UNET-TEXT] ⚠️ Context is None - no text conditioning!")
+
         # ============================================================
         # APPLY INPUT ADAPTER (3 → 32 channels)
         # ============================================================

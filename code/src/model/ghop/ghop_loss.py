@@ -213,6 +213,28 @@ class SDSLoss(nn.Module):
 
             eps_theta = eps_uncond + self.guidance_scale * (eps_cond - eps_uncond)
 
+            # ✅ CFG VERIFICATION
+            logger.critical(f"[CFG-VERIFY] === Classifier-Free Guidance Check ===")
+            logger.critical(f"[CFG-VERIFY] eps_cond norm: {eps_cond.norm().item():.4f}")
+            logger.critical(f"[CFG-VERIFY] eps_uncond norm: {eps_uncond.norm().item():.4f}")
+
+            diff_norm = (eps_cond - eps_uncond).norm().item()
+            relative_diff = diff_norm / eps_cond.norm().item()
+
+            logger.critical(f"[CFG-VERIFY] |cond - uncond|: {diff_norm:.4f}")
+            logger.critical(f"[CFG-VERIFY] Relative diff: {relative_diff:.4f} ({relative_diff * 100:.2f}%)")
+            logger.critical(f"[CFG-VERIFY] guidance_scale used: {self.guidance_scale}")
+            logger.critical(f"[CFG-VERIFY] eps_theta (guided) norm: {eps_theta.norm().item():.4f}")
+
+            # Diagnostic: Check if text conditioning made a difference
+            if relative_diff < 0.01:
+                logger.critical(
+                    f"[CFG-VERIFY] ⚠️ WARNING: Conditional and unconditional predictions are nearly identical!")
+                logger.critical(f"[CFG-VERIFY] This suggests text embeddings are NOT affecting U-Net output")
+            else:
+                logger.critical(
+                    f"[CFG-VERIFY] ✅ Text conditioning IS affecting U-Net ({relative_diff * 100:.1f}% difference)")
+
             # ADD THIS DEBUG AFTER GUIDANCE:
             logger.info(f"[SDS-SHAPE] eps_theta (after guidance) shape: {eps_theta.shape}")
 
@@ -374,6 +396,28 @@ class SDSLoss(nn.Module):
             text_emb: (B, 77, 768) text embeddings for U-Net conditioning
         """
         # ============================================================
+        # CRITICAL: Add INFO-level entry log
+        # ============================================================
+        logger.info(f"[TEXT-EMB] ⚡ ENTERED _get_text_embeddings with {batch_size} batch size")
+        logger.info(f"[TEXT-EMB] Input prompts type: {type(prompts)}")
+
+        # ============================================================
+        # CRITICAL: Validate prompts format FIRST
+        # ============================================================
+        if prompts is not None:
+            logger.info(f"[TEXT-EMB] Prompts sample: {prompts[:2] if len(prompts) >= 2 else prompts}")
+
+            # Check for tuple contamination
+            if isinstance(prompts, list) and len(prompts) > 0:
+                first_item_type = type(prompts[0])
+                logger.info(f"[TEXT-EMB] First prompt item type: {first_item_type}")
+
+                if first_item_type == tuple:
+                    logger.error(f"[TEXT-EMB] ❌ ERROR: Prompts contain tuples! {prompts[0]}")
+                    logger.error(f"[TEXT-EMB] This will cause CLIP encoding to fail!")
+                    raise TypeError(f"Expected strings, got tuples: {prompts[0]}")
+
+        # ============================================================
         # Handle None/empty prompts
         # ============================================================
         if prompts is None or len(prompts) == 0:
@@ -390,16 +434,43 @@ class SDSLoss(nn.Module):
             prompts = prompts + [prompts[-1]] * (batch_size - len(prompts))
 
         # ============================================================
+        # FIX: Remove duplicate "a hand grasping a" prefix
+        # ============================================================
+        cleaned_prompts = []
+        for prompt in prompts:
+            prompt_lower = prompt.lower()
+
+            # Check for duplicate prefix pattern
+            if "a hand grasping a a hand grasping" in prompt_lower or \
+                    "a hand grasping a an image of a hand grasping" in prompt_lower:
+                # Extract everything after the first "a hand grasping a "
+                prompt = prompt[len("a hand grasping a "):].strip()
+                logger.info(f"[TEXT-EMB] Removed duplicate prefix, result: {prompt}")
+
+            cleaned_prompts.append(prompt)
+
+        prompts = cleaned_prompts
+        logger.info(f"[TEXT-EMB] Final cleaned prompts: {prompts}")
+
+        # ============================================================
         # Get CLIP embeddings from prior module
         # ============================================================
         # Note: GHOPPriorModule.encode_text() returns (N, 1, 768)
         # U-Net expects (B, 77, 768) for cross-attention
 
-        clip_emb = self.prior_module.encode_text(prompts)  # (B, 1, 768)
+        logger.info(f"[TEXT-EMB] Calling prior_module.encode_text with {len(prompts)} prompts")
+
+        try:
+            clip_emb = self.prior_module.encode_text(prompts)  # (B, 1, 768)
+            logger.info(f"[TEXT-EMB] ✅ CLIP encoding successful")
+        except Exception as e:
+            logger.error(f"[TEXT-EMB] ❌ CLIP encoding FAILED: {e}")
+            logger.error(f"[TEXT-EMB] Prompts that failed: {prompts}")
+            raise
 
         # Log CLIP encoder output
-        logger.debug(f"[TEXT-EMB] CLIP output shape: {clip_emb.shape}")
-        logger.debug(f"[TEXT-EMB] CLIP norm: {clip_emb.norm().item():.4f}")
+        logger.info(f"[TEXT-EMB] CLIP output shape: {clip_emb.shape}")
+        logger.info(f"[TEXT-EMB] CLIP norm: {clip_emb.norm().item():.4f}")
 
         # ============================================================
         # Expand to U-Net expected format (77 sequence length)
@@ -419,8 +490,9 @@ class SDSLoss(nn.Module):
             logger.error(f"[TEXT-EMB] This suggests CLIP encoder is not working correctly.")
             logger.error(f"[TEXT-EMB] Prompts: {prompts[:3]}...")
         else:
-            logger.debug(f"[TEXT-EMB] ✅ Non-zero embeddings: norm={emb_norm:.4f}")
+            logger.info(f"[TEXT-EMB] ✅ Non-zero embeddings: norm={emb_norm:.4f}")
 
+        logger.info(f"[TEXT-EMB] ⚡ EXITING _get_text_embeddings successfully")
         return text_emb
 
     def compute_with_cfg_scale(self, object_sdf, hand_params, text_prompts,

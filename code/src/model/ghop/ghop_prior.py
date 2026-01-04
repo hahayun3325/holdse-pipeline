@@ -483,7 +483,25 @@ class TwoStageTrainingManager:
                 # Unknown type, use default
                 text_prompts = ["a hand grasping an object"]
 
-            logger.critical(f"[TWO-STAGE-MANAGER] About to call self.sds_loss.compute()...")
+            # ============================================================
+            # FIX: Remove duplicate "a hand grasping a" prefix
+            # ============================================================
+            cleaned_prompts = []
+            for prompt in text_prompts:
+                # Check if prompt already starts with "a hand grasping"
+                if prompt.lower().startswith("a hand grasping a a hand grasping"):
+                    # Remove the first duplicate
+                    prompt = prompt[len("a hand grasping a "):].strip()
+                elif prompt.lower().startswith("an image of a hand grasping"):
+                    # Keep as is - this is the dataset format
+                    pass
+                elif not prompt.lower().startswith("a hand"):
+                    # Add prefix only if missing
+                    prompt = f"a hand grasping a {prompt}"
+                cleaned_prompts.append(prompt)
+
+            text_prompts = cleaned_prompts
+            logger.critical(f"[TWO-STAGE-MANAGER] Cleaned text prompts: {text_prompts}")
 
             try:
                 # ============================================================
