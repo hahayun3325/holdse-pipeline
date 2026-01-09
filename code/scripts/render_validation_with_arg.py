@@ -460,7 +460,7 @@ def main():
         # ('logs/a0c32d3e8/checkpoints/last.ckpt', 21), # Stage 2 Checkpoint 15 epochs Refiend SDS
         # ('logs/70d907fbb/checkpoints/last.ckpt', 22),  # Stage 2 Checkpoint 30 epochs Refiend SDS
         # ('logs/482915ef4/checkpoints/last.ckpt', 23),  # Stage 2 Checkpoint 1-epoch on Official Checkpoint
-        ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
+        # ('logs/eb4395048/checkpoints/last.ckpt', 24),  # Stage 2 Checkpoint 30-epoch on Official Checkpoint
         # ('logs/adfdabdc0/checkpoints/last.ckpt', 25),  # Stage 2 Checkpoint 70-epoch on Official Checkpoint
         # ('logs/afb17c622/checkpoints/last.ckpt', 26),  # Stage 2 Checkpoint 70-epoch(full SDS) on Official Checkpoint
         # ('logs/19a598d7e/checkpoints/last.ckpt', 3),  # Stage 3 Checkpoint
@@ -469,6 +469,8 @@ def main():
         # ('logs/ac71c88b7/checkpoints/last.ckpt', 31),  # Stage 3 Checkpoint 40-epoch
         # ('logs/75def08b1/checkpoints/last.ckpt', 32),  # Stage 3 Checkpoint Refined Phase 4 30-epoch
         # ('logs/33c12e63d/checkpoints/last.ckpt', 33),  # Stage 3 Checkpoint Refined GHOP ckpt loading 30-epoch
+        # ('logs/9a27219db/checkpoints/last.ckpt', 40),  # Refined 3-phase Checkpoint 30-epoch on stage 2 official ckpt
+        ('logs/40de820f3/checkpoints/last.ckpt', 41),  # Refined 3-phase Checkpoint 30-epoch from the beginning
         # hold_GPMF12_ho3d case
         # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
         # GHOP Official Checkpoint

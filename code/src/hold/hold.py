@@ -1591,7 +1591,7 @@ class HOLD(pl.LightningModule):
         # ✅ OPTIMIZED: Reduced frequency cache clearing (every 50 steps)
         # REMOVED: Aggressive every-step clearing that caused overhead
         # ================================================================
-        if batch_idx % 50 == 0 and torch.cuda.is_available():
+        if batch_idx % 10 == 0 and torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
@@ -2682,7 +2682,12 @@ class HOLD(pl.LightningModule):
         # PHASE 5: TEMPORAL CONSISTENCY FOR VIDEO SEQUENCES
         # ====================================================================
         # ✅ FIX: Ensure Phase 3 has ended before Phase 5 starts
-        if self.phase5_enabled and self.global_step >= self.phase5_start_iter:
+        should_compute_phase5 = (
+            self.phase5_enabled and
+            self.global_step >= self.phase5_start_iter and
+            self.global_step < getattr(self, 'phase5_end_iter', float('inf'))
+        )
+        if should_compute_phase5:
             try:
                 # Log phase transition
                 if self.global_step == self.phase5_start_iter:
@@ -3126,6 +3131,29 @@ class HOLD(pl.LightningModule):
             )
 
         # ================================================================
+        # PHASE 5 MEMORY MANAGEMENT: Per-step clearing during temporal phase
+        # Addresses OOM from temporal history and adaptive contact accumulation
+        # ================================================================
+        if hasattr(self, 'phase5_enabled') and self.phase5_enabled:
+            should_compute_phase5 = (
+                    self.global_step >= getattr(self, 'phase5_start_iter', float('inf')) and
+                    self.global_step < getattr(self, 'phase5_end_iter', float('inf'))
+            )
+            if should_compute_phase5:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+
+                if self.global_step % 10 == 0:
+                    allocated = torch.cuda.memory_allocated() / 1024 ** 2
+                    reserved = torch.cuda.memory_reserved() / 1024 ** 2
+                    logger.debug(
+                        f"[Phase 5 Memory] Step {self.global_step}: "
+                        f"Allocated={allocated:.1f}MB, Reserved={reserved:.1f}MB"
+                    )
+
+        # ================================================================
         # ✅ OPTIMIZED: Single cache clear after backward
         # REMOVED: Multiple redundant synchronize() and empty_cache() calls
         # ================================================================
@@ -3180,7 +3208,7 @@ class HOLD(pl.LightningModule):
         # ================================================================
         opt.zero_grad(set_to_none=True)
 
-        if batch_idx % 50 == 0 and torch.cuda.is_available():
+        if batch_idx % 10 == 0 and torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect()

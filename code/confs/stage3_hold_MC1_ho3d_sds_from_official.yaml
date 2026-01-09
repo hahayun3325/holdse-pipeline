@@ -1,33 +1,30 @@
 # ================================================================
-# Stage 3: Full Pipeline (Phase 3 + Phase 4 + Phase 5)
-# Training from Stage 2 Checkpoint
+# Stage 3: 30-Epoch Training with OOM Protection
+# Phase Distribution: 2:1 ratio (Phase 3:Phase 4), Phase 5 minimal
 # ================================================================
 
 # ================================================================
-# PHASE 3: SDS GUIDANCE (EXTENDED)
+# PHASE 3: SDS GUIDANCE (39,700 steps = 19.85 epochs)
 # ================================================================
 phase3:
   enabled: true
 
-  # GHOP Checkpoints - MUST MATCH Stage 2
+  # GHOP Checkpoints
   ghop:
     config_path: checkpoints/ghop/config.yaml
     device: cuda
-
-    # Use same checkpoint paths as Stage 2
     unet_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unified_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unet_use_pretrained: true
     vqvae_use_pretrained: true
 
-  # Grid settings - MUST MATCH Stage 2
   grid_resolution: 24
   spatial_lim: 1.5
 
-  # Phase 3 Boundaries - KEEP ACTIVE THROUGHOUT
+  # Phase 3 Boundaries - 2/3 of training (40,000 steps)
   phase3_start_iter: 0
-  phase3_end_iter: 999999      # ← CHANGED: Never end (reduce weight via scheduler instead)
+  phase3_end_iter: 39999        # End after ~20 epochs
 
   # SDS Configuration - KEEP FROM STAGE 2
   sds:
@@ -40,82 +37,79 @@ phase3:
 
   sds_iters: 1
   use_modular_init: true
-
-  # Weight - WILL BE SCALED BY SCHEDULER
-  w_sds: 10.0                   # Full strength Phase 3, reduced later
-
-  # Warmup - REDUCED (already warmed up in Stage 2)
-  warmup_iters: 0               # CHANGED: No warmup needed (Stage 2 already trained)
+  w_sds: 10.0                   # Increased from 7.5 for longer training
+  warmup_iters: 0
 
 # ================================================================
-# PHASE 4: CONTACT REFINEMENT (30 EPOCHS)
+# PHASE 4: CONTACT REFINEMENT (19,500 steps = 9 epochs)
 # ================================================================
 phase4:
   enabled: true
 
-  # Phase boundaries - EXTENDED
-  contact_start_iter: 20000     # Start at epoch 10 (after 20k steps of SDS)
-  contact_end_iter: 999999
-  contact_warmup_iters: 500     # Longer warmup for 30 epochs
+  # Phase boundaries - 1/3 of training (19,800 steps)
+  contact_start_iter: 40000     # Start when Phase 3 ends
+  contact_end_iter: 59499       # End before Phase 5
+  contact_warmup_iters: 500     # Warmup for contact introduction
 
-  # Relaxed thresholds for early training
-  contact_thresh: 0.20           # ← ADD: 5cm (was implicit 1cm)
-  collision_thresh: 0.08        # ← ADD: 2.5cm (was implicit 0.5cm)
+  # Thresholds
+  contact_thresh: 0.20
+  collision_thresh: 0.08
 
-  # Contact loss weights - FROM GHOP graspsyn.py Lines 238-243
-  w_contact: 1.0                # Base contact weight
-  w_penetration: 100.0          # Strong penalty for collisions (10x attraction)
-  w_attraction: 10.0            # Pull contact zones to surface
-  w_damping: 0.0                # Disabled (not needed for single frames)
+  # Contact weights
+  w_contact: 1.0
+  w_penetration: 100.0
+  w_attraction: 10.0
+  w_damping: 0.0
 
   # Mesh extraction settings
   mesh_resolution: 128          # Marching cubes resolution
   mesh_padding: 0.1             # Padding around object bounds
 
-  log_contact_every: 50         # Reduce frequency for long training
+  log_contact_every: 100
 
 # ================================================================
-# PHASE 5: TEMPORAL CONSISTENCY (30 EPOCHS)
+# PHASE 5: TEMPORAL CONSISTENCY (500 steps = 0.25 epochs, FINAL ONLY)
 # ================================================================
 phase5:
   enabled: true
 
-  phase5_start_iter: 20500      # Start shortly after Phase 4
+  # Minimal Phase 5 - last 500 steps only
+  phase5_start_iter: 59500      # Start at epoch 29.75
+  phase5_end_iter: 60000        # Explicit termination at training end
 
   # Scheduler configuration
-  use_scheduler: true           # Enable progressive weight scheduling
+  use_scheduler: true
   scheduler:
-    total_iterations: 60000     # 30 epochs * 2000 samples
+    total_iterations: 60000
     warmup_iters: 0
-    phase3_start: 0             # Phase 3 always active
-    phase4_start: 20000         # Epoch 10
-    phase5_start: 20500         # Epoch 10 + warmup
-    finetune_start: 50000       # Epoch 25 - reduce all weights
+    phase3_start: 0
+    phase4_start: 40000         # Match contact_start_iter
+    phase5_start: 59500         # Match phase5_start_iter
+    finetune_start: 59750       # 250 steps before end
 
-  # Temporal loss weights - CONSERVATIVE INITIAL VALUES
-  w_temporal: 0.01              # Base temporal weight (will be scaled by scheduler)
-  w_velocity: 0.005             # Velocity smoothness
-  w_acceleration: 0.005         # Acceleration smoothness
-  w_camera_motion: 0.001        # Camera-aware consistency
+  # Temporal weights - conservative
+  w_temporal: 0.01
+  w_velocity: 0.005
+  w_acceleration: 0.005
+  w_camera_motion: 0.001
 
-  # Adaptive contact zones
+  # Memory optimizations - CRITICAL for OOM prevention
   adaptive_contacts:
-    enabled: true
+    enabled: false              # Disabled to save ~125 MB
     k_neighbors: 5
     contact_threshold: 0.10
     update_frequency: 50
-    cache_size: 200
+    cache_size: 50
 
-  # Temporal history
   temporal:
-    history_size: 10            # Track last 10 poses per sequence
-    velocity_weight: 1.0        # Relative velocity importance
-    acceleration_weight: 0.5    # Relative acceleration importance
+    history_size: 3             # Reduced from 10 to minimum (saves 70% memory)
+    velocity_weight: 1.0
+    acceleration_weight: 0.5
 
-  log_phase5_every: 50
+  log_phase5_every: 100
 
 # ================================================================
-# SCENE CONFIGURATION (KEEP FROM STAGE 2)
+# SCENE & MODEL (UNCHANGED FROM STAGE 2)
 # ================================================================
 scene_bounding_sphere: 6.0
 
@@ -245,17 +239,50 @@ optimizer:
   betas: [0.9, 0.999]
   eps: 1.0e-08
 
+# Learning rate scheduler - cosine annealing
+scheduler:
+  type: "cosine"
+  T_max: 60000                  # Full 30 epochs
+  eta_min: 0.00001              # 10× reduction
+  warmup_steps: 2000            # 1 epoch warmup
+
 # ================================================================
 # EXPERIMENT CONFIGURATION
 # ================================================================
 experiment:
-  name: 'stage3_full_pipeline_from_stage2'
+  name: 'stage3_30epoch_optimized_2to1_ratio'
 
 # ================================================================
-# CHECKPOINT LOADING (CRITICAL FOR STAGE 3)
+# CHECKPOINT
 # ================================================================
 checkpoint:
   # Load Stage 2 trained checkpoint
   resume_from: 'outputs/stage2_official_cb20a1702_FIXED/checkpoints/last.ckpt'
-  load_optimizer: false         # Start with fresh optimizer state
-  load_scheduler: false         # Use new Phase 5 scheduler
+  load_optimizer: false
+  load_scheduler: false
+
+# ================================================================
+# CALLBACKS - DUAL CHECKPOINT SYSTEM
+# ================================================================
+callbacks:
+  # Epoch-based: Best model selection
+  checkpoint:
+    monitor: "train_loss"
+    mode: "min"
+    save_top_k: 3
+    every_n_epochs: 5           # Save every 5 epochs (reduce frequency for 30 epochs)
+    save_last: true
+    dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_30epoch_optimized/checkpoints"
+    filename: "epoch{epoch:02d}-loss{train_loss:.2f}"
+
+  # Step-based: OOM recovery
+  checkpoint_steps:
+    monitor: null
+    mode: "min"
+    save_top_k: -1              # Save all step checkpoints
+    every_n_train_steps: 2000   # Save every epoch for 30-epoch training
+    save_last: false
+    dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_30epoch_optimized/checkpoints/steps"
+    filename: "step{step:05d}"
+    save_on_train_epoch_end: false
+    verbose: true

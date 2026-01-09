@@ -25,7 +25,7 @@ phase3:
 
   # Phase 3 Boundaries - ENDS AT EPOCH 7.5
   phase3_start_iter: 0
-  phase3_end_iter: 1499         # FIXED: End at epoch 0.75
+  phase3_end_iter: 1999           # CHANGED: 1499 → 1999 (+500 steps)
 
   # SDS Configuration - UNCHANGED
   sds:
@@ -51,8 +51,8 @@ phase4:
   enabled: true
 
   # Phase boundaries - SCALED TO 10 EPOCHS
-  contact_start_iter: 1500        # FIXED: Start at epoch 0.75 (when Phase 3 ends)
-  contact_end_iter: 3000          # FIXED: End at epoch 1.5 (when Phase 5 starts)
+  contact_start_iter: 2000        # FIXED: Start at epoch 0.75 (when Phase 3 ends)
+  contact_end_iter: 3500          # FIXED: End at epoch 1.5 (when Phase 5 starts)
   contact_warmup_iters: 300     # FIXED: 0.15 epoch warmup (scaled to phase length)
 
   # Thresholds - UNCHANGED
@@ -75,18 +75,18 @@ phase4:
 # ================================================================
 phase5:
   enabled: true
-
-  phase5_start_iter: 3000       # Start at epoch 1.5
-
+  # MODIFIED: Final 500 steps only (0.25 epochs)
+  phase5_start_iter: 3500       # Start at epoch 1.5
+  phase5_end_iter: 4000           # NEW: Explicit termination
   # Scheduler - SCALED TO 10 EPOCHS
   use_scheduler: true
   scheduler:
     total_iterations: 4000      # 2 epochs total
     warmup_iters: 0
     phase3_start: 0
-    phase4_start: 1500            # FIXED: Match contact_start_iter
-    phase5_start: 3000
-    finetune_start: 3500
+    phase4_start: 2000            # FIXED: Match contact_start_iter
+    phase5_start: 3500
+    finetune_start: 3750
 
   # Temporal weights - UNCHANGED
   w_temporal: 0.01
@@ -96,14 +96,14 @@ phase5:
 
   # Adaptive contacts - UNCHANGED
   adaptive_contacts:
-    enabled: true
+    enabled: false                # CHANGED: Disabled to save memory
     k_neighbors: 5
     contact_threshold: 0.10
     update_frequency: 50
     cache_size: 50              # CHANGED: 200 → 50 (reduces 500MB to 125MB)
 
   temporal:
-    history_size: 5             # CHANGED: 10 → 5 (reduces memory by 50%)
+    history_size: 3             # CHANGED: 10 → 5 (reduces memory by 50%)
     velocity_weight: 1.0
     acceleration_weight: 0.5
 
@@ -261,3 +261,14 @@ callbacks:
     save_last: true
     dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_2epoch_verify/checkpoints"  # CHANGED: Absolute path + new directory
     filename: "epoch{epoch:02d}-loss{train_loss:.2f}"
+  # Step-based checkpoint (addition to epoch-based)
+  checkpoint_steps:
+    monitor: null                    # Don't monitor - save unconditionally
+    mode: "min"                      # Irrelevant when monitor=null
+    save_top_k: -1                   # Save all step checkpoints
+    every_n_train_steps: 500         # Save every 500 training steps
+    save_last: false                 # Last.ckpt handled by epoch callback
+    dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_2epoch_verify/checkpoints/steps"
+    filename: "step{step:05d}"       # step00500.ckpt, step01000.ckpt, etc.
+    save_on_train_epoch_end: false   # Only save at step intervals
+    verbose: true
