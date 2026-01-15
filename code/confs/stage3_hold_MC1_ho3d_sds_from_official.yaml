@@ -18,6 +18,9 @@ phase3:
     vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unet_use_pretrained: true
     vqvae_use_pretrained: true
+    # ✅ NEW: Use Hugging Face CLIP instead of checkpoint CLIP
+    use_huggingface_clip: true
+    clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
   grid_resolution: 24
   spatial_lim: 1.5
@@ -272,17 +275,16 @@ callbacks:
     save_top_k: 3
     every_n_epochs: 5           # Save every 5 epochs (reduce frequency for 30 epochs)
     save_last: true
-    dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_30epoch_optimized/checkpoints"
-    filename: "epoch{epoch:02d}-loss{train_loss:.2f}"
+    dirpath: "checkpoints"
+    filename: "epoch{epoch:02d}-loss{loss:.4f}"
 
-  # Step-based: OOM recovery
+  # Step-based checkpoint (saves every 500 steps)
   checkpoint_steps:
     monitor: null
     mode: "min"
     save_top_k: -1              # Save all step checkpoints
-    every_n_train_steps: 2000   # Save every epoch for 30-epoch training
+    every_n_train_steps: 500   # Save every steps for 30-epoch training
     save_last: false
-    dirpath: "/home/fredcui/Projects/holdse/code/logs/outputs/stage3_30epoch_optimized/checkpoints/steps"
     filename: "step{step:05d}"
     save_on_train_epoch_end: false
     verbose: true

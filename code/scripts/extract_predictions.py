@@ -112,15 +112,14 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
     print(f"Normalize shift: {normalize_shift}")
 
     checkpoint_dir = Path(checkpoint_path).parent.parent
-    misc_files = sorted(glob.glob(str(checkpoint_dir / 'misc' / '*.npy')))
+    misc_path = checkpoint_dir / 'misc' / '000080000.npy'
 
-    if misc_files:
-        misc = np.load(misc_files[-1], allow_pickle=True).item()
-        scale = float(misc['scale'])
-        print(f"Scale from misc: {scale}")
-    else:
-        scale = float(dataset.get('scene_bounding_sphere', 3.0))
-        print(f"⚠️ Using scale from dataset: {scale}")
+    if not misc_path.exists():
+        raise FileNotFoundError(f"Required misc file not found: {misc_path}")
+
+    misc = np.load(misc_path, allow_pickle=True).item()
+    scale = float(misc['scale'])
+    print(f"✓ Loaded scale from misc: {scale}")
 
     inverse_scale = 1.0 / scale
 
@@ -422,6 +421,15 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
 
                 hand_verts = mano_output.vertices.detach().cpu().numpy()
                 hand_joints = mano_output.joints.detach().cpu().numpy()
+
+                # ============================================================
+                # CRITICAL FIX: Subset to HO3D's 16 joints BEFORE any transforms
+                # ============================================================
+                HO3D_JOINT_INDICES = [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20]
+                print(f"[FIX] Subsetting joints from {hand_joints.shape} to 16 joints...")
+                hand_joints = hand_joints[:, HO3D_JOINT_INDICES, :]  # [1, 21, 3] → [1, 16, 3]
+                print(f"[FIX] After subsetting: {hand_joints.shape}")
+                # ============================================================
 
                 # Object
                 if obj_v_cano is not None:

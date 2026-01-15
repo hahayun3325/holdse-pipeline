@@ -8,7 +8,7 @@ import os.path as op
 from pathlib import Path
 
 sys.path.insert(0, '.')
-sys.path.insert(0, '../hold/code')  # For common module
+sys.path.insert(0, str(Path(__file__).parent.parent))  # For common module
 
 import numpy as np
 import json

@@ -317,7 +317,8 @@ def main():
     # ================================================================
     # Read checkpoint callback config from YAML (if available)
     # ================================================================
-    checkpoint_config = opt.get('callbacks', {}).get('checkpoint', {})
+    callbacks_config = opt.get('callbacks', {})
+    checkpoint_config = callbacks_config.get('checkpoint', {})
 
     # Use config values with fallbacks to CLI args
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
@@ -336,8 +337,8 @@ def main():
     # Operates independently from epoch-based checkpoint
     # ================================================================
     checkpoint_callback_steps = None
-    if 'checkpoint_steps' in checkpoint_config:
-        step_config = checkpoint_config['checkpoint_steps']
+    if 'checkpoint_steps' in callbacks_config:
+        step_config = callbacks_config['checkpoint_steps']
 
         # Create step-based checkpoint directory
         step_dirpath = step_config.get('dirpath', op.join(args.log_dir, "checkpoints/steps/"))
@@ -359,9 +360,9 @@ def main():
         logger.info("STEP-BASED CHECKPOINT CONFIGURATION")
         logger.info("=" * 70)
         logger.info(f"  dirpath: {checkpoint_callback_steps.dirpath}")
-        logger.info(f"  every_n_train_steps: {checkpoint_callback_steps.every_n_train_steps}")
-        logger.info(f"  save_top_k: {checkpoint_callback_steps.save_top_k}")
-        logger.info(f"  monitor: {checkpoint_callback_steps.monitor}")
+        logger.info(f"  every_n_train_steps: {step_config.get('every_n_train_steps', 500)}")
+        logger.info(f"  save_top_k: {step_config.get('save_top_k', -1)}")
+        logger.info(f"  monitor: {step_config.get('monitor', None)}")
         logger.info(f"  Checkpoints at: 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000 steps")
         logger.info("=" * 70)
 

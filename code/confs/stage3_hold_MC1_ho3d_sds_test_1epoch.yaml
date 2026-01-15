@@ -18,13 +18,16 @@ phase3:
     vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unet_use_pretrained: true
     vqvae_use_pretrained: true
+    # ✅ NEW: Use Hugging Face CLIP instead of checkpoint CLIP
+    use_huggingface_clip: true
+    clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
   grid_resolution: 24
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - ACTIVE ENTIRE EPOCH
   phase3_start_iter: 0
-  phase3_end_iter: 999999
+  phase3_end_iter: 1499
 
   # SDS Configuration - SAME
   sds:
@@ -37,10 +40,7 @@ phase3:
 
   sds_iters: 1
   use_modular_init: true
-
-  # Weight - REDUCED for testing
-  w_sds: 5.0                    # CHANGED: Reduced from 10.0 for faster convergence check
-
+  w_sds: 10.0                   # Increased from 7.5 for longer training
   warmup_iters: 0
 
 # ================================================================
@@ -51,9 +51,9 @@ phase4:
 
   # Phase boundaries - SCALED DOWN (30 epochs → 1 epoch)
   # Original: 20000 (epoch 10) → New: 1000 (epoch 0.5)
-  contact_start_iter: 1000      # CHANGED: Start halfway through epoch 1
-  contact_end_iter: 999999
-  contact_warmup_iters: 100     # CHANGED: Reduced from 500
+  contact_start_iter: 1500      # CHANGED: Start halfway through epoch 1
+  contact_end_iter: 1949
+  contact_warmup_iters: 10     # CHANGED: Reduced from 500
 
   # Thresholds - SAME
   contact_thresh: 0.20
@@ -76,7 +76,8 @@ phase4:
 phase5:
   enabled: true
 
-  phase5_start_iter: 1100       # CHANGED: Start at step 1100 (epoch 0.55)
+  phase5_start_iter: 1950       # CHANGED: Start at step 1100 (epoch 0.55)
+  phase5_end_iter: 2000        # Explicit termination at training end
 
   # Scheduler - SCALED DOWN
   use_scheduler: true
@@ -84,9 +85,9 @@ phase5:
     total_iterations: 2000      # CHANGED: 1 epoch ≈ 2000 steps
     warmup_iters: 0
     phase3_start: 0
-    phase4_start: 1000          # CHANGED: Scaled from 20000
-    phase5_start: 1100          # CHANGED: Scaled from 20500
-    finetune_start: 1800        # CHANGED: Last 10% of epoch (scaled from 50000)
+    phase4_start: 1500          # CHANGED: Scaled from 20000
+    phase5_start: 1950          # CHANGED: Scaled from 20500
+    finetune_start: 1980        # CHANGED: Last 10% of epoch (scaled from 50000)
 
   # Temporal weights - SAME
   w_temporal: 0.01
@@ -96,18 +97,18 @@ phase5:
 
   # Adaptive contacts - SAME
   adaptive_contacts:
-    enabled: true
+    enabled: false              # Disabled to save ~125 MB
     k_neighbors: 5
     contact_threshold: 0.10
     update_frequency: 50
-    cache_size: 200
+    cache_size: 50
 
   temporal:
-    history_size: 10
+    history_size: 3             # Reduced from 10 to minimum (saves 70% memory)
     velocity_weight: 1.0
     acceleration_weight: 0.5
 
-  log_phase5_every: 50
+  log_phase5_every: 100
 
 # ================================================================
 # SCENE & MODEL (UNCHANGED)
@@ -217,7 +218,7 @@ loss:
 training:
   num_epochs: 1                 # CHANGED: 30 → 1
   max_steps: 2000               # CHANGED: 60000 → 2000 (1 epoch)
-  eval_every_epoch: 1           # CHANGED: Evaluate after the single epoch
+  eval_every_epoch: 999           # CHANGED: Evaluate after the single epoch
   log_every: 20                 # CHANGED: More frequent logging (every 20 steps)
   gradient_clip: 1.0
 
@@ -230,6 +231,13 @@ optimizer:
   weight_decay: 0.0
   betas: [0.9, 0.999]
   eps: 1.0e-08
+
+# Learning rate scheduler - cosine annealing
+scheduler:
+  type: "cosine"
+  T_max: 2000                  # Full 30 epochs
+  eta_min: 0.00001              # 10× reduction
+  warmup_steps: 200            # 1 epoch warmup
 
 # ================================================================
 # EXPERIMENT - NEW NAME FOR TEST
@@ -244,3 +252,27 @@ checkpoint:
   resume_from: 'outputs/stage2_official_cb20a1702_FIXED/checkpoints/last.ckpt'
   load_optimizer: false
   load_scheduler: false
+# ================================================================
+# CALLBACKS - DUAL CHECKPOINT SYSTEM FOR 1-EPOCH TEST
+# ================================================================
+callbacks:
+  # Epoch-based checkpoint (saves at end of epoch)
+  checkpoint:
+    monitor: "train_loss"                # Don't wait for metrics
+    mode: "min"
+    save_top_k: 1                # Keep only 1 best (saves space)
+    every_n_epochs: 1            # Save after 1 epoch completes
+    save_last: true              # Always save last.ckpt
+    dirpath: "checkpoints"
+    filename: "epoch{epoch:02d}-loss{loss:.4f}"
+
+  # Step-based checkpoint (saves every 500 steps for 1-epoch test)
+  checkpoint_steps:
+    monitor: null                # Unconditional save
+    mode: "min"
+    save_top_k: -1               # Save all step checkpoints
+    every_n_train_steps: 500     # Save at steps 500, 1000, 1500, 2000
+    save_last: false             # Don't duplicate last.ckpt
+    filename: "step{step:05d}"
+    save_on_train_epoch_end: false
+    verbose: true
