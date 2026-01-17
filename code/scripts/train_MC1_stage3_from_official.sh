@@ -18,7 +18,8 @@ STAGE2_CKPT="logs/e97e1df6d/checkpoints/last.ckpt" # hold_SM4_ho3d Train from be
 #SEQ_NAME="hold_SM2_ho3d"
 #SEQ_NAME="hold_SMu40_ho3d"
 #SEQ_NAME="hold_BB13_ho3d"
-SEQ_NAME="hold_ShSu12_ho3d"
+#SEQ_NAME="hold_ShSu12_ho3d"
+SEQ_NAME="hold_BB12_ho3d"
 STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_from_official.yaml"
 #STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_1epoch.yaml"
 #STAGE3_CONFIG="confs/stage3_hold_MC1_ho3d_sds_test_10epoch.yaml"
@@ -60,4 +61,4 @@ python train.py \
 echo "✅ STAGE 3 COMPLETE (boundary mode)"
 
 # chmod +x scripts/train_MC1_stage3_from_official.sh
-# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to30_hold_ShSu12_ho3d_refinedPhases_2r1_beginning_$(date +%Y%m%d_%H%M%S).log
+# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to30_hold_BB12_ho3d_refinedPhases_2r1_beginning_$(date +%Y%m%d_%H%M%S).log

@@ -105,23 +105,60 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
         opt.model.scene_bounding_sphere = 3.0
 
     # Load coordinate transformation parameters
-    print("\n=== Loading coordinate transformation parameters ===")
+    print("\n" + "="*70)
+    print("COORDINATE TRANSFORMATION SETUP")
+    print("="*70)
+
     dataset_path = f'data/{seq_name}/build/data.npy'
+    print(f"Loading dataset from: {dataset_path}")
     dataset = np.load(dataset_path, allow_pickle=True).item()
     normalize_shift = dataset['normalize_shift']
-    print(f"Normalize shift: {normalize_shift}")
+    print(f"✓ normalize_shift: {normalize_shift}")
 
     checkpoint_dir = Path(checkpoint_path).parent.parent
-    misc_path = checkpoint_dir / 'misc' / '000080000.npy'
+    misc_dir = checkpoint_dir / 'misc'
 
-    if not misc_path.exists():
-        raise FileNotFoundError(f"Required misc file not found: {misc_path}")
+    print(f"\nSearching for misc files...")
+    print(f"  Checkpoint dir: {checkpoint_dir}")
+    print(f"  Misc dir: {misc_dir}")
+    print(f"  Exists: {misc_dir.exists()}")
 
-    misc = np.load(misc_path, allow_pickle=True).item()
-    scale = float(misc['scale'])
-    print(f"✓ Loaded scale from misc: {scale}")
+    if misc_dir.exists():
+        misc_files = sorted(misc_dir.glob('*.npy'))
+        print(f"  Found {len(misc_files)} .npy files")
+
+        if misc_files:
+            print(f"  Files: {[f.name for f in misc_files[:3]]} ... {[f.name for f in misc_files[-3:]]}")
+            misc_path = misc_files[-1]
+            print(f"  Selected latest: {misc_path.name}")
+
+            try:
+                misc = np.load(misc_path, allow_pickle=True).item()
+                print(f"  Loaded misc dict with keys: {list(misc.keys())}")
+
+                if 'scale' in misc:
+                    scale = float(misc['scale'])
+                    print(f"\n✅ SUCCESS: Loaded scale = {scale}")
+                else:
+                    print(f"\n⚠️  'scale' key not found in misc file!")
+                    print(f"  Available keys: {list(misc.keys())}")
+                    scale = 1.0
+            except Exception as e:
+                print(f"\n❌ ERROR loading misc file: {e}")
+                scale = 1.0
+        else:
+            print(f"\n⚠️  No .npy files found in {misc_dir}")
+            scale = 1.0
+    else:
+        print(f"\n⚠️  Misc directory does not exist: {misc_dir}")
+        scale = 1.0
 
     inverse_scale = 1.0 / scale
+    print(f"\n✓ Final transformation parameters:")
+    print(f"  scale: {scale}")
+    print(f"  inverse_scale: {inverse_scale}")
+    print(f"  normalize_shift: {normalize_shift}")
+    print("="*70 + "\n")
 
     class Args:
         case = seq_name
@@ -363,22 +400,21 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
                 # Check what node.params() returns
                 print("\n3. Calling node.params(batch['idx']):")
                 try:
-                    if isinstance(model, HOLD):
-                        for node_name, node in model.nodes.items():
+                    # FIX: Access model.model.nodes instead of model.nodes
+                    if hasattr(model, 'model') and hasattr(model.model, 'nodes'):
+                        for node_name, node in model.model.nodes.items():  # ← FIXED
                             if node_name == 'right':
                                 returned_params = node.params(batch_cuda['idx'])
-                                if 'hand_pose' in returned_params:
-                                    hp = returned_params['hand_pose']
-                                    print(f"   Returned hand_pose shape: {hp.shape}")
-                                    print(f"   Returned hand_pose mean: {hp.mean():.6f}")
-                                    print(f"   Returned hand_pose first 5: {hp[0, :5] if hp.ndim > 1 else hp[:5]}")
-                                elif 'full_pose' in returned_params:
-                                    fp = returned_params['full_pose']
-                                    print(f"   Returned full_pose shape: {fp.shape}")
-                                    print(f"   Returned full_pose mean: {fp.mean():.6f}")
+                                print(f"   Returned keys: {list(returned_params.keys())}")
+                                for key, val in returned_params.items():
+                                    if isinstance(val, torch.Tensor) and 'pose' in key.lower():
+                                        print(f"   {key}: shape={val.shape}, mean={val.mean():.6f}")
+                                        print(f"   First 5: {val[0, :5] if val.ndim > 1 else val[:5]}")
+                    else:
+                        print("   Could not find model.model.nodes")
                 except Exception as e:
                     print(f"   Error calling node.params(): {e}")
-
+                    traceback.print_exc()
                 print("="*70 + "\n")
 
             try:
@@ -390,14 +426,28 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
                     print("POSE SOURCE TRACING - AFTER validation_step")
                     print("="*70)
 
-                    # Check output
-                    for key in ['hand_pose', 'full_pose', 'right.hand_pose']:
-                        if key in output:
-                            pose_out = output[key]
-                            print(f"\nOutput['{key}']:")
-                            print(f"   Shape: {pose_out.shape}")
-                            print(f"   Mean: {pose_out.mean():.6f}")
-                            print(f"   First 5: {pose_out[0, :5] if pose_out.ndim > 1 else pose_out[:5]}")
+                    # Show ALL keys in output
+                    print(f"\nOutput contains {len(output)} keys")
+
+                    # Find all keys with 'right' or 'pose' in them
+                    relevant_keys = [k for k in output.keys() if 'right' in k.lower() or 'pose' in k.lower()]
+                    print(f"\nRelevant keys ({len(relevant_keys)}):")
+                    for key in sorted(relevant_keys)[:20]:  # Show first 20
+                        val = output[key]
+                        if isinstance(val, torch.Tensor):
+                            print(f"  {key}: shape={val.shape}, dtype={val.dtype}")
+                            if 'pose' in key.lower() and val.numel() > 0 and val.numel() < 1000:
+                                print(f"    mean={val.mean():.6f}, first 5: {val.flatten()[:5]}")
+
+                    # Check the specific keys we're looking for
+                    print(f"\nChecking param_keys we'll use for extraction:")
+                    for param_name, key_name in param_keys.items():
+                        if key_name in output:
+                            val = output[key_name]
+                            if isinstance(val, torch.Tensor):
+                                print(f"  ✓ {param_name} ('{key_name}'): shape={val.shape}, mean={val.mean():.6f}")
+                        else:
+                            print(f"  ✗ {param_name} ('{key_name}'): NOT FOUND")
 
                     print("="*70 + "\n")
                 # ========== END CHECK ==========
@@ -423,12 +473,24 @@ def extract_predictions(checkpoint_path, seq_name, config_path=None, flat_hand_m
                 hand_joints = mano_output.joints.detach().cpu().numpy()
 
                 # ============================================================
-                # CRITICAL FIX: Subset to HO3D's 16 joints BEFORE any transforms
+                # CRITICAL FIX: Only subset if joints are 21, not if already 16
                 # ============================================================
-                HO3D_JOINT_INDICES = [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20]
-                print(f"[FIX] Subsetting joints from {hand_joints.shape} to 16 joints...")
-                hand_joints = hand_joints[:, HO3D_JOINT_INDICES, :]  # [1, 21, 3] → [1, 16, 3]
-                print(f"[FIX] After subsetting: {hand_joints.shape}")
+                if hand_joints.shape[1] == 21:
+                    # MANO outputs 21 joints, need to subset to HO3D's 16
+                    HO3D_JOINT_INDICES = [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20]
+                    if batch_idx == 0:
+                        print(f"[FIX] Subsetting joints from 21 to 16 (HO3D format)")
+                    hand_joints = hand_joints[:, HO3D_JOINT_INDICES, :]
+                elif hand_joints.shape[1] == 16:
+                    # Already HO3D format, no subsetting needed
+                    if batch_idx == 0:
+                        print(f"[FIX] Joints already in HO3D format (16 joints), skipping subsetting")
+                else:
+                    # Unexpected joint count
+                    print(f"⚠️ WARNING: Unexpected joint count: {hand_joints.shape[1]} (expected 21 or 16)")
+
+                if batch_idx == 0:
+                    print(f"[FIX] Final joint shape: {hand_joints.shape}")
                 # ============================================================
 
                 # Object
