@@ -25,9 +25,10 @@ phase3:
   grid_resolution: 24
   spatial_lim: 1.5
 
-  # Phase 3 Boundaries - ACTIVE ENTIRE EPOCH
+  # Phase 3 Boundaries - SDS active with scheduled weights
+  # Mesh extraction happens at step ~1500, so SDS weight → 0.05 by step 1400
   phase3_start_iter: 0
-  phase3_end_iter: 1499
+  phase3_end_iter: 1499        # SDS weight scheduled to 0.0 at step 1500
 
   # SDS Configuration - SAME
   sds:
@@ -40,7 +41,43 @@ phase3:
 
   sds_iters: 1
   use_modular_init: true
-  w_sds: 10.0                   # Increased from 7.5 for longer training
+
+  # ================================================================
+  # CRITICAL FIX: Scheduled SDS weights (replaces w_sds: 10.0)
+  # ================================================================
+  # OLD: w_sds: 10.0  (caused 99.5% loss dominance, 500:1 gradient ratio)
+  # NEW: Scheduled weights to balance RGB and SDS throughout training
+  w_sds_schedule:
+    enabled: true
+
+    # Keyframe schedule (linear interpolation between points)
+    step_0: 0.5        # Start balanced (vs 10.0 previously)
+    step_250: 0.5      # Stable warmup
+    step_500: 0.3      # Begin reduction
+    step_750: 0.25     # Continue reduction
+    step_1000: 0.2     # Mid-training
+    step_1200: 0.1     # Approaching extraction
+    step_1400: 0.05    # Final refinement
+    step_1500: 0.0     # Phase 4 starts (SDS OFF)
+
+    interpolation: "linear"
+
+  # Diagnostic monitoring for scheduled weights
+  diagnostics:
+    rgb_convergence_check:
+      enabled: true
+      step: 1000
+      threshold: 0.08    # Expect RGB < 0.08 at halfway point
+      warning_only: true
+
+    sds_trend_check:
+      enabled: true
+      check_every: 200
+      window: 400
+      max_increase: 0.2  # Warn if SDS increases > 20%
+
+    log_sds_weight_every: 50  # Log current weight frequently
+
   warmup_iters: 0
 
 # ================================================================

@@ -31,6 +31,7 @@ from src.model.ghop.temporal_consistency import TemporalConsistencyModule
 from src.model.ghop.temporal_diagnostic import TemporalMemoryDiagnostic
 from src.model.ghop.adaptive_contact_zones import AdaptiveContactZones
 from src.training.phase5_scheduler import Phase5TrainingScheduler
+from src.training.sds_weight_scheduler import create_sds_scheduler_from_config
 import gc
 from src.utils.memory_profiler import MemoryProfiler
 import subprocess
@@ -576,21 +577,42 @@ class HOLD(pl.LightningModule):
                         logger.info("✅ GHOP Prior Module initialized with Hugging Face CLIP (fallback)")
 
                 # ============================================================
-                # Initialize SDS Loss Module
+                # Initialize SDS Loss Module with Weight Scheduler
                 # ============================================================
                 logger.info("Initializing GHOP SDS Loss Module...")
+
+                try:
+                    self.sds_weight_scheduler = create_sds_scheduler_from_config(phase3_cfg)
+                    logger.info("✓ SDS Weight Scheduler initialized")
+                    logger.info(self.sds_weight_scheduler.get_schedule_info())
+                except Exception as e:
+                    logger.error(f"Failed to create SDS scheduler: {e}")
+                    logger.warning("Falling back to fixed SDS weight")
+                    # Fallback: create dummy scheduler with fixed weight
+                    from src.model.ghop.sds_weight_scheduler import SDSWeightScheduler
+                    fixed_weight = phase3_cfg.get('w_sds', 10.0)
+                    self.sds_weight_scheduler = SDSWeightScheduler(
+                        schedule={0: fixed_weight},
+                        enabled=False
+                    )
+
+                # Initialize SDS loss (weight will be set dynamically in training_step)
                 self.sds_loss = GHOPSDSLoss(
                     vqvae_wrapper=self.vqvae,
                     unet_wrapper=self.unet,
                     hand_field_builder=self.hand_field_builder,
-                    prior_module=self.ghop_prior,           # ← Now properly initialized
-                    sds_weight=phase3_cfg.get('w_sds', 10.0),
+                    prior_module=self.ghop_prior,
+                    sds_weight=1.0,  # ← Changed: placeholder, will be overridden in training_step
                     guidance_scale=phase3_cfg.sds.get('guidance_scale', 4.0),
                     start_iter=phase3_cfg.get('phase3_start_iter', 0),
                     end_iter=phase3_cfg.get('phase3_end_iter', 99999),
                     device='cuda'
                 )
-                logger.info(f"✓ GHOP SDS Loss Module initialized (iterations: {self.sds_loss.start_iter} to {self.sds_loss.end_iter})")
+                logger.info(f"✓ GHOP SDS Loss Module initialized")
+
+                # Store diagnostic config
+                self.sds_diagnostics = phase3_cfg.get('diagnostics', {})
+                self.log_sds_weight_every = self.sds_diagnostics.get('log_sds_weight_every', 100)
 
                 # ============================================================
                 # PHASE 3 SHAPE VERIFICATION TEST
@@ -2341,15 +2363,63 @@ class HOLD(pl.LightningModule):
                     logger.info(f"[GHOP-DEBUG] Info dict: {ghop_info}")
 
                     # ============================================================
-                    # STEP 5: Apply Phase 5 dynamic weighting if enabled
+                    # STEP 5: Get SDS weight from scheduler (HIGHEST PRIORITY)
                     # ============================================================
-                    if self.phase5_enabled:
-                        sds_weight = loss_weights['sds']
-                    else:
-                        sds_weight = 1.0
+                    # Priority order:
+                    # 1. Scheduler weight (if enabled) - NEW
+                    # 2. Phase 5 dynamic weights (if enabled)
+                    # 3. Default weight = 1.0
 
-                    weighted_ghop = ghop_losses['sds'] * sds_weight
-                    logger.debug(f"[PHASE 3 DEBUG] weighted_ghop = {ghop_losses['sds']} * {sds_weight} = {weighted_ghop}")
+                    # Get base SDS weight from scheduler
+                    current_sds_weight = self.sds_weight_scheduler.get_weight(self.global_step)
+
+                    # Apply Phase 5 multiplier ONLY if Phase 5 is actually active (after phase5_start_iter)
+                    # Phase 5 scheduler provides loss_weights from step 0, but we only want to use them
+                    # when Phase 5 temporal consistency is active (step >= 1950)
+                    if (self.phase5_enabled and
+                        'sds' in loss_weights and
+                        self.global_step >= self.phase5_start_iter):
+
+                        phase5_multiplier = loss_weights['sds']
+                        final_sds_weight = current_sds_weight * phase5_multiplier
+                        logger.debug(
+                            f"[SDS-WEIGHT] Scheduler: {current_sds_weight:.4f} × "
+                            f"Phase5: {phase5_multiplier:.4f} = {final_sds_weight:.4f}"
+                        )
+                    else:
+                        # Before Phase 5 starts: use scheduler weight directly
+                        final_sds_weight = current_sds_weight
+                        if self.global_step % self.log_sds_weight_every == 0:
+                            logger.debug(f"[SDS-WEIGHT] Using scheduler weight only: {final_sds_weight:.4f}")
+
+                    # Apply weight to raw SDS loss
+                    if 'sds' in ghop_losses:
+                        raw_sds_loss = ghop_losses['sds']
+                        weighted_ghop = raw_sds_loss * final_sds_weight
+
+                        # Log at specified frequency
+                        if self.global_step % self.log_sds_weight_every == 0:
+                            logger.info(
+                                f"[SDS-WEIGHT] Step {self.global_step}: "
+                                f"weight={final_sds_weight:.4f}, "
+                                f"raw_loss={raw_sds_loss.item():.6f}, "
+                                f"weighted_loss={weighted_ghop.item():.6f}"
+                            )
+
+                        # Store components for logging
+                        loss_output["loss/sds_raw"] = raw_sds_loss
+                        loss_output["loss/sds_weighted"] = weighted_ghop
+                        loss_output["sds_weight"] = final_sds_weight
+
+                        logger.debug(
+                            f"[Phase 3] SDS loss computed: "
+                            f"raw={raw_sds_loss.item():.6f}, "
+                            f"weight={final_sds_weight:.4f}, "
+                            f"weighted={weighted_ghop.item():.6f}"
+                        )
+                    else:
+                        weighted_ghop = torch.tensor(0.0, device=device, requires_grad=True)
+                        logger.warning(f"[Phase 3] No 'sds' key in ghop_losses at step {self.global_step}")
 
                     # ============================================================
                     # STEP 6: Add GHOP losses to total loss
@@ -2417,6 +2487,125 @@ class HOLD(pl.LightningModule):
                     ghop_info["error"] = str(e)
                     zero_loss = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
                     loss_output["ghop_loss"] = zero_loss
+
+            # ============================================================
+            # DIAGNOSTIC 1: RGB Convergence Check
+            # ============================================================
+            if self.sds_diagnostics.get('rgb_convergence_check', {}).get('enabled', False):
+                check_config = self.sds_diagnostics['rgb_convergence_check']
+                check_step = check_config.get('step', 1000)
+                threshold = check_config.get('threshold', 0.08)
+                warning_only = check_config.get('warning_only', True)
+
+                if self.global_step == check_step:
+                    # Extract RGB loss from loss_output
+                    rgb_loss_value = loss_output.get('loss/rgb', loss_output.get('loss', 0.0))
+
+                    if isinstance(rgb_loss_value, torch.Tensor):
+                        rgb_loss_value = rgb_loss_value.item()
+
+                    if rgb_loss_value > threshold:
+                        msg = (
+                            f"\n{'=' * 70}\n"
+                            f"[RGB-CONVERGENCE-CHECK] FAILED at step {check_step}!\n"
+                            f"{'=' * 70}\n"
+                            f"  RGB loss:     {rgb_loss_value:.6f}\n"
+                            f"  Threshold:    {threshold:.6f}\n"
+                            f"  Gap:          +{(rgb_loss_value - threshold):.6f} ({((rgb_loss_value / threshold - 1) * 100):.1f}% over)\n"
+                            f"\n"
+                            f"  ⚠️  INTERPRETATION:\n"
+                            f"  RGB loss should converge to < {threshold} by step {check_step}.\n"
+                            f"  Current value indicates SDS weight may still be too high,\n"
+                            f"  preventing proper geometric learning.\n"
+                            f"\n"
+                            f"  📋 RECOMMENDATION:\n"
+                            f"  - Option 1: Reduce all SDS weights by 50% in config\n"
+                            f"  - Option 2: Increase RGB weight to 2.0 or 5.0\n"
+                            f"  - Option 3: Extend Phase 3 by 50% more steps\n"
+                            f"{'=' * 70}\n"
+                        )
+                        if warning_only:
+                            logger.warning(msg)
+                        else:
+                            logger.error(msg)
+                            raise RuntimeError("RGB convergence check failed - stopping training")
+                    else:
+                        logger.info(
+                            f"\n{'=' * 70}\n"
+                            f"[RGB-CONVERGENCE-CHECK] ✅ PASSED at step {check_step}!\n"
+                            f"{'=' * 70}\n"
+                            f"  RGB loss: {rgb_loss_value:.6f} < {threshold:.6f}\n"
+                            f"  Geometric learning is progressing well.\n"
+                            f"  SDS weight balance appears appropriate.\n"
+                            f"{'=' * 70}\n"
+                        )
+
+            # ============================================================
+            # DIAGNOSTIC 2: SDS Trend Check (Detect Divergence)
+            # ============================================================
+            if self.sds_diagnostics.get('sds_trend_check', {}).get('enabled', False):
+                # Initialize history dict if not exists
+                if not hasattr(self, '_sds_history'):
+                    self._sds_history = {}  # step -> raw_sds_loss
+
+                check_config = self.sds_diagnostics['sds_trend_check']
+                check_every = check_config.get('check_every', 200)
+                window = check_config.get('window', 400)
+                max_increase = check_config.get('max_increase', 0.2)
+
+                # Store current SDS loss (raw, not weighted)
+                if 'loss/sds_raw' in loss_output:
+                    raw_sds = loss_output['loss/sds_raw']
+                    if isinstance(raw_sds, torch.Tensor):
+                        self._sds_history[self.global_step] = raw_sds.item()
+
+                # Check trend at specified frequency
+                if self.global_step % check_every == 0 and self.global_step >= window:
+                    prev_step = self.global_step - window
+
+                    if prev_step in self._sds_history and self.global_step in self._sds_history:
+                        current_sds = self._sds_history[self.global_step]
+                        prev_sds = self._sds_history[prev_step]
+
+                        if prev_sds > 0:
+                            increase_ratio = (current_sds - prev_sds) / prev_sds
+
+                            if increase_ratio > max_increase:
+                                logger.warning(
+                                    f"\n{'=' * 70}\n"
+                                    f"[SDS-TREND-CHECK] ⚠️  SDS LOSS INCREASING!\n"
+                                    f"{'=' * 70}\n"
+                                    f"  Step {prev_step}:        {prev_sds:.6f}\n"
+                                    f"  Step {self.global_step}: {current_sds:.6f}\n"
+                                    f"  Change:                  +{increase_ratio * 100:.1f}%\n"
+                                    f"  Threshold:               +{max_increase * 100:.1f}%\n"
+                                    f"\n"
+                                    f"  ⚠️  INTERPRETATION:\n"
+                                    f"  SDS loss should decrease or stay stable as training progresses.\n"
+                                    f"  Increasing SDS indicates the diffusion model is rejecting\n"
+                                    f"  the current geometry as implausible - object shape may be\n"
+                                    f"  diverging from correct 3D structure.\n"
+                                    f"\n"
+                                    f"  📋 THIS IS THE EXACT PATTERN OBSERVED IN FAILED TRAINING:\n"
+                                    f"  - Step 20000: SDS = 6.32\n"
+                                    f"  - Step 39900: SDS = 6.59 (+4.3%)\n"
+                                    f"  - Result: Wrong canonical mesh (3× height, 2.4× volume)\n"
+                                    f"{'=' * 70}\n"
+                                )
+                            elif increase_ratio < -0.1:
+                                # SDS decreasing is good
+                                logger.info(
+                                    f"[SDS-TREND-CHECK] ✅ SDS loss decreasing properly: "
+                                    f"{increase_ratio * 100:.1f}% over {window} steps "
+                                    f"({prev_sds:.4f} → {current_sds:.4f})"
+                                )
+                            # Clean up old history to prevent memory buildup
+                            if len(self._sds_history) > 100:
+                                old_steps = sorted(self._sds_history.keys())[:-50]
+                                for old_step in old_steps:
+                                    del self._sds_history[old_step]
+
+
         else:
             # Log why GHOP was skipped
             if self.global_step % 50 == 0:
@@ -3020,31 +3209,38 @@ class HOLD(pl.LightningModule):
         # DEBUG: Loss Composition Logging (Every 100 steps)
         # ====================================================================
         if self.global_step % 100 == 0:
-            loss_base = loss_output.get('loss/rgb', torch.tensor(0.0))  # RGB component only
-            loss_ghop = loss_output.get('ghop_loss', torch.tensor(0.0))
+            # Extract loss components
+            loss_base = loss_output.get('loss/rgb', torch.tensor(0.0))
+            loss_sds_raw = loss_output.get('loss/sds_raw', torch.tensor(0.0))
+            loss_sds_weighted = loss_output.get('loss/sds_weighted', torch.tensor(0.0))
+            sds_weight = loss_output.get('sds_weight', 0.0)
             loss_contact = loss_output.get('contact_loss', torch.tensor(0.0))
-            loss_rgb = loss_output.get('loss/rgb', torch.tensor(0.0))
             loss_temporal = loss_output.get('temporal_loss', torch.tensor(0.0))
 
-            base_f = to_float(loss_base)
-            ghop_f = to_float(loss_ghop)
-            contact_f = to_float(loss_contact)
-            rgb_f = to_float(loss_rgb)
-            temporal_f = to_float(loss_temporal)
-            final_f = total_loss.item() if total_loss.numel() > 0 else 0.0  # ← CHANGED FROM final_loss
+            # Convert to float
+            base_f = loss_base.item() if torch.is_tensor(loss_base) else loss_base
+            sds_raw_f = loss_sds_raw.item() if torch.is_tensor(loss_sds_raw) else loss_sds_raw
+            sds_weighted_f = loss_sds_weighted.item() if torch.is_tensor(loss_sds_weighted) else loss_sds_weighted
+            sds_weight_f = sds_weight.item() if torch.is_tensor(sds_weight) else sds_weight
+            contact_f = loss_contact.item() if torch.is_tensor(loss_contact) else loss_contact
+            temporal_f = loss_temporal.item() if torch.is_tensor(loss_temporal) else loss_temporal
+            final_f = total_loss.item() if torch.is_tensor(total_loss) else total_loss
+
+            # Calculate percentages
+            sds_pct = (sds_weighted_f / final_f * 100) if final_f > 0 else 0
+            rgb_pct = (base_f / final_f * 100) if final_f > 0 else 0
 
             logger.info(
-                f"\n[Loss Composition - Step {self.global_step}]\n"
-                f"  RGB loss:          {base_f:.6f}\n"
-                f"  GHOP SDS loss:     {ghop_f:.6f}\n"
-                f"  Contact loss:      {contact_f:.6f}\n"
-                f"  Temporal loss:     {temporal_f:.6f}\n"
-                f"  Final total:       {final_f:.6f}\n"
-                f"  ────────────────────\n"
-                f"  Phase 3 active:    {phase3_active}\n"
-                f"  Phase 4 active:    {phase4_active}\n"
-                f"  Phase 5 active:    {phase5_active}\n"
-                f"  Batch keys:        {list(batch.keys())[:8]}"
+                f"\n[Step {self.global_step}] Loss Breakdown:\n"
+                f"  RGB loss:              {base_f:.6f} ({rgb_pct:.1f}% of total)\n"
+                f"  SDS raw loss:          {sds_raw_f:.6f}\n"
+                f"  SDS weight:            {sds_weight_f:.4f}\n"
+                f"  SDS weighted loss:     {sds_weighted_f:.6f} ({sds_pct:.1f}% of total)\n"
+                f"  Contact loss:          {contact_f:.6f}\n"
+                f"  Temporal loss:         {temporal_f:.6f}\n"
+                f"  Final total:           {final_f:.6f}\n"
+                f"  --------------------------------------------------\n"
+                f"  Gradient balance:      RGB vs SDS = 1:{(sds_weighted_f/base_f if base_f > 0 else 0):.1f}"
             )
 
             # Log to tensorboard

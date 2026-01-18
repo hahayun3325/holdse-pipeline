@@ -22,7 +22,7 @@ phase3:
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
-  grid_resolution: 24
+  grid_resolution: 64
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - 2/3 of training (40,000 steps)
@@ -40,7 +40,43 @@ phase3:
 
   sds_iters: 1
   use_modular_init: true
-  w_sds: 10.0                   # Increased from 7.5 for longer training
+
+  w_sds_schedule:
+    enabled: true
+    step_0: 0.25
+    step_2500: 0.25
+    step_5000: 0.25
+    step_7500: 0.225
+    step_10000: 0.20
+    step_12500: 0.175
+    step_15000: 0.15
+    step_17500: 0.1375
+    step_20000: 0.125
+    step_22500: 0.1125
+    step_25000: 0.10
+    step_27500: 0.0875
+    step_30000: 0.075
+    step_32500: 0.0625
+    step_35000: 0.05
+    step_37000: 0.03
+    step_38500: 0.015
+    step_39500: 0.005
+    step_39999: 0.0
+    interpolation: "linear"
+
+  diagnostics:
+    rgb_convergence_check:
+      enabled: true
+      step: 20000
+      threshold: 0.08
+      warning_only: true
+    sds_trend_check:
+      enabled: true
+      check_every: 1000
+      window: 2000
+      max_increase: 0.2
+    log_sds_weight_every: 100
+
   warmup_iters: 0
 
 # ================================================================
