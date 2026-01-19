@@ -78,6 +78,25 @@ def get_eikonal_loss(grad_theta):
     return eikonal_loss
 
 
+def get_smoothness_loss(vertices):
+    """
+    Penalize rough/noisy object surfaces.
+    Encourages smooth vertex positions (reduces variance).
+
+    Args:
+        vertices: [N, 3] tensor of vertex positions
+
+    Returns:
+        Scalar smoothness loss
+    """
+    if vertices is None:
+        return torch.tensor(0.0, requires_grad=False)
+
+    # Simple smoothness: minimize variance of positions
+    # Lower variance = vertices are closer together = smoother surface
+    smoothness = torch.var(vertices)
+    return smoothness
+
 # BCE loss for clear boundary
 def get_bce_loss(acc_map, scores):
     bce_loss = (

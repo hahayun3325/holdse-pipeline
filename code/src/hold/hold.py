@@ -4,6 +4,7 @@ import sys
 
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from typing import Dict, Optional, List, Tuple, Any  # ✅ ADD THIS LINE
@@ -35,6 +36,7 @@ from src.training.sds_weight_scheduler import create_sds_scheduler_from_config
 import gc
 from src.utils.memory_profiler import MemoryProfiler
 import subprocess
+from src.hold.loss_terms import get_smoothness_loss
 
 # ========================================================================
 # PHASE 2: GHOP VALIDATION FUNCTION
@@ -131,6 +133,34 @@ class HOLD(pl.LightningModule):
             num_frames,
             args,
         )
+
+        # Log trainable parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+        logger.info("=" * 70)
+        logger.info("MODEL PARAMETER SUMMARY")
+        logger.info("=" * 70)
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
+        logger.info(f"Frozen parameters: {total_params - trainable_params:,}")
+
+        # Breakdown by component
+        for node_name, node in self.model.nodes.items():
+            node_params = sum(p.numel() for p in node.parameters())
+            node_trainable = sum(p.numel() for p in node.parameters() if p.requires_grad)
+            logger.info(f"  {node_name}: {node_trainable:,} / {node_params:,} trainable")
+
+            # Check object vertices specifically
+            if 'object' in node_name.lower():
+                if hasattr(node, 'server') and hasattr(node.server, 'object_model'):
+                    om = node.server.object_model
+                    if hasattr(om, 'v3d_cano'):
+                        v3d = om.v3d_cano
+                        logger.info(
+                            f"    - v3d_cano: shape={v3d.shape}, requires_grad={v3d.requires_grad}, numel={v3d.numel():,}")
+
+        logger.info("=" * 70)
 
         for node in self.model.nodes.values():
             if self.args.freeze_pose:
@@ -794,7 +824,7 @@ class HOLD(pl.LightningModule):
             self.warmup_iters = phase3_cfg.get('warmup_iters', 0)
             self.sds_iters = phase3_cfg.get('sds_iters', 500)
             self.w_sds = phase3_cfg.get('w_sds', 5000.0)
-            self.grid_resolution = phase3_cfg.get('grid_resolution', 24)
+            self.grid_resolution = phase3_cfg.get('grid_resolution', 64)  # ← changed from 24
 
             self.phase3_enabled = True
             self.ghop_enabled = True
@@ -1587,26 +1617,67 @@ class HOLD(pl.LightningModule):
         mano_lr_multiplier = getattr(self.opt.training, 'mano_lr_multiplier', 0.1) \
             if hasattr(self.opt, 'training') else 0.1
         logger.info(f"[Optimizer] Base LR: {base_lr}, MANO LR multiplier: {mano_lr_multiplier}")
-        node_params = set()
-        params = []
 
-        # Collect pose parameters for each node
+        params = []
+        node_params = set()
+
+        # ================================================================
+        # GROUP 1: MANO Hand Parameters (Original LR)
+        # ================================================================
         for node in self.model.nodes.values():
             node_parameters = set(node.params.parameters())
             node_params.update(node_parameters)
-            params.append(
-                {
-                    "params": list(node_parameters),
-                    "lr": base_lr * mano_lr_multiplier,  # CHANGE LINE 950
-                }
-            )
+            params.append({
+                "params": list(node_parameters),
+                "lr": base_lr * mano_lr_multiplier,
+                "name": f"mano_{node.node_id}"
+            })
 
-        # Neural network parameters
+        # ================================================================
+        # GROUP 2: Object Vertices - BRUTE FORCE SEARCH
+        # ================================================================
+        object_vertices_added = False
+
+        # Search through ALL model parameters to find v3d_cano
+        for name, param in self.named_parameters():
+            if 'v3d_cano' in name and isinstance(param, nn.Parameter):
+                params.append({
+                    "params": [param],
+                    "lr": base_lr * 0.001,  # 1e-7 (100x slower than base)
+                    "name": "object_vertices"
+                })
+                node_params.add(param)
+                object_vertices_added = True
+                logger.info(f"✓ Object vertices added to optimizer: {name} ({param.numel():,} params at lr={base_lr * 0.00001:.2e})")
+                break  # Only add once
+
+        if not object_vertices_added:
+            logger.warning("⚠️ Object vertices NOT found in model parameters")
+            logger.warning("   This means the object shape is FROZEN and cannot learn")
+
+        # ================================================================
+        # GROUP 3: Neural Network Parameters (Original LR)
+        # ================================================================
         main_params = [p for p in self.model.parameters() if p not in node_params]
         if main_params:
-            params.append({"params": main_params, "lr": base_lr})
+            params.append({
+                "params": main_params,
+                "lr": base_lr,
+                "name": "neural_networks"
+            })
 
-        self.optimizer = optim.Adam(params, lr=base_lr, eps=1e-8)
+        # ================================================================
+        # Create Optimizer
+        # ================================================================
+        self.optimizer = optim.Adam(params, eps=1e-8)
+
+        # Log parameter groups
+        logger.info("=" * 70)
+        logger.info("Optimizer Parameter Groups:")
+        for i, group in enumerate(params):
+            num_params = sum(p.numel() for p in group['params'])
+            logger.info(f"  [{i+1}] {group.get('name', 'unnamed'):20s}: lr={group['lr']:.2e}, params={num_params:,}")
+        logger.info("=" * 70)
 
         return [self.optimizer], []
 
@@ -2011,6 +2082,78 @@ class HOLD(pl.LightningModule):
         # ================================================================
         loss_output = self.loss(batch, model_outputs)
         total_loss = loss_output["loss"]  # base HOLD loss
+
+        # ================================================================
+        # ✅ OBJECT SMOOTHNESS REGULARIZATION
+        # ================================================================
+        smoothness_added = False
+
+        # Debug logging (only first step to avoid spam)
+        if self.global_step == 0:
+            logger.info("[DEBUG] Checking for object smoothness regularization...")
+            logger.info(f"[DEBUG] Model type: {type(self.model).__name__}")
+            logger.info(f"[DEBUG] Has 'nodes'? {hasattr(self.model, 'nodes')}")
+            if hasattr(self.model, 'nodes'):
+                logger.info(f"[DEBUG] Node keys: {list(self.model.nodes.keys())}")
+
+        # Attempt 1: Via model.nodes (most likely path)
+        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+            object_node = self.model.nodes['object']
+
+            if hasattr(object_node, 'server'):
+                object_server = object_node.server
+
+                if hasattr(object_server, 'object_model'):
+                    object_model = object_server.object_model
+
+                    if hasattr(object_model, 'v3d_cano'):
+                        v3d_cano = object_model.v3d_cano
+
+                        # Check if it's a Parameter (learnable)
+                        if isinstance(v3d_cano, nn.Parameter):
+                            # Compute smoothness loss
+                            smoothness_loss = get_smoothness_loss(v3d_cano)
+                            total_loss = total_loss + 0.001 * smoothness_loss
+
+                            smoothness_added = True
+
+                            # Log every 100 steps
+                            if self.global_step % 100 == 0:
+                                self.log('loss/object_smoothness', smoothness_loss.item())
+                                logger.info(f"✅ Object smoothness loss: {smoothness_loss.item():.6f}")
+                                loss_output['object_smoothness'] = smoothness_loss.item()
+                        else:
+                            if self.global_step == 0:
+                                logger.warning("⚠️ v3d_cano exists but is NOT nn.Parameter (still a buffer?)")
+
+        # Attempt 2: Via model.servers (fallback)
+        if not smoothness_added and hasattr(self.model, 'servers') and 'object' in self.model.servers:
+            object_server = self.model.servers['object']
+
+            if hasattr(object_server, 'object_model'):
+                object_model = object_server.object_model
+
+                if hasattr(object_model, 'v3d_cano'):
+                    v3d_cano = object_model.v3d_cano
+
+                    if isinstance(v3d_cano, nn.Parameter):
+                        smoothness_loss = get_smoothness_loss(v3d_cano)
+                        total_loss = total_loss + 0.001 * smoothness_loss
+
+                        smoothness_added = True
+
+                        if self.global_step % 100 == 0:
+                            self.log('loss/object_smoothness', smoothness_loss.item())
+                            logger.info(f"✅ Object smoothness loss: {smoothness_loss.item():.6f}")
+                            loss_output['object_smoothness'] = smoothness_loss.item()
+
+        # Final check: Log if smoothness wasn't added
+        if self.global_step == 0 and not smoothness_added:
+            logger.error("❌ Object smoothness regularization NOT ACTIVE")
+            logger.error("   Possible reasons:")
+            logger.error("   1. Object node doesn't exist")
+            logger.error("   2. v3d_cano is still a buffer (not nn.Parameter)")
+            logger.error("   3. Path to object_model is different")
 
         # ========================================
         # MANO Joint Supervision (MODIFIED)
@@ -3243,6 +3386,11 @@ class HOLD(pl.LightningModule):
                 f"  Gradient balance:      RGB vs SDS = 1:{(sds_weighted_f/base_f if base_f > 0 else 0):.1f}"
             )
 
+            # ✅ ADD THIS:
+            if 'object_smoothness' in loss_output:
+                smooth_val = loss_output['object_smoothness']
+                logger.info(f"  Object smoothness:     {smooth_val:.6f}")
+
             # Log to tensorboard
             try:
                 self.log('train/loss_total', final_f, prog_bar=True)
@@ -3364,6 +3512,23 @@ class HOLD(pl.LightningModule):
                 else:
                     logger.warning(f"[GRAD FLOW - Step {self.global_step}]")
                     logger.warning(f"  ❌ pose.grad is None - GRADIENTS NOT FLOWING!")
+                # ADD: Check object vertex gradients
+                obj_model = self.model.servers['object'].object_model
+                if hasattr(obj_model, 'v3d_cano'):
+                    obj_vertices = obj_model.v3d_cano
+
+                    logger.warning(f"[OBJECT GRAD CHECK - Step {self.global_step}]")
+                    logger.warning(f"  v3d_cano.requires_grad = {obj_vertices.requires_grad}")
+                    logger.warning(f"  v3d_cano.is_leaf = {obj_vertices.is_leaf}")
+                    logger.warning(f"  v3d_cano.shape = {obj_vertices.shape}")
+
+                    if obj_vertices.grad is not None:
+                        grad_mean = obj_vertices.grad.abs().mean().item()
+                        grad_max = obj_vertices.grad.abs().max().item()
+                        logger.warning(f"  ✅ v3d_cano.grad EXISTS: mean={grad_mean:.10f}, max={grad_max:.10f}")
+                    else:
+                        logger.warning(f"  ❌ v3d_cano.grad is None - GRADIENTS NOT FLOWING!")
+
             except Exception as e:
                 logger.warning(f"[GRAD FLOW - Step {self.global_step}] Error checking gradients: {e}")
 

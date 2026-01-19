@@ -22,7 +22,7 @@ phase3:
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
-  grid_resolution: 24
+  grid_resolution: 64
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - SDS active with scheduled weights

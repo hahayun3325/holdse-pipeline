@@ -61,4 +61,4 @@ python train.py \
 echo "✅ STAGE 3 COMPLETE (boundary mode)"
 
 # chmod +x scripts/train_MC1_stage3_from_official.sh
-# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to30_hold_MC1_ho3d_64res_beginning_$(date +%Y%m%d_%H%M%S).log
+# ./scripts/train_MC1_stage3_from_official.sh 2>&1 | tee logs/stage3_1to30_hold_MC1_ho3d_oLR1e7_64res_beginning_$(date +%Y%m%d_%H%M%S).log

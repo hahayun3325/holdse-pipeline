@@ -22,7 +22,8 @@ class ObjectModel(nn.Module):
         self.register_buffer(
             "obj_scale", torch.FloatTensor(np.array([data["obj_scale"]]))
         )
-        self.register_buffer("v3d_cano", v3d_cano)
+        # self.register_buffer("v3d_cano", v3d_cano)
+        self.v3d_cano = nn.Parameter(v3d_cano, requires_grad=True)
         self.register_buffer("norm_mat", torch.FloatTensor(data["norm_mat"]))
         self.register_buffer("denorm_mat", torch.inverse(self.norm_mat))
 
