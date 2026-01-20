@@ -184,9 +184,41 @@ def get_mask_loss(mask_prob, mask_gt, valid_pix):
     return mask_loss
 
 
-def get_sem_loss(sem_pred, mask_gt, valid_pix, scores):
+def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
+    """
+    Semantic segmentation loss with optional edge weighting.
+
+    Supports two formats:
+    1. Full image: sem_pred shape (B, H, W, 4) or (B, 4, H, W)
+    2. Sampled pixels: sem_pred shape (N, 4) where N = batch_size
+
+    Args:
+        sem_pred: Predicted segmentation
+        mask_gt: Ground truth mask
+        valid_pix: Valid pixel mask
+        scores: Per-image weights
+        edge_weight: Weight for edge-aware loss (default 0.0 = disabled)
+
+    Returns:
+        loss: Scalar semantic loss
+    """
+    # Detect format
+    print(f"[DEBUG get_sem_loss] sem_pred shape: {sem_pred.shape}")
+    print(f"[DEBUG get_sem_loss] mask_gt shape: {mask_gt.shape}")
+    print(f"[DEBUG get_sem_loss] valid_pix shape: {valid_pix.shape}")
+
+    is_sampled_pixels = (sem_pred.ndim == 2)  # (N, 4) format
+    is_full_image = (sem_pred.ndim == 4)  # (B, H, W, 4) or (B, 4, H, W)
+
+    if not (is_sampled_pixels or is_full_image):
+        raise ValueError(f"Unsupported sem_pred shape: {sem_pred.shape}")
+
+    # ================================================================
+    # PROCESS GROUND TRUTH LABELS (same for both formats)
+    # ================================================================
     semantic_gt = mask_gt.clone()
 
+    # Existing segmentation band logic
     bnd_bg = semantic_gt < 25
     bnd_o = torch.logical_and(25 <= semantic_gt, semantic_gt < 100)
     bnd_r = torch.logical_and(100 <= semantic_gt, semantic_gt < 200)
@@ -205,54 +237,114 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores):
     semantic_gt[semantic_gt == SEGM_IDS["left"]] = 3
 
     # ================================================================
-    # ✅ FIX: Match dimensions BEFORE creating one-hot encoding
+    # CASE 1: SAMPLED PIXELS (N, 4)
     # ================================================================
-    # If sem_pred has fewer points than mask_gt, we need to sample GT to match
-    if sem_pred.shape[0] != mask_gt.shape[0]:
-        num_pred_points = sem_pred.shape[0]
+    if is_sampled_pixels:
+        print(f"[DEBUG] Using sampled pixel loss (no edge weighting)")
 
-        if mask_gt.shape[0] > num_pred_points:
-            # Downsample GT to match predictions
-            semantic_gt = semantic_gt[:num_pred_points]
-            valid_pix = valid_pix[:num_pred_points]
+        # Flatten GT to match sampled format
+        if semantic_gt.ndim > 1:
+            semantic_gt_flat = semantic_gt.flatten()
         else:
-            # Upsample GT (less common case)
-            repeats = (num_pred_points + mask_gt.shape[0] - 1) // mask_gt.shape[0]
-            semantic_gt = semantic_gt.repeat(repeats)[:num_pred_points]
-            valid_pix = valid_pix.repeat(repeats)[:num_pred_points]
+            semantic_gt_flat = semantic_gt
 
-    # NOW create one-hot encoding after dimension matching
-    semantic_gt_onehot = torch_utils.one_hot_embedding(semantic_gt, len(SEGM_IDS)).to(
-        mask_gt.device
-    )
+        if valid_pix.ndim > 1:
+            valid_pix_flat = valid_pix.flatten()
+        else:
+            valid_pix_flat = valid_pix
 
-    sem_loss = l2_loss(sem_pred, semantic_gt_onehot) * valid_pix[:, None]
+        # Standard cross-entropy loss
+        sem_loss = F.cross_entropy(
+            sem_pred,  # (N, 4) - logits
+            semantic_gt_flat.long(),  # (N,) - class indices
+            reduction="none",
+        )
+
+        # Apply valid pixel mask
+        sem_loss = sem_loss * valid_pix_flat
+
+        # Average over valid pixels
+        sem_loss = sem_loss.sum() / (valid_pix_flat.sum() + 1e-6)
+
+        # Note: edge_weight is ignored for sampled pixels (can't detect edges)
+        if edge_weight > 0.0:
+            print(f"[WARN] edge_weight={edge_weight} ignored for sampled pixel format")
+
+        return sem_loss
 
     # ================================================================
-    # ✅ FIX: Handle scores dimensionality
+    # CASE 2: FULL IMAGE (B, H, W, 4) or (B, 4, H, W)
     # ================================================================
-    # Flatten scores if it has extra dimensions
-    if scores.ndim > 2:
-        scores = scores.squeeze()
-    if scores.ndim == 1:
-        scores = scores.unsqueeze(1)  # Make it [B, 1]
+    elif is_full_image:
+        print(f"[DEBUG] Using full image loss (edge weighting={edge_weight})")
 
-    # Now scores is [B, 1] or [B]
-    num_pix = sem_loss.shape[0] // scores.shape[0]
+        # Normalize to (B, C, H, W) format
+        if sem_pred.shape[1] == 4:
+            # Already (B, 4, H, W)
+            sem_pred_formatted = sem_pred
+        elif sem_pred.shape[3] == 4:
+            # (B, H, W, 4) - need permute
+            sem_pred_formatted = sem_pred.permute(0, 3, 1, 2)
+        else:
+            raise ValueError(f"Unexpected full image sem_pred shape: {sem_pred.shape}")
 
-    if scores.ndim == 2:
-        # scores is [B, 1], already has the right shape
-        scores_expanded = scores.repeat(1, num_pix).view(-1, 1)
-    else:
-        # scores is [B], need to add dimension
-        scores_expanded = scores[:, None].repeat(1, num_pix).view(-1, 1)
+        # Standard semantic loss
+        sem_loss_standard = F.cross_entropy(
+            sem_pred_formatted,  # (B, 4, H, W)
+            semantic_gt.long(),  # (B, H, W)
+            reduction="none",
+        )
 
-    sem_loss = sem_loss * scores_expanded
+        # Apply valid pixel mask and image scores
+        sem_loss_standard = sem_loss_standard * valid_pix
+        sem_loss_standard = (sem_loss_standard.sum((1, 2)) / (valid_pix.sum((1, 2)) + 1e-6)) * scores
+        sem_loss_standard = sem_loss_standard.mean()
 
-    sem_loss = sem_loss.sum() / valid_pix.sum()
-    return sem_loss
+        # ================================================================
+        # EDGE-AWARE LOSS (only for full images)
+        # ================================================================
+        if edge_weight > 0.0:
+            try:
+                import kornia.filters
 
+                # Detect edges in ground truth mask
+                mask_for_edges = semantic_gt.float().unsqueeze(1)  # (B, 1, H, W)
 
+                # Sobel edge detection
+                edges = kornia.filters.sobel(mask_for_edges)  # (B, 1, H, W)
+                edges = edges.squeeze(1)  # (B, H, W)
+
+                # Threshold to binary edge mask
+                edge_mask = (edges > 0.1).float()
+
+                # Edge-weighted loss
+                sem_loss_edge = F.cross_entropy(
+                    sem_pred_formatted,
+                    semantic_gt.long(),
+                    reduction="none",
+                )
+
+                # Apply edge mask and valid pixels
+                sem_loss_edge = sem_loss_edge * edge_mask * valid_pix
+
+                # Normalize by edge pixel count
+                edge_count = (edge_mask * valid_pix).sum((1, 2)) + 1e-6
+                sem_loss_edge = (sem_loss_edge.sum((1, 2)) / edge_count) * scores
+                sem_loss_edge = sem_loss_edge.mean()
+
+                # Combine standard + edge-weighted
+                total_loss = sem_loss_standard + edge_weight * sem_loss_edge
+
+                return total_loss
+
+            except ImportError:
+                print("WARNING: kornia not installed, edge_weight ignored")
+                return sem_loss_standard
+            except Exception as e:
+                print(f"WARNING: Edge detection failed: {e}, using standard loss")
+                return sem_loss_standard
+        else:
+            return sem_loss_standard
 def get_mano_cano_loss(pred_sdf, gt_sdf, limit, scores):
     pred_sdf = torch.clamp(pred_sdf, -limit, limit)
     gt_sdf = torch.clamp(gt_sdf, -limit, limit)

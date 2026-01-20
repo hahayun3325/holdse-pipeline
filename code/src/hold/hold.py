@@ -2083,6 +2083,29 @@ class HOLD(pl.LightningModule):
         loss_output = self.loss(batch, model_outputs)
         total_loss = loss_output["loss"]  # base HOLD loss
 
+        # ✅ ADD THIS BLOCK (NEW - lines 2085-2100):
+        # ================================================================
+        # LOG STANDARD LOSS COMPONENTS
+        # ================================================================
+        # Log individual components from loss.py for monitoring
+        if self.global_step % 10 == 0:  # Log every 10 steps
+            for key in ['loss/rgb', 'loss/sem', 'loss/eikonal', 'loss/mano_cano',
+                        'loss/opacity_sparse']:
+                if key in loss_output:
+                    value = loss_output[key]
+                    if isinstance(value, torch.Tensor):
+                        self.log(key, value.detach().item(), prog_bar=False)
+
+            # Console logging for verification
+            if 'loss/sem' in loss_output:
+                logger.info(
+                    f"[Standard Losses - Step {self.global_step}] "
+                    f"RGB={loss_output.get('loss/rgb', 0.0):.6f}, "
+                    f"Sem={loss_output.get('loss/sem', 0.0):.6f}, "
+                    f"Eikonal={loss_output.get('loss/eikonal', 0.0):.6f}"
+                )
+        # ================================================================
+
         # ================================================================
         # ✅ OBJECT SMOOTHNESS REGULARIZATION
         # ================================================================

@@ -243,7 +243,8 @@ dataset:
 # ================================================================
 loss:
   w_rgb: 1.0
-  w_mask: 0.1
+  w_mask: 0.3              # CHANGED: from 0.1
+  w_mask_edge: 0.1         # NEW: Add this line
   w_eikonal: 1.0
   w_smooth: 0.005
   w_temporal: 1.0

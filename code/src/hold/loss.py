@@ -35,6 +35,43 @@ class Loss(nn.Module):
         self.im_w = None
         self.im_h = None
 
+        # DEBUG: Print config structure
+        print(f"[DEBUG INIT] args type: {type(args)}")
+        print(f"[DEBUG INIT] args has __dict__: {hasattr(args, '__dict__')}")
+
+        if hasattr(args, '__dict__'):
+            print(f"[DEBUG INIT] args keys: {list(vars(args).keys())[:20]}")  # First 20 keys
+
+        # Check for w_mask_edge at top level
+        print(f"[DEBUG INIT] hasattr(args, 'w_mask_edge'): {hasattr(args, 'w_mask_edge')}")
+
+        # Check for nested loss config (SAFE)
+        has_loss_attr = hasattr(args, 'loss')
+        print(f"[DEBUG INIT] hasattr(args, 'loss'): {has_loss_attr}")
+
+        if has_loss_attr:
+            try:
+                loss_keys = list(vars(args.loss).keys()) if hasattr(args.loss, '__dict__') else []
+                print(f"[DEBUG INIT] args.loss keys: {loss_keys[:20]}")
+                print(f"[DEBUG INIT] hasattr(args.loss, 'w_mask_edge'): {hasattr(args.loss, 'w_mask_edge')}")
+            except Exception as e:
+                print(f"[DEBUG INIT] Error accessing args.loss: {e}")
+
+        # Extract edge weight from config (SAFE)
+        try:
+            if hasattr(args, 'w_mask_edge'):
+                self.edge_weight = args.w_mask_edge
+                print(f"[DEBUG INIT] Found w_mask_edge (flat): {self.edge_weight}")
+            elif hasattr(args, 'loss') and hasattr(args.loss, 'w_mask_edge'):
+                self.edge_weight = args.loss.w_mask_edge
+                print(f"[DEBUG INIT] Found w_mask_edge (nested): {self.edge_weight}")
+            else:
+                self.edge_weight = 0.1
+                print(f"[WARN] w_mask_edge not found in config, using default: {self.edge_weight}")
+        except Exception as e:
+            print(f"[ERROR] Failed to read w_mask_edge: {e}")
+            self.edge_weight = 0.1
+
     def forward(self, batch, model_outputs):
         """Compute standard HOLD losses.
 
@@ -56,6 +93,10 @@ class Loss(nn.Module):
             idx = idx.unsqueeze(0)
 
         image_scores = torch.ones(idx.shape[0]).float().to(device)
+
+        # ✅ ADD HERE (after line 95):
+        # Extract training progress for weight scheduling
+        progress = min(self.milestone, model_outputs.get("step", 0))
 
         # Get image dimensions
         if self.im_w is None:
@@ -140,13 +181,37 @@ class Loss(nn.Module):
 
         # Semantic segmentation loss
         if "semantics" in model_outputs:
+            sem_pred = model_outputs["semantics"]  # [N, 4] where N = num pixels
+
+            # ✅ FIX: Flatten mask_gt to match sem_pred
+            if "gt.mask" in batch:
+                mask_gt_sem = batch["gt.mask"].view(-1).long()  # Flatten [2, 128] → [256]
+            elif "mask" in batch:
+                mask_gt_sem = batch["mask"].view(-1).long()
+            else:
+                # Fallback: create dummy mask
+                mask_gt_sem = torch.zeros(sem_pred.shape[0], device=device).long()
+
+            # ✅ VALIDATION: Ensure shapes match
+            assert mask_gt_sem.shape[0] == sem_pred.shape[0], \
+                f"Semantic loss shape mismatch: mask {mask_gt_sem.shape} vs pred {sem_pred.shape}"
+
             sem_loss = loss_terms.get_sem_loss(
-                model_outputs["semantics"], mask_gt, valid_pix, image_scores
+                sem_pred,
+                mask_gt_sem,           # ← Now [256] matches sem_pred
+                valid_pix[:sem_pred.shape[0]],  # Match length
+                image_scores,
+                edge_weight=self.edge_weight,
             )
-            # Progressive weighting
-            progress = min(self.milestone, model_outputs.get("step", 0))
+
+            # Standard semantic weight scheduling
             w_sem = torch.linspace(1.1, 0.1, self.milestone + 1)[progress]
+
+            # Apply weight and store
             loss_dict["loss/sem"] = sem_loss * w_sem
+
+            # ✅ LOG: Confirm semantic loss is being computed
+            print(f"[DEBUG SEM LOSS] Value: {sem_loss.item():.6f}, Weight: {w_sem:.6f}, Weighted: {(sem_loss * w_sem).item():.6f}")
 
         # Opacity sparse loss
         opacity_sparse_loss = 0.0
