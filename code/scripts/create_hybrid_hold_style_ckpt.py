@@ -1,4 +1,4 @@
-# create_hybrid_c3b7a8352.py
+# create_hybrid_hold_style_ckpt.py
 # Immediate: Apply Hybrid Fix to New Checkpoint
 import numpy as np
 import sys
@@ -6,7 +6,7 @@ sys.path.insert(0, '.')
 sys.path.insert(0, '..')
 
 # Load NEW checkpoint's misc
-new_misc = np.load('logs/c3b7a8352/misc/000056000.npy', allow_pickle=True).item()
+new_misc = np.load('logs/43b4b8c06/misc/000056000.npy', allow_pickle=True).item()
 
 # Load official canonical mesh
 official_misc = np.load('/home/fredcui/Projects/hold-master/code/logs/cb20a1702/misc/000080000.npy',
@@ -24,7 +24,7 @@ hybrid = {
 }
 
 # Save for official HOLD evaluation
-np.save('/home/fredcui/Projects/hold-master/code/logs/c3b7a8352/misc/000056000.npy',
+np.save('/home/fredcui/Projects/hold-master/code/logs/43b4b8c06/misc/000056000.npy',
         hybrid)
 
 print("✅ Created hybrid: New checkpoint + official canonical mesh")

@@ -37,6 +37,7 @@ import gc
 from src.utils.memory_profiler import MemoryProfiler
 import subprocess
 from src.hold.loss_terms import get_smoothness_loss
+from src.hold.geometric_losses import normal_consistency_loss, depth_smoothness_loss
 
 # ========================================================================
 # PHASE 2: GHOP VALIDATION FUNCTION
@@ -2083,28 +2084,93 @@ class HOLD(pl.LightningModule):
         loss_output = self.loss(batch, model_outputs)
         total_loss = loss_output["loss"]  # base HOLD loss
 
-        # ✅ ADD THIS BLOCK (NEW - lines 2085-2100):
         # ================================================================
-        # LOG STANDARD LOSS COMPONENTS
+        # STEP 2: SELF-SUPERVISED GEOMETRIC LOSSES
         # ================================================================
-        # Log individual components from loss.py for monitoring
-        if self.global_step % 10 == 0:  # Log every 10 steps
-            for key in ['loss/rgb', 'loss/sem', 'loss/eikonal', 'loss/mano_cano',
-                        'loss/opacity_sparse']:
-                if key in loss_output:
-                    value = loss_output[key]
-                    if isinstance(value, torch.Tensor):
-                        self.log(key, value.detach().item(), prog_bar=False)
+        geometric_loss = torch.tensor(0.0, device=total_loss.device, requires_grad=True)
 
-            # Console logging for verification
-            if 'loss/sem' in loss_output:
-                logger.info(
-                    f"[Standard Losses - Step {self.global_step}] "
-                    f"RGB={loss_output.get('loss/rgb', 0.0):.6f}, "
-                    f"Sem={loss_output.get('loss/sem', 0.0):.6f}, "
-                    f"Eikonal={loss_output.get('loss/eikonal', 0.0):.6f}"
-                )
-        # ================================================================
+        # 1. Normal Consistency
+        if hasattr(self.model, 'servers') and 'object' in self.model.servers:
+            object_server = self.model.servers['object']
+            if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'sdf_grid'):
+                normal_loss = normal_consistency_loss(object_server.object_model.sdf_grid)
+                geometric_loss = geometric_loss + self.args.w_normal_consistency * normal_loss
+                self.log('loss/normal_consistency', normal_loss.item())
+            elif self.global_step == 0:
+                logger.warning("⚠️ Object model has no 'sdf_grid' - skipping normal consistency")
+
+        # 2. Depth Smoothness (edge-aware) - FIXED VERSION
+        depth_key = None
+        for key in ['depth', 'right.depth', 'object.depth', 'depth_map', 'z_vals']:
+            if key in model_outputs:
+                depth_key = key
+                break
+
+        rgb_key = None
+        for key in ['gt.rgb', 'rgb', 'target_rgb', 'image']:
+            if key in batch:
+                rgb_key = key
+                break
+
+        if depth_key and rgb_key:
+            try:
+                rendered_depth = model_outputs[depth_key]
+                image_rgb = batch[rgb_key]
+
+                # Handle per-node depth (e.g., 'right.depth')
+                if rendered_depth.dim() == 1:
+                    # Single depth value per sample, skip smoothness
+                    pass
+                # ✅ ADD THIS BLOCK:
+                # Validate depth format for spatial smoothness
+                elif rendered_depth.dim() == 2 and rendered_depth.shape[1] == 1:
+                    # Per-ray depth [N_rays, 1] - skip spatial smoothness
+                    if self.global_step == 0:
+                        logger.warning(
+                            f"⚠️ Depth smoothness disabled: per-ray rendering "
+                            f"(shape={rendered_depth.shape}) incompatible with spatial gradients. "
+                            f"Use normal consistency + GSD instead."
+                        )
+                    # Skip this loss - proceed to next section
+                elif rendered_depth.dim() >= 2:
+                    # Ensure both tensors have compatible shapes
+                    if rendered_depth.shape[:2] != image_rgb.shape[:2]:
+                        # Reshape if needed
+                        H, W = image_rgb.shape[:2]
+                        if rendered_depth.numel() == H * W:
+                            rendered_depth = rendered_depth.reshape(H, W)
+
+                    depth_smooth_loss = depth_smoothness_loss(rendered_depth, image_rgb)
+                    geometric_loss = geometric_loss + self.args.w_depth_smoothness * depth_smooth_loss
+                    self.log('loss/depth_smoothness', depth_smooth_loss.item())
+
+                    if self.global_step % 100 == 0 and geometric_loss.item() > 0:
+                        logger.info(f"[Geometric Loss] Step {self.global_step}: {geometric_loss.item():.6f}")
+                    elif self.global_step % 100 == 0:
+                        logger.debug(
+                            f"[Geometric Loss] Step {self.global_step}: 0.000000 "
+                            f"(normal_consistency skipped, depth_smoothness incompatible with ray rendering)"
+                        )
+            except Exception as e:
+                if self.global_step == 0:
+                    logger.error(f"❌ Depth smoothness failed: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+        elif self.global_step == 0:
+            logger.warning(f"⚠️ Depth smoothness skipped:")
+            logger.warning(f"   depth_key found: {depth_key}")
+            logger.warning(f"   rgb_key found: {rgb_key}")
+            logger.warning(f"   Available depth keys: {[k for k in model_outputs.keys() if 'depth' in k.lower()]}")
+            logger.warning(f"   Available rgb keys: {[k for k in batch.keys() if 'rgb' in k.lower() or 'image' in k.lower()]}")
+
+        # 3. Template Chamfer (only after warmup)
+        if self.global_step > 20000:
+            # TODO: Implement in Step 3 after verifying mesh extraction works
+            pass
+
+        # Add to total loss (FIXED variable name)
+        total_loss = total_loss + geometric_loss
+        loss_output['geometric_loss'] = geometric_loss.item()
 
         # ================================================================
         # ✅ OBJECT SMOOTHNESS REGULARIZATION
@@ -3372,58 +3438,6 @@ class HOLD(pl.LightningModule):
             return float(x) if x is not None else 0.0
 
         # ====================================================================
-        # DEBUG: Loss Composition Logging (Every 100 steps)
-        # ====================================================================
-        if self.global_step % 100 == 0:
-            # Extract loss components
-            loss_base = loss_output.get('loss/rgb', torch.tensor(0.0))
-            loss_sds_raw = loss_output.get('loss/sds_raw', torch.tensor(0.0))
-            loss_sds_weighted = loss_output.get('loss/sds_weighted', torch.tensor(0.0))
-            sds_weight = loss_output.get('sds_weight', 0.0)
-            loss_contact = loss_output.get('contact_loss', torch.tensor(0.0))
-            loss_temporal = loss_output.get('temporal_loss', torch.tensor(0.0))
-
-            # Convert to float
-            base_f = loss_base.item() if torch.is_tensor(loss_base) else loss_base
-            sds_raw_f = loss_sds_raw.item() if torch.is_tensor(loss_sds_raw) else loss_sds_raw
-            sds_weighted_f = loss_sds_weighted.item() if torch.is_tensor(loss_sds_weighted) else loss_sds_weighted
-            sds_weight_f = sds_weight.item() if torch.is_tensor(sds_weight) else sds_weight
-            contact_f = loss_contact.item() if torch.is_tensor(loss_contact) else loss_contact
-            temporal_f = loss_temporal.item() if torch.is_tensor(loss_temporal) else loss_temporal
-            final_f = total_loss.item() if torch.is_tensor(total_loss) else total_loss
-
-            # Calculate percentages
-            sds_pct = (sds_weighted_f / final_f * 100) if final_f > 0 else 0
-            rgb_pct = (base_f / final_f * 100) if final_f > 0 else 0
-
-            logger.info(
-                f"\n[Step {self.global_step}] Loss Breakdown:\n"
-                f"  RGB loss:              {base_f:.6f} ({rgb_pct:.1f}% of total)\n"
-                f"  SDS raw loss:          {sds_raw_f:.6f}\n"
-                f"  SDS weight:            {sds_weight_f:.4f}\n"
-                f"  SDS weighted loss:     {sds_weighted_f:.6f} ({sds_pct:.1f}% of total)\n"
-                f"  Contact loss:          {contact_f:.6f}\n"
-                f"  Temporal loss:         {temporal_f:.6f}\n"
-                f"  Final total:           {final_f:.6f}\n"
-                f"  --------------------------------------------------\n"
-                f"  Gradient balance:      RGB vs SDS = 1:{(sds_weighted_f/base_f if base_f > 0 else 0):.1f}"
-            )
-
-            # ✅ ADD THIS:
-            if 'object_smoothness' in loss_output:
-                smooth_val = loss_output['object_smoothness']
-                logger.info(f"  Object smoothness:     {smooth_val:.6f}")
-
-            # Log to tensorboard
-            try:
-                self.log('train/loss_total', final_f, prog_bar=True)
-                self.log('train/loss_base_rgb', base_f, prog_bar=False)
-                self.log('train/loss_ghop_sds', ghop_f, prog_bar=False)
-                self.log('train/loss_contact', contact_f, prog_bar=False)
-            except Exception as e:
-                logger.debug(f"Could not log losses to tensorboard: {e}")
-
-        # ====================================================================
         # CRITICAL: Check for Zero Loss at Phase Transitions
         # ====================================================================
         loss_value = total_loss.item() if total_loss.numel() > 0 else 0.0
@@ -3471,23 +3485,191 @@ class HOLD(pl.LightningModule):
             return {"loss": safe_zero}
 
         # ================================================================
-        # COMPREHENSIVE LOSS LOGGING - After all components computed
+        # UNIFIED LOSS LOGGING - Place at END of training_step (before return)
         # ================================================================
-        if (self.global_step % 50) == 0:
-            # Extract all loss components
-            rgb_loss = loss_output.get("loss/rgb", None)
-            ghop_loss = loss_output.get("loss_sds", None)  # From Phase 3
-            contact_loss = loss_output.get("contact_loss", None)  # From Phase 4
-            temporal_loss = loss_output.get("temporal_loss", None)  # From Phase 5
+        LOG_INTERVAL = 100  # Log comprehensive breakdown every 100 steps
+        CONSOLE_INTERVAL = 10  # Log key metrics to console every 10 steps
 
-            logger.debug(
-                f"[LOSS COMPONENTS] step={self.global_step} "
-                f"rgb={float(rgb_loss) if rgb_loss is not None else 'NA'} "
-                f"ghop={float(ghop_loss) if ghop_loss is not None else 'NA'} "
-                f"contact={float(contact_loss) if contact_loss is not None else 'NA'} "
-                f"temporal={float(temporal_loss) if temporal_loss is not None else 'NA'} "
-                f"total={float(total_loss):.4f}"
+        # -------------------------------------------------------------------
+        # 1. TENSORBOARD LOGGING (every step for all metrics)
+        # -------------------------------------------------------------------
+        self.log('train/loss_total', total_loss.item(), prog_bar=True)
+
+        # Base losses
+        if 'loss/rgb' in loss_output:
+            self.log('train/loss_rgb', loss_output['loss/rgb'], prog_bar=False)
+        if 'loss/mask' in loss_output:
+            self.log('train/loss_mask', loss_output['loss/mask'], prog_bar=False)
+        if 'loss/eikonal' in loss_output:
+            self.log('train/loss_eikonal', loss_output['loss/eikonal'], prog_bar=False)
+
+        # Geometric losses (Step 2)
+        if 'geometric_loss' in loss_output:
+            self.log('train/geometric_loss', loss_output['geometric_loss'], prog_bar=False)
+        if 'loss/normal_consistency' in loss_output:
+            self.log('train/normal_consistency', loss_output['loss/normal_consistency'], prog_bar=False)
+        if 'loss/depth_smoothness' in loss_output:
+            self.log('train/depth_smoothness', loss_output['loss/depth_smoothness'], prog_bar=False)
+
+        # Object smoothness (if active)
+        if 'object_smoothness' in loss_output:
+            self.log('train/object_smoothness', loss_output['object_smoothness'], prog_bar=False)
+
+        # Phase 3: SDS losses
+        if 'loss/sds_weighted' in loss_output:
+            self.log('train/sds_weighted', loss_output['loss/sds_weighted'], prog_bar=True)
+            self.log('train/sds_raw', loss_output.get('loss/sds_raw', 0.0), prog_bar=False)
+            self.log('train/sds_weight', loss_output.get('sds_weight', 0.0), prog_bar=False)
+
+        # Phase 4: Contact loss
+        if 'contact_loss' in loss_output:
+            self.log('train/contact_loss', loss_output['contact_loss'], prog_bar=False)
+
+        # Phase 5: Temporal loss
+        if 'temporal_loss' in loss_output:
+            self.log('train/temporal_loss', loss_output['temporal_loss'], prog_bar=False)
+
+        # -------------------------------------------------------------------
+        # 2. CONSOLE LOGGING - Key Metrics (every 10 steps)
+        # -------------------------------------------------------------------
+        if self.global_step % CONSOLE_INTERVAL == 0:
+            # Extract values
+            rgb_val = loss_output.get('loss/rgb', 0.0)
+            rgb_val = rgb_val.item() if torch.is_tensor(rgb_val) else rgb_val
+
+            total_val = total_loss.item()
+
+            logger.info(
+                f"[Step {self.global_step:6d}] "
+                f"Total: {total_val:.6f} | "
+                f"RGB: {rgb_val:.6f}"
             )
+
+        # -------------------------------------------------------------------
+        # 3. COMPREHENSIVE BREAKDOWN (every 100 steps)
+        # -------------------------------------------------------------------
+        if self.global_step % LOG_INTERVAL == 0:
+            # Helper function
+            def to_float(x):
+                if isinstance(x, torch.Tensor):
+                    return x.item() if x.numel() > 0 else 0.0
+                return float(x) if x is not None else 0.0
+
+            # Extract all components
+            total_f = to_float(total_loss)
+            rgb_f = to_float(loss_output.get('loss/rgb', 0.0))
+            mask_f = to_float(loss_output.get('loss/mask', 0.0))
+            eikonal_f = to_float(loss_output.get('loss/eikonal', 0.0))
+            geometric_f = to_float(loss_output.get('geometric_loss', 0.0))
+            normal_f = to_float(loss_output.get('loss/normal_consistency', 0.0))
+            depth_smooth_f = to_float(loss_output.get('loss/depth_smoothness', 0.0))
+            obj_smooth_f = to_float(loss_output.get('object_smoothness', 0.0))
+            sds_raw_f = to_float(loss_output.get('loss/sds_raw', 0.0))
+            sds_weighted_f = to_float(loss_output.get('loss/sds_weighted', 0.0))
+            sds_weight_f = to_float(loss_output.get('sds_weight', 0.0))
+            contact_f = to_float(loss_output.get('contact_loss', 0.0))
+            temporal_f = to_float(loss_output.get('temporal_loss', 0.0))
+
+            # Calculate percentages (avoid division by zero)
+            if total_f > 1e-8:
+                rgb_pct = (rgb_f / total_f) * 100
+                sds_pct = (sds_weighted_f / total_f) * 100
+                contact_pct = (contact_f / total_f) * 100
+                temporal_pct = (temporal_f / total_f) * 100
+                geometric_pct = (geometric_f / total_f) * 100
+            else:
+                rgb_pct = sds_pct = contact_pct = temporal_pct = geometric_pct = 0.0
+
+            # Phase status
+            phase3_active = (
+                    hasattr(self, 'phase3_enabled') and self.phase3_enabled and
+                    self.global_step >= getattr(self, 'phase3_start_iter', 0) and
+                    self.global_step < getattr(self, 'phase3_end_iter', 99999)
+            )
+            phase4_active = (
+                    hasattr(self, 'phase4_enabled') and self.phase4_enabled and
+                    self.contact_start_iter <= self.global_step < self.contact_end_iter
+            )
+            phase5_active = (
+                    hasattr(self, 'phase5_enabled') and self.phase5_enabled and
+                    self.global_step >= self.phase5_start_iter
+            )
+
+            # Build phase indicator
+            active_phases = []
+            if phase3_active:
+                active_phases.append(f"P3[SDS]")
+            if phase4_active:
+                active_phases.append(f"P4[Contact]")
+            if phase5_active:
+                active_phases.append(f"P5[Temporal]")
+            phase_str = " + ".join(active_phases) if active_phases else "P1[Base]"
+
+            # Print comprehensive breakdown
+            logger.info("=" * 80)
+            logger.info(f"LOSS BREAKDOWN - Step {self.global_step} - {phase_str}")
+            logger.info("=" * 80)
+            logger.info(f"  TOTAL LOSS:          {total_f:.6f}")
+            logger.info("-" * 80)
+            logger.info(f"  Base Components:")
+            logger.info(f"    RGB:               {rgb_f:.6f}  ({rgb_pct:5.1f}%)")
+            logger.info(f"    Mask:              {mask_f:.6f}")
+            logger.info(f"    Eikonal:           {eikonal_f:.6f}")
+            logger.info("-" * 80)
+            logger.info(f"  Step 2 - Geometric Regularization:")
+            logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")
+            logger.info(f"      Normal Consist:  {normal_f:.6f}")
+            logger.info(f"      Depth Smooth:    {depth_smooth_f:.6f}")
+            logger.info(f"    Object Smooth:     {obj_smooth_f:.6f}")
+
+            if phase3_active:
+                logger.info("-" * 80)
+                logger.info(f"  Phase 3 - SDS Diffusion:")
+                logger.info(f"    SDS (raw):         {sds_raw_f:.6f}")
+                logger.info(f"    SDS weight:        {sds_weight_f:.4f}")
+                logger.info(f"    SDS (weighted):    {sds_weighted_f:.6f}  ({sds_pct:5.1f}%)")
+
+            if phase4_active:
+                logger.info("-" * 80)
+                logger.info(f"  Phase 4 - Contact:")
+                logger.info(f"    Contact Loss:      {contact_f:.6f}  ({contact_pct:5.1f}%)")
+
+            if phase5_active:
+                logger.info("-" * 80)
+                logger.info(f"  Phase 5 - Temporal:")
+                logger.info(f"    Temporal Loss:     {temporal_f:.6f}  ({temporal_pct:5.1f}%)")
+
+            logger.info("=" * 80)
+
+            # Gradient balance check (only if SDS active)
+            if sds_weighted_f > 0 and rgb_f > 0:
+                gradient_ratio = sds_weighted_f / rgb_f
+                logger.info(f"  Gradient Balance:    SDS/RGB = {gradient_ratio:.2f}x")
+                if gradient_ratio > 5.0:
+                    logger.warning(f"    ⚠️  SDS dominates - may prevent RGB convergence")
+                elif gradient_ratio < 0.2:
+                    logger.warning(f"    ⚠️  RGB dominates - SDS guidance may be weak")
+
+            logger.info("=" * 80)
+
+        # -------------------------------------------------------------------
+        # 4. ZERO LOSS WARNING (critical safety check)
+        # -------------------------------------------------------------------
+        loss_value = total_loss.item() if total_loss.numel() > 0 else 0.0
+
+        if abs(loss_value) < 1e-8:  # Effectively zero
+            logger.error("!" * 80)
+            logger.error(f"CRITICAL: ZERO LOSS DETECTED at step {self.global_step}")
+            logger.error("!" * 80)
+            logger.error(f"  Phase 3 active: {phase3_active}")
+            logger.error(f"  Phase 4 active: {phase4_active}")
+            logger.error(f"  Phase 5 active: {phase5_active}")
+            logger.error(f"  Loss components:")
+            logger.error(f"    - Base RGB: {to_float(loss_output.get('loss/rgb', 0.0)):.6f}")
+            logger.error(f"    - GHOP:     {to_float(loss_output.get('ghop_loss', 0.0)):.6f}")
+            logger.error(f"    - Contact:  {to_float(loss_output.get('contact_loss', 0.0)):.6f}")
+            logger.error(f"    - Temporal: {to_float(loss_output.get('temporal_loss', 0.0)):.6f}")
+            logger.error("!" * 80)
 
         # Get optimizer
         opt = self.optimizers()
