@@ -2089,17 +2089,51 @@ class HOLD(pl.LightningModule):
         # ================================================================
         geometric_loss = torch.tensor(0.0, device=total_loss.device, requires_grad=True)
 
-        # 1. Normal Consistency
-        if hasattr(self.model, 'servers') and 'object' in self.model.servers:
-            object_server = self.model.servers['object']
-            if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'sdf_grid'):
-                normal_loss = normal_consistency_loss(object_server.object_model.sdf_grid)
-                geometric_loss = geometric_loss + self.args.w_normal_consistency * normal_loss
-                self.log('loss/normal_consistency', normal_loss.item())
-            elif self.global_step == 0:
-                logger.warning("⚠️ Object model has no 'sdf_grid' - skipping normal consistency")
+        # Diagnostic: Check model structure at first step
+        if self.global_step == 0:
+            logger.info(f"[Config Debug] Has opt.loss: {hasattr(self.opt, 'loss')}")
+            if hasattr(self.opt, 'loss'):
+                logger.info(f"[Config Debug] Loss config keys: {list(self.opt.loss.keys())[:20]}")
+                logger.info(f"[Config Debug] w_chamfer: {self.opt.loss.get('w_chamfer', 'NOT FOUND')}")
+                logger.info(
+                    f"[Config Debug] chamfer_start_step: {self.opt.loss.get('chamfer_start_step', 'NOT FOUND')}")
 
-        # 2. Depth Smoothness (edge-aware) - FIXED VERSION
+            logger.info(f"[Loss Debug] Loss object type: {type(self.loss).__name__}")
+            logger.info(f"[Loss Debug] Loss attributes: {[attr for attr in dir(self.loss) if not attr.startswith('_')][:30]}")
+
+            # Check specific weights
+            logger.info(f"[Loss Debug] Has w_normal_consistency: {hasattr(self.loss, 'w_normal_consistency')}")
+            if hasattr(self.loss, 'w_normal_consistency'):
+                logger.info(f"[Loss Debug] w_normal_consistency value: {self.loss.w_normal_consistency}")
+
+            logger.info(f"[Loss Debug] Has w_chamfer: {hasattr(self.loss, 'w_chamfer')}")
+            if hasattr(self.loss, 'w_chamfer'):
+                logger.info(f"[Loss Debug] w_chamfer value: {self.loss.w_chamfer}")
+        # 1. Normal Consistency
+        # Model uses 'nodes', not 'servers' - confirmed via diagnostics
+        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+            object_node = self.model.nodes['object']
+
+            # nodes contain server objects
+            if hasattr(object_node, 'server'):
+                object_server = object_node.server
+
+                if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'sdf_grid'):
+                    normal_loss = normal_consistency_loss(object_server.object_model.sdf_grid)
+                    geometric_loss = geometric_loss + self.opt.loss.w_normal_consistency * normal_loss
+
+                    if self.global_step % 100 == 0:
+                        logger.info(f"[Normal Consistency] Step {self.global_step}: {normal_loss.item():.6f}")
+
+                    self.log('loss/normal_consistency', normal_loss.item())
+                elif self.global_step == 0:
+                    logger.warning("⚠️ Object server has no 'sdf_grid' - skipping normal consistency")
+            elif self.global_step == 0:
+                logger.warning("⚠️ Object node has no 'server' - skipping normal consistency")
+        elif self.global_step == 0:
+            logger.warning("⚠️ Model has no 'nodes' or no 'object' node - Normal Consistency DISABLED")
+
+        # 2. Depth Smoothness (edge-aware) - UNCHANGED
         depth_key = None
         for key in ['depth', 'right.depth', 'object.depth', 'depth_map', 'z_vals']:
             if key in model_outputs:
@@ -2121,7 +2155,6 @@ class HOLD(pl.LightningModule):
                 if rendered_depth.dim() == 1:
                     # Single depth value per sample, skip smoothness
                     pass
-                # ✅ ADD THIS BLOCK:
                 # Validate depth format for spatial smoothness
                 elif rendered_depth.dim() == 2 and rendered_depth.shape[1] == 1:
                     # Per-ray depth [N_rays, 1] - skip spatial smoothness
@@ -2141,7 +2174,7 @@ class HOLD(pl.LightningModule):
                             rendered_depth = rendered_depth.reshape(H, W)
 
                     depth_smooth_loss = depth_smoothness_loss(rendered_depth, image_rgb)
-                    geometric_loss = geometric_loss + self.args.w_depth_smoothness * depth_smooth_loss
+                    geometric_loss = geometric_loss + self.opt.loss.w_depth_smoothness * depth_smooth_loss
                     self.log('loss/depth_smoothness', depth_smooth_loss.item())
 
                     if self.global_step % 100 == 0 and geometric_loss.item() > 0:
@@ -2163,10 +2196,65 @@ class HOLD(pl.LightningModule):
             logger.warning(f"   Available depth keys: {[k for k in model_outputs.keys() if 'depth' in k.lower()]}")
             logger.warning(f"   Available rgb keys: {[k for k in batch.keys() if 'rgb' in k.lower() or 'image' in k.lower()]}")
 
-        # 3. Template Chamfer (only after warmup)
-        if self.global_step > 20000:
-            # TODO: Implement in Step 3 after verifying mesh extraction works
-            pass
+        # 3. Template Chamfer (activation step configured in YAML)
+        # Get Chamfer activation threshold from config (with fallback for backward compatibility)
+        # NOTE: Parameters are loaded from 'loss:' section and flattened to self.args
+        chamfer_start_step = getattr(self.opt.loss, 'chamfer_start_step', 20000)  # Default: 20000 for 30-epoch
+        chamfer_weight = getattr(self.opt.loss, 'w_chamfer', 0.05)  # Default: 0.05
+
+        # Log configuration on first step
+        if self.global_step == 0:
+            logger.info(f"[Chamfer Config] Activation threshold: step {chamfer_start_step}")
+            logger.info(f"[Chamfer Config] Weight: {chamfer_weight}")
+            logger.info(f"[Chamfer Config] Available args: {list(vars(self.args).keys())[:30]}")  # Debug: show available params
+
+        if self.global_step >= chamfer_start_step:  # FIXED: >= instead of >
+            try:
+                # Verify methods exist
+                if not hasattr(self, '_extract_hand_mesh_for_chamfer'):
+                    if self.global_step == chamfer_start_step:  # Log once
+                        logger.error("❌ Method '_extract_hand_mesh_for_chamfer' not implemented!")
+                    raise NotImplementedError("_extract_hand_mesh_for_chamfer")
+
+                if not hasattr(self, '_get_template_mesh'):
+                    if self.global_step == chamfer_start_step:  # Log once
+                        logger.error("❌ Method '_get_template_mesh' not implemented!")
+                    raise NotImplementedError("_get_template_mesh")
+
+                # Extract current hand mesh (with gradients)
+                hand_verts = self._extract_hand_mesh_for_chamfer(batch)  # [B, 778, 3]
+
+                # Get canonical template (constant reference)
+                template_verts = self._get_template_mesh(batch)  # [B, 778, 3]
+
+                # Verify shapes
+                if hand_verts is None or template_verts is None:
+                    raise ValueError(f"Mesh extraction failed: hand_verts={hand_verts}, template_verts={template_verts}")
+
+                # Compute bidirectional Chamfer distance
+                from pytorch3d.loss import chamfer_distance
+                chamfer_loss, _ = chamfer_distance(hand_verts, template_verts)
+
+                # Add to geometric loss with configured weight
+                geometric_loss = geometric_loss + chamfer_weight * chamfer_loss
+                loss_output['loss/chamfer'] = chamfer_loss.item()
+
+                if self.global_step % 100 == 0:
+                    logger.info(f"✅ [Chamfer Loss] Step {self.global_step}: {chamfer_loss.item():.6f}")
+
+            except NotImplementedError as e:
+                # Method doesn't exist - log once and skip
+                pass
+
+            except Exception as e:
+                # Log ALL exceptions during first 5 activations
+                if self.global_step <= chamfer_start_step + 500 or self.global_step % 100 == 0:
+                    logger.error(f"❌ Template Chamfer failed at step {self.global_step}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
+                # Add zero loss to maintain gradient graph consistency
+                loss_output['loss/chamfer'] = 0.0
 
         # Add to total loss (FIXED variable name)
         total_loss = total_loss + geometric_loss
@@ -3510,6 +3598,8 @@ class HOLD(pl.LightningModule):
             self.log('train/normal_consistency', loss_output['loss/normal_consistency'], prog_bar=False)
         if 'loss/depth_smoothness' in loss_output:
             self.log('train/depth_smoothness', loss_output['loss/depth_smoothness'], prog_bar=False)
+        if 'loss/chamfer' in loss_output:  # ← ADD THIS
+            self.log('train/chamfer', loss_output['loss/chamfer'], prog_bar=False)
 
         # Object smoothness (if active)
         if 'object_smoothness' in loss_output:
@@ -3563,6 +3653,7 @@ class HOLD(pl.LightningModule):
             geometric_f = to_float(loss_output.get('geometric_loss', 0.0))
             normal_f = to_float(loss_output.get('loss/normal_consistency', 0.0))
             depth_smooth_f = to_float(loss_output.get('loss/depth_smoothness', 0.0))
+            chamfer_f = to_float(loss_output.get('loss/chamfer', 0.0))  # ← ADD THIS
             obj_smooth_f = to_float(loss_output.get('object_smoothness', 0.0))
             sds_raw_f = to_float(loss_output.get('loss/sds_raw', 0.0))
             sds_weighted_f = to_float(loss_output.get('loss/sds_weighted', 0.0))
@@ -3620,6 +3711,7 @@ class HOLD(pl.LightningModule):
             logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")
             logger.info(f"      Normal Consist:  {normal_f:.6f}")
             logger.info(f"      Depth Smooth:    {depth_smooth_f:.6f}")
+            logger.info(f"      Chamfer:         {chamfer_f:.6f}")  # ← ADD THIS
             logger.info(f"    Object Smooth:     {obj_smooth_f:.6f}")
 
             if phase3_active:
@@ -4425,6 +4517,219 @@ class HOLD(pl.LightningModule):
         )
 
         return hand_verts, hand_faces
+
+    def _get_template_mesh(self, batch):
+        """
+        Generate canonical MANO template for shape regularization.
+
+        This is self-supervised (no GT dependency) and prevents:
+        - Mesh collapse
+        - Wild deformations
+        - Non-hand-like geometries
+
+        Returns:
+            template_verts: [B, 778, 3] canonical MANO vertices
+        """
+        device = next(self.parameters()).device
+        # Try multiple RGB key variants
+        rgb_key = None
+        for key in ['gt.rgb', 'rgb', 'target_rgb', 'image']:
+            if key in batch:
+                rgb_key = key
+                break
+
+        if rgb_key is None:
+            raise ValueError(f"Cannot find RGB in batch. Available keys: {list(batch.keys())[:20]}")
+
+        batch_size = batch[rgb_key].shape[0]
+
+        # Canonical MANO: zero pose, mean shape, zero translation
+        zero_pose = torch.zeros(batch_size, 48, device=device)
+        mean_shape = torch.zeros(batch_size, 10, device=device)
+        zero_trans = torch.zeros(batch_size, 3, device=device)
+        scene_scale = torch.ones(batch_size, device=device)
+
+        # Get hand node's MANO server (match the iteration pattern)
+        hand_node = None
+        for node in self.model.nodes.values():
+            if 'right' in node.node_id.lower():
+                hand_node = node
+                break
+
+        if hand_node is None:
+            raise RuntimeError("Hand node 'right' not found for template generation")
+
+        # Generate template (no gradients needed - it's a constant reference)
+        with torch.no_grad():
+            mano_output = hand_node.server(
+                scene_scale,
+                zero_trans,
+                zero_pose,
+                mean_shape,
+                absolute=False
+            )
+
+        template_verts = mano_output['verts'] if isinstance(mano_output, dict) else mano_output
+
+        logger.debug(f"[Template] Generated canonical MANO: {template_verts.shape}")
+        return template_verts.detach()  # [B, 778, 3]
+
+    def _extract_hand_mesh_for_chamfer(self, batch):
+        """
+        Extract current hand mesh WITH GRADIENTS for Chamfer loss.
+
+        Key difference from _extract_hand_mesh():
+        - NO torch.no_grad() wrapper
+        - NO .detach() on vertices
+        - Returns only vertices (faces not needed for Chamfer)
+
+        Returns:
+            hand_verts: [B, 778, 3] with gradients attached
+        """
+        hand_node = None
+        for node in self.model.nodes.values():
+            if 'right' in node.node_id.lower():
+                hand_node = node
+                node_id = node.node_id
+                break
+
+        if hand_node is None:
+            raise ValueError("[Chamfer] No hand node found")
+
+        # Extract MANO parameters
+        fullpose_key = f"{node_id}.fullpose"
+        pose_key = f"{node_id}.pose"
+        global_orient_key = f"{node_id}.global_orient"
+        shape_key = f"{node_id}.betas"
+        trans_key = f"{node_id}.transl"
+
+        # ================================================================
+        # COPY FROM LINES 4328-4445 STARTS HERE
+        # ================================================================
+
+        # Extract pose (48-dim full pose)
+        full_pose = None
+
+        if fullpose_key in batch:
+            full_pose = batch[fullpose_key]
+            logger.debug(f"[Chamfer] Using {fullpose_key}: {full_pose.shape}")
+
+        elif global_orient_key in batch and pose_key in batch:
+            global_orient = batch[global_orient_key]
+            pose = batch[pose_key]
+            full_pose = torch.cat([global_orient, pose], dim=-1)
+            logger.debug(f"[Chamfer] Concatenated {global_orient_key} + {pose_key}: {full_pose.shape}")
+
+            # Fix: Ensure full_pose is 2D [B, 48] for MANO
+            if full_pose.ndim == 3:
+                B_orig, T_orig, num_params = full_pose.shape
+                full_pose = full_pose.reshape(B_orig * T_orig, num_params)
+                logger.debug(f"[Chamfer] Reshaped full_pose from 3D to 2D: {full_pose.shape}")
+
+        elif pose_key in batch:
+            pose = batch[pose_key]
+            batch_size = pose.shape[0]
+            device = pose.device
+            zero_global = torch.zeros(batch_size, 3, device=device)
+            full_pose = torch.cat([zero_global, pose], dim=-1)
+            logger.warning(f"[Chamfer] No global_orient found, using zeros")
+
+        else:
+            available_keys = [k for k in batch.keys() if node_id in k]
+            raise ValueError(
+                f"[Chamfer] Cannot find MANO pose in batch.\n"
+                f"  Tried keys: {fullpose_key}, {pose_key}, {global_orient_key}\n"
+                f"  Available keys for '{node_id}': {available_keys}"
+            )
+
+        # Extract shape parameters (betas)
+        mano_shape = batch.get(shape_key, None)
+
+        if mano_shape is None:
+            batch_size = full_pose.shape[0]
+            device = full_pose.device
+            mano_shape = torch.zeros(batch_size, 10, device=device)
+            logger.warning(f"[Chamfer] No shape parameters at {shape_key}, using mean shape")
+        else:
+            logger.debug(f"[Chamfer] Using {shape_key}: {mano_shape.shape}")
+
+        # Fix: Ensure mano_shape is 2D [B, 10]
+        if mano_shape.ndim == 3:
+            B_orig, T_orig, num_betas = mano_shape.shape
+            mano_shape = mano_shape.reshape(B_orig * T_orig, num_betas)
+            logger.debug(f"[Chamfer] Reshaped mano_shape from 3D to 2D: {mano_shape.shape}")
+
+        # Extract translation
+        mano_trans = batch.get(trans_key, None)
+
+        if mano_trans is None:
+            batch_size = full_pose.shape[0]
+            device = full_pose.device
+            mano_trans = torch.zeros(batch_size, 3, device=device)
+            logger.warning(f"[Chamfer] No translation at {trans_key}, using zero translation")
+        else:
+            logger.debug(f"[Chamfer] Using {trans_key}: {mano_trans.shape}")
+
+        # Fix: Ensure mano_trans is 2D [B, 3]
+        if mano_trans.ndim == 3:
+            B_orig, T_orig, coord_dim = mano_trans.shape
+            mano_trans = mano_trans.reshape(B_orig * T_orig, coord_dim)
+            logger.debug(f"[Chamfer] Reshaped mano_trans from 3D to 2D: {mano_trans.shape}")
+
+        # Extract scene_scale (required by MANOServer)
+        scene_scale = None
+
+        # Try to get from batch
+        scale_keys = [
+            f"{node_id}.scene_scale",
+            "scene_scale",
+            f"{node_id}.scale"
+        ]
+
+        for scale_key in scale_keys:
+            if scale_key in batch:
+                scene_scale = batch[scale_key]
+                logger.debug(f"[Chamfer] Using {scale_key}: {scene_scale.shape}")
+                break
+
+        # Try node attributes
+        if scene_scale is None and hasattr(hand_node, 'scene_scale'):
+            scene_scale = hand_node.scene_scale
+            logger.debug(f"[Chamfer] Using hand_node.scene_scale: {scene_scale}")
+
+        # Default to 1.0
+        if scene_scale is None:
+            batch_size = full_pose.shape[0]
+            device = full_pose.device
+            scene_scale = torch.ones(batch_size, device=device)
+            logger.warning("[Chamfer] No scene_scale found, using 1.0")
+
+        # Ensure scene_scale is correct shape
+        if scene_scale.dim() == 0:
+            batch_size = full_pose.shape[0]
+            scene_scale = scene_scale.unsqueeze(0).expand(batch_size)
+        elif scene_scale.shape[0] != full_pose.shape[0]:
+            batch_size = full_pose.shape[0]
+            scene_scale = scene_scale.view(-1)[0].unsqueeze(0).expand(batch_size)
+
+        # ================================================================
+        # COPY ENDS HERE
+        # ================================================================
+
+        # CRITICAL: No torch.no_grad() here! We need gradients!
+        mano_output = hand_node.server(
+            scene_scale,
+            mano_trans,
+            full_pose,
+            mano_shape,
+            absolute=False
+        )
+
+        # Extract vertices - keep gradients!
+        hand_verts = mano_output['verts'] if isinstance(mano_output, dict) else mano_output
+        # DON'T call .detach() - we need gradients to flow back to MANO params
+
+        return hand_verts  # [B, 778, 3] with requires_grad=True
 
     def _extract_object_mesh_from_sdf(self, batch):
         """Extract object mesh from implicit SDF via Marching Cubes."""
