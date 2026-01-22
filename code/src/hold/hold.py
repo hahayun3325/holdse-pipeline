@@ -1000,6 +1000,29 @@ class HOLD(pl.LightningModule):
 
             logger.info("[Phase 4] Disabled - configure phase4.enabled=true in config to enable\n")
 
+        # ============================================================
+        # OBJECT TEMPLATE CHAMFER: Load Templates
+        # ============================================================
+
+        obj_chamfer_enabled = getattr(self.opt.loss, 'w_obj_chamfer', 0.0) > 0
+        if obj_chamfer_enabled:
+            logger.info("=" * 70)
+            logger.info("OBJECT TEMPLATE CHAMFER: Loading Templates")
+            logger.info("=" * 70)
+
+            self.object_templates = self._load_object_templates()
+
+            if len(self.object_templates) == 0:
+                logger.error("Object Chamfer enabled but no templates loaded!")
+                logger.error("Set loss.w_obj_chamfer=0 or add templates to data/templates/")
+            else:
+                logger.info(f"Available categories: {list(self.object_templates.keys())}")
+
+            logger.info("=" * 70)
+        else:
+            self.object_templates = {}
+            logger.info("Object Template Chamfer: Disabled (w_obj_chamfer=0)")
+
         # ====================================================================
         # LOSS MODULE INITIALIZATION (Final Step)
         # ====================================================================
@@ -1267,6 +1290,76 @@ class HOLD(pl.LightningModule):
         self.profile_memory = True  # Set to False to disable
         # ✅ ADD: Setup and validate phase boundaries
         self.setup_phase_boundaries()
+
+        '''
+        Object Chamfer Debugging Section Temporary
+        '''
+        if self.global_step == 0 and len(self.object_templates) > 0:
+            logger.info("=" * 70)
+            logger.info("OBJECT TEMPLATE CHAMFER: Diagnostic")
+            logger.info("=" * 70)
+
+            for category, verts in self.object_templates.items():
+                logger.info(f"  {category}: {verts.shape[0]} vertices, device={verts.device}")
+
+            # Test Chamfer distance computation
+            try:
+                from pytorch3d.loss import chamfer_distance
+                test_verts = torch.randn(100, 3, device=self.device)
+                test_template = list(self.object_templates.values())[0]
+                test_chamfer, _ = chamfer_distance(
+                    test_verts.unsqueeze(0),
+                    test_template.unsqueeze(0)
+                )
+                logger.info(f"  Test Chamfer computation: {test_chamfer.item():.6f} ✅")
+            except Exception as e:
+                logger.error(f"  Test Chamfer FAILED: {e}")
+
+            logger.info("=" * 70)
+
+    def _load_object_templates(self):
+        """
+        Load preprocessed object templates for Chamfer loss.
+        Called during initialization if object Chamfer loss is enabled.
+        """
+        import os
+        from pathlib import Path
+
+        template_dir = Path("data/templates")
+
+        if not template_dir.exists():
+            logger.warning(f"Template directory {template_dir} not found. Object Chamfer disabled.")
+            return {}
+
+        templates = {}
+        template_files = list(template_dir.glob("*.pt"))
+
+        if len(template_files) == 0:
+            logger.warning(f"No .pt template files found in {template_dir}")
+            return {}
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        for template_path in template_files:
+            category = template_path.stem  # e.g., 'mug', 'bottle'
+
+            try:
+                # Load normalized vertices
+                vertices = torch.load(template_path, map_location=device)
+
+                # Validate shape
+                if vertices.dim() != 2 or vertices.shape[1] != 3:
+                    logger.warning(f"Invalid template shape for {category}: {vertices.shape}")
+                    continue
+
+                templates[category] = vertices
+                logger.debug(f"  Loaded template '{category}': {vertices.shape[0]} vertices")
+
+            except Exception as e:
+                logger.warning(f"Failed to load template {category}: {e}")
+
+        logger.info(f"Loaded {len(templates)} object templates from {template_dir}")
+        return templates
 
     def setup_phase_boundaries(self):
         """Validate and log phase boundaries (values already set from config)."""
@@ -2259,6 +2352,253 @@ class HOLD(pl.LightningModule):
         # Add to total loss (FIXED variable name)
         total_loss = total_loss + geometric_loss
         loss_output['geometric_loss'] = geometric_loss.item()
+
+        # ============================================================
+        # OBJECT TEMPLATE CHAMFER (New - Step 3A)
+        # ============================================================
+
+        # Object Template Chamfer
+        if self.global_step % 50 == 0:  # Log every 50 steps
+            logger.info(f"[Object Chamfer DEBUG - Step {self.global_step}]")
+            logger.info(f"  w_obj_chamfer: {getattr(self.opt.loss, 'w_obj_chamfer', 'NOT SET')}")
+            logger.info(f"  start_step: {getattr(self.opt.loss, 'obj_chamfer_start_step', 'NOT SET')}")
+            logger.info(
+                f"  Should activate: {self.global_step >= getattr(self.opt.loss, 'obj_chamfer_start_step', 20000)}")
+
+        obj_chamfer_weight = getattr(self.opt.loss, 'w_obj_chamfer', 0.0)
+        obj_chamfer_start = getattr(self.opt.loss, 'obj_chamfer_start_step', 20000)
+
+        if obj_chamfer_weight > 0 and self.global_step >= obj_chamfer_start:
+            if len(self.object_templates) == 0:
+                if self.global_step == obj_chamfer_start:
+                    logger.warning(
+                        "Object Chamfer enabled but no templates loaded. "
+                        "Run scripts/prepare_templates.py first."
+                    )
+            else:
+                # ============================================================
+                # INITIALIZE TRACKING VARIABLES (FIX: Define before use!)
+                # ============================================================
+                template_applied = False
+                obj_verts_list = None
+                obj_faces_list = None
+                obj_category = None
+
+                try:
+                    # ============================================================
+                    # STEP 1: Extract Object Category
+                    # ============================================================
+
+                    obj_category = None
+
+                    # Try multiple possible keys (dataset-dependent)
+                    category_keys = ['object_category', 'category', 'obj_name', 'object_name']
+                    for key in category_keys:
+                        if key in batch:
+                            obj_category = batch[key]
+                            break
+
+                    # ============================================================
+                    # UNWRAP NESTED TUPLES/LISTS RECURSIVELY (FIX)
+                    # ============================================================
+                    # Dataset may return:
+                    # - ('cheez-it box',)           → single-element tuple
+                    # - [('cheez-it box',)]         → list of tuples
+                    # - [[('cheez-it box',)]]       → nested list
+                    # We need to unwrap ALL layers until we get a string
+
+                    while isinstance(obj_category, (list, tuple)) and len(obj_category) > 0:
+                        obj_category = obj_category[0]
+
+                    # Handle tensor
+                    if isinstance(obj_category, torch.Tensor):
+                        obj_category = obj_category.item() if obj_category.numel() == 1 else obj_category[0].item()
+
+                    # NOW convert to string (after unwrapping)
+                    if obj_category is not None:
+                        # At this point obj_category should be a plain string like 'cheez-it box'
+                        # or 'Cheez-It Box' (with capitals)
+                        obj_category = str(obj_category).strip().lower()
+
+                        # Remove any lingering tuple artifacts (paranoid check)
+                        # "('cheez-it box',)" → "cheez-it box"
+                        obj_category = obj_category.strip("()\"' ")
+
+                        if self.global_step == obj_chamfer_start:
+                            logger.info(f"[Object Chamfer] Cleaned category: '{obj_category}'")
+
+                        # ============================================================
+                        # FUZZY CATEGORY NORMALIZATION
+                        # ============================================================
+                        category_to_template = {
+                            # Boxes
+                            'cheez-it box': 'cracker_box',
+                            'cheez-it cracker box': 'cracker_box',
+                            'cracker box': 'cracker_box',
+
+                            # Fruits
+                            'banana': 'banana',
+
+                            # Tools
+                            'power drill': 'power_drill',
+                            'drill': 'power_drill',
+
+                            # Bottles
+                            "french's mustard bottle": 'mustard_bottle',
+                            'mustard bottle': 'mustard_bottle',
+                            'mustard': 'mustard_bottle',
+
+                            # Generic boxes (map to gelatin_box as closest match)
+                            'game/media box': 'gelatin_box',
+                            'game/product box': 'gelatin_box',
+                            'game box': 'gelatin_box',
+                            'product box': 'gelatin_box',
+                            'small rectangular object': 'gelatin_box',
+                            'package box': 'gelatin_box',
+
+                            # Additional objects
+                            'chips can': 'chips_can',
+                            'pringles': 'chips_can',
+                            'tomato soup can': 'tomato_soup_can',
+                            'soup can': 'tomato_soup_can',
+                            'scissors': 'scissors',
+                            'hammer': 'hammer',
+                            'foam brick': 'foam_brick',
+                            'pear': 'pear',
+                            'strawberry': 'strawberry',
+                            'tennis ball': 'tennis_ball',
+                        }
+
+                        original_category = obj_category
+                        if obj_category in category_to_template:
+                            obj_category = category_to_template[obj_category]
+                            if self.global_step % 1000 == 0:
+                                logger.debug(f"[Object Chamfer] Mapped '{original_category}' → '{obj_category}'")
+
+                    # ============================================================
+                    # STEP 3: Check Template Availability & Compute Chamfer
+                    # ============================================================
+
+                    # Debugging at first step
+                    if self.global_step == obj_chamfer_start:
+                        logger.info(f"[Object Chamfer] Checking template for: '{obj_category}'")
+                        logger.info(f"[Object Chamfer] Available: {list(self.object_templates.keys())}")
+                        if obj_category in self.object_templates:
+                            logger.info(f"[Object Chamfer] ✅ Template FOUND for '{obj_category}'")
+                        else:
+                            logger.warning(f"[Object Chamfer] ⚠️  Template NOT FOUND for '{obj_category}'")
+
+
+
+                    # Check if template exists (correct check!)
+                    if obj_category in self.object_templates:
+                        # ============================================================
+                        # STEP 4: Extract Object Mesh
+                        # ============================================================
+                        obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
+
+                        if obj_verts_list and len(obj_verts_list) > 0:
+                            obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
+
+                            if obj_verts.shape[0] > 0:
+                                # ============================================================
+                                # STEP 5: Compute Template Chamfer Distance
+                                # ============================================================
+                                template_verts = self.object_templates[obj_category]
+
+                                # Normalize current mesh
+                                obj_verts_centered = obj_verts - obj_verts.mean(dim=0, keepdim=True)
+                                max_dist = obj_verts_centered.abs().max()
+
+                                if max_dist > 1e-6:
+                                    obj_verts_norm = obj_verts_centered / max_dist
+
+                                    from pytorch3d.loss import chamfer_distance
+
+                                    obj_chamfer_loss, _ = chamfer_distance(
+                                        obj_verts_norm.unsqueeze(0),
+                                        template_verts.unsqueeze(0),
+                                        point_reduction='mean',
+                                        batch_reduction='mean'
+                                    )
+
+                                    # ============================================================
+                                    # ADD TO LOSS (Critical!)
+                                    # ============================================================
+                                    geometric_loss = geometric_loss + obj_chamfer_weight * obj_chamfer_loss
+                                    loss_output['loss/obj_chamfer'] = obj_chamfer_loss.item()
+                                    template_applied = True
+
+                                    # Log every 100 steps
+                                    if self.global_step % 100 == 0:
+                                        logger.info(
+                                            f"✅ [Object Chamfer] Step {self.global_step}: "
+                                            f"loss={obj_chamfer_loss.item():.6f}, "
+                                            f"category={obj_category}, "
+                                            f"verts={obj_verts.shape[0]}/{template_verts.shape[0]}"
+                                        )
+                                else:
+                                    if self.global_step % 500 == 0:
+                                        logger.warning("[Object Chamfer] Object mesh degenerate (max_dist=0)")
+                            else:
+                                if self.global_step % 500 == 0:
+                                    logger.warning("[Object Chamfer] Empty object mesh extracted")
+                        else:
+                            if self.global_step % 500 == 0:
+                                logger.warning("[Object Chamfer] Mesh extraction returned None")
+                    else:
+                        # Template not available - generic prior will be used later
+                        if self.global_step == obj_chamfer_start:
+                            logger.info(f"[Object Chamfer] No template for '{obj_category}', will use generic prior")
+
+                except Exception as e:
+                    # Log error occasionally to avoid spam
+                    if self.global_step % 500 == 0:
+                        logger.error(f"[Object Chamfer] Failed at step {self.global_step}: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+
+                # ============================================================
+                # GENERIC SHAPE PRIOR (Fallback for sequences without templates)
+                # ============================================================
+
+                # FIX: Now template_applied, obj_verts_list are guaranteed to exist
+                if not template_applied and obj_verts_list and len(obj_verts_list) > 0:
+                    try:
+                        obj_verts = obj_verts_list[0]
+                        obj_faces = obj_faces_list[0] if obj_faces_list else None
+
+                        if obj_verts.shape[0] > 10 and obj_faces is not None and obj_faces.shape[0] > 0:
+                            from pytorch3d.loss import mesh_laplacian_smoothing
+                            from pytorch3d.structures import Meshes
+
+                            obj_mesh = Meshes(verts=[obj_verts], faces=[obj_faces])
+
+                            # Smoothness loss (penalize wrinkled surfaces)
+                            smoothness_loss = mesh_laplacian_smoothing(obj_mesh, method='uniform')
+
+                            # Compactness loss (penalize unrealistic volumes)
+                            obj_centered = obj_verts - obj_verts.mean(dim=0)
+                            bbox_size = obj_centered.max(dim=0)[0] - obj_centered.min(dim=0)[0]
+                            volume_loss = torch.abs(bbox_size.prod() - 0.001)  # Target ~10cm³
+
+                            # Combined generic loss
+                            generic_weight = getattr(self.opt.loss, 'w_obj_generic', 0.05)
+                            generic_loss = generic_weight * (0.5 * smoothness_loss + 0.5 * volume_loss)
+
+                            geometric_loss = geometric_loss + generic_loss
+                            loss_output['loss/obj_generic'] = generic_loss.item()
+
+                            if self.global_step % 100 == 0:
+                                logger.info(
+                                    f"[Object Prior] Generic regularization: "
+                                    f"smoothness={smoothness_loss.item():.6f}, "
+                                    f"volume={volume_loss.item():.6f}"
+                                )
+
+                    except Exception as e:
+                        if self.global_step % 500 == 0:
+                            logger.warning(f"[Object Generic] Failed: {e}")
 
         # ================================================================
         # ✅ OBJECT SMOOTHNESS REGULARIZATION
@@ -3600,6 +3940,8 @@ class HOLD(pl.LightningModule):
             self.log('train/depth_smoothness', loss_output['loss/depth_smoothness'], prog_bar=False)
         if 'loss/chamfer' in loss_output:  # ← ADD THIS
             self.log('train/chamfer', loss_output['loss/chamfer'], prog_bar=False)
+        if 'loss/obj_chamfer' in loss_output:  # ← ADD THIS (Object Chamfer)
+            self.log('train/obj_chamfer', loss_output['loss/obj_chamfer'], prog_bar=False)
 
         # Object smoothness (if active)
         if 'object_smoothness' in loss_output:
@@ -3654,6 +3996,7 @@ class HOLD(pl.LightningModule):
             normal_f = to_float(loss_output.get('loss/normal_consistency', 0.0))
             depth_smooth_f = to_float(loss_output.get('loss/depth_smoothness', 0.0))
             chamfer_f = to_float(loss_output.get('loss/chamfer', 0.0))  # ← ADD THIS
+            obj_chamfer_f = to_float(loss_output.get('loss/obj_chamfer', 0.0))
             obj_smooth_f = to_float(loss_output.get('object_smoothness', 0.0))
             sds_raw_f = to_float(loss_output.get('loss/sds_raw', 0.0))
             sds_weighted_f = to_float(loss_output.get('loss/sds_weighted', 0.0))
@@ -3711,7 +4054,8 @@ class HOLD(pl.LightningModule):
             logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")
             logger.info(f"      Normal Consist:  {normal_f:.6f}")
             logger.info(f"      Depth Smooth:    {depth_smooth_f:.6f}")
-            logger.info(f"      Chamfer:         {chamfer_f:.6f}")  # ← ADD THIS
+            logger.info(f"      Chamfer (hand):  {chamfer_f:.6f}")  # ← ADD THIS
+            logger.info(f"      Chamfer (obj):   {obj_chamfer_f:.6f}")
             logger.info(f"    Object Smooth:     {obj_smooth_f:.6f}")
 
             if phase3_active:

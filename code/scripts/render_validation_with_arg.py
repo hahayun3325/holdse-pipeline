@@ -474,9 +474,12 @@ def main():
         # ('logs/2c3a14d25/checkpoints/last.ckpt', 42),  # Refined 3-phase Checkpoint 60-epoch from the beginning with clip loaded
         # ('logs/176872f9f/checkpoints/last.ckpt', 43),  # Refined 3-phase Checkpoint 60-epoch from the beginning with clip loaded
         # ('logs/c3b7a8352/checkpoints/last.ckpt', 44),  # 30e oLR1e-7 refined object vertices ckpt from beginning
-        # ('logs/c3b7a8352/checkpoints/last.ckpt', 45),  # 30e oLR1e-7 refined semantic and geometric loss ckpt from beginning
-        ('logs/43b4b8c06/checkpoints/last.ckpt', 46),
-        # 30e oLR1e-7 refined semantic and geometric loss ckpt from beginning
+        # ('logs/43b4b8c06/checkpoints/last.ckpt', 46),
+        # # 30e oLR1e-7 refined semantic and geometric loss ckpt from beginning
+        # ('logs/fe2096fe2/checkpoints/last.ckpt', 47),
+        # # 30e oLR1e-7 addtional chamfer loss ckpt from beginning
+        ('logs/b54bd8f96/checkpoints/last.ckpt', 48),
+        # 30e oLR1e-7 addtional chamfer loss ckpt from official
         # hold_GPMF12_ho3d case
         # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
         # hold_SM4_ho3d case

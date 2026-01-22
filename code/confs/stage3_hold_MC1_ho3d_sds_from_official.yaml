@@ -27,7 +27,7 @@ phase3:
 
   # Phase 3 Boundaries - 2/3 of training (40,000 steps)
   phase3_start_iter: 0
-  phase3_end_iter: 39999        # End after ~20 epochs
+  phase3_end_iter: 34999         # ← CHANGED: End earlier for longer Phase 4
 
   # SDS Configuration - KEEP FROM STAGE 2
   sds:
@@ -44,24 +44,13 @@ phase3:
   w_sds_schedule:
     enabled: true
     step_0: 0.25
-    step_2500: 0.25
     step_5000: 0.25
-    step_7500: 0.225
-    step_10000: 0.20
-    step_12500: 0.175
-    step_15000: 0.15
-    step_17500: 0.1375
-    step_20000: 0.125
-    step_22500: 0.1125
-    step_25000: 0.10
-    step_27500: 0.0875
-    step_30000: 0.075
-    step_32500: 0.0625
-    step_35000: 0.05
-    step_37000: 0.03
-    step_38500: 0.015
-    step_39500: 0.005
-    step_39999: 0.0
+    step_10000: 0.22             # ← Slower decay
+    step_15000: 0.18
+    step_20000: 0.15             # ← Higher than before
+    step_25000: 0.12
+    step_30000: 0.10
+    step_34999: 0.04             # ← Minimal baseline (not 0)
     interpolation: "linear"
 
   diagnostics:
@@ -86,22 +75,22 @@ phase4:
   enabled: true
 
   # Phase boundaries - 1/3 of training (19,800 steps)
-  contact_start_iter: 40000     # Start when Phase 3 ends
+  contact_start_iter: 35000      # ← CHANGED: Start earlier
   contact_end_iter: 59499       # End before Phase 5
-  contact_warmup_iters: 500     # Warmup for contact introduction
+  contact_warmup_iters: 1000     # ← CHANGED: Longer warmup
 
   # Thresholds
   contact_thresh: 0.20
   collision_thresh: 0.08
 
   # Contact weights
-  w_contact: 1.0
-  w_penetration: 100.0
-  w_attraction: 10.0
-  w_damping: 0.0
+  w_contact: 1.5                 # ← INCREASED
+  w_penetration: 150.0           # ← INCREASED
+  w_attraction: 15.0             # ← INCREASED
+  w_damping: 0.001               # ← ENABLED
 
   # Mesh extraction settings
-  mesh_resolution: 128          # Marching cubes resolution
+  mesh_resolution: 256          # Marching cubes resolution
   mesh_padding: 0.1             # Padding around object bounds
 
   log_contact_every: 100
@@ -251,18 +240,24 @@ dataset:
 # LOSS CONFIGURATION (UPDATED FOR STAGE 3)
 # ================================================================
 loss:
-  w_rgb: 1.0                    # Keep base RGB loss
-  w_mask: 0.3              # CHANGED: from 0.1
-  w_mask_edge: 0.1         # NEW: Add this line
-  w_eikonal: 1.0                # Keep SDF regularization
-  w_smooth: 0.005               # Keep smoothness
+  w_rgb: 0.8                    # Keep base RGB loss
+  w_mask: 0.5              # CHANGED: from 0.1
+  w_mask_edge: 0.15         # NEW: Add this line
+  w_eikonal: 0.8                # Keep SDF regularization
+  w_smooth: 0.01               # Keep smoothness
   w_temporal: 1.0               # NEW: Temporal base weight
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
   w_normal_consistency: 0.15
   w_depth_smoothness: 0.1
   w_chamfer: 0.05                    # ← CHANGED from w_template_chamfer
-  chamfer_start_step: 20000            # ← NEW: Add this line!
+  chamfer_start_step: 15000            # ← NEW: Add this line!
+  # ============================================================
+  # Object Template Chamfer (NEW - Step 3A)
+  # ============================================================
+  w_obj_chamfer: 0.15              # Weight for object shape regularization
+  obj_chamfer_start_step: 10000   # Start after SDS warmup (Phase 3)
+  w_obj_generic: 0.05          # Generic prior fallback (weaker than template)
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS

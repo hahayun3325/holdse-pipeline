@@ -254,6 +254,12 @@ loss:
   w_depth_smoothness: 0.1
   w_chamfer: 0.05                    # ← CHANGED from w_template_chamfer
   chamfer_start_step: 10            # ← NEW: Add this line!
+  # ============================================================
+  # Object Template Chamfer (NEW - Step 3A)
+  # ============================================================
+  w_obj_chamfer: 0.1              # Weight for object shape regularization
+  obj_chamfer_start_step: 10   # Start after SDS warmup (Phase 3)
+  w_obj_generic: 0.05          # Generic prior fallback (weaker than template)
 
 # ================================================================
 # TRAINING - 1 EPOCH ONLY
