@@ -32,11 +32,7 @@ def main():
     args = parse_args()
     import src.utils.io.ours as ours
 
-    # Direct load - predictions already in final format
-    data_pred = torch.load(args.sd_p, map_location='cpu')
-    # Convert to xdict if needed by eval functions
-    from common.xdict import xdict
-    data_pred = xdict(data_pred)
+    data_pred = ours.load_data(args.sd_p)
     data_gt = gt.load_data(data_pred["full_seq_name"])
     seq_name = data_pred["full_seq_name"]
     out_p = args.sd_p
@@ -96,3 +92,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+python evaluate.py --sd_p logs/694416964/checkpoints/last.ckpt 2>&1 | tee logs/694416964/evaluation_$(date +%Y%m%d_%H%M%S).log
+'''

@@ -2176,7 +2176,27 @@ class HOLD(pl.LightningModule):
         # ================================================================
         loss_output = self.loss(batch, model_outputs)
         total_loss = loss_output["loss"]  # base HOLD loss
+        # After line 2178, ADD COMMENT:
+        # ================================================================
+        # LOSS AGGREGATION ORDER (DO NOT MODIFY):
+        # 1. Base losses (RGB, mask, etc.)
+        # 2. Geometric losses (normal consistency, depth smoothness)
+        # 3. Object shape losses (chamfer, smoothness, SDF regularization)
+        # 4. Phase 3 losses (SDS diffusion)
+        # 5. Phase 4 losses (contact)
+        # 6. Phase 5 losses (temporal)
+        # ALWAYS add to total_loss directly, NOT to geometric_loss after line 2353
+        # ================================================================
 
+        # Track components for logging
+        loss_components = {
+            'base': total_loss.item(),
+            'geometric': 0.0,
+            'object_shape': 0.0,
+            'sds': 0.0,
+            'contact': 0.0,
+            'temporal': 0.0
+        }
         # ================================================================
         # STEP 2: SELF-SUPERVISED GEOMETRIC LOSSES
         # ================================================================
@@ -2377,6 +2397,62 @@ class HOLD(pl.LightningModule):
                     )
             else:
                 # ============================================================
+                # TEMPLATE-BASED SDF INITIALIZATION (ONE-TIME AT ACTIVATION)
+                # ============================================================
+                if self.global_step == obj_chamfer_start:
+                    try:
+                        # Extract category
+                        init_category = batch.get('object_category') or batch.get('category')
+
+                        # Unwrap nested structures
+                        while isinstance(init_category, (list, tuple)) and len(init_category) > 0:
+                            init_category = init_category[0]
+                        if isinstance(init_category, torch.Tensor):
+                            init_category = (init_category.item() if init_category.numel() == 1
+                                           else str(init_category[0].item()))
+                        if init_category:
+                            init_category = str(init_category).strip().lower()
+
+                        # Initialize from template if SDF is degenerate
+                        if init_category and init_category in self.object_templates:
+                            object_node = self.model.nodes.get('object')
+                            if (object_node and hasattr(object_node, 'server') and
+                                hasattr(object_node.server, 'object_model') and
+                                hasattr(object_node.server.object_model, 'sdf_grid')):
+
+                                sdf_grid = object_node.server.object_model.sdf_grid
+                                sdf_std = sdf_grid.std().item()
+
+                                # Only initialize if degenerate
+                                if sdf_std < 1e-4:
+                                    logger.info(
+                                        f"[SDF INIT] Degenerate SDF (std={sdf_std:.6f}). "
+                                        f"Initializing from '{init_category}'..."
+                                    )
+
+                                    template_verts = self.object_templates[init_category]
+
+                                    # Initialize SDF from template
+                                    initialized_sdf = self._mesh_to_sdf_grid(
+                                        template_verts,
+                                        grid_resolution=sdf_grid.shape[-1],
+                                        padding=0.1
+                                    )
+
+                                    with torch.no_grad():
+                                        sdf_grid.data = initialized_sdf.to(sdf_grid.device)
+
+                                    logger.info(
+                                        f"✅ [SDF INIT] Success! New stats: "
+                                        f"mean={sdf_grid.mean().item():.4f}, "
+                                        f"std={sdf_grid.std().item():.4f}, "
+                                        f"range=[{sdf_grid.min().item():.4f}, "
+                                        f"{sdf_grid.max().item():.4f}]"
+                                    )
+                    except Exception as e:
+                        logger.error(f"[SDF INIT] Failed: {e}")
+
+                # ============================================================
                 # INITIALIZE TRACKING VARIABLES (FIX: Define before use!)
                 # ============================================================
                 template_applied = False
@@ -2488,16 +2564,68 @@ class HOLD(pl.LightningModule):
                         else:
                             logger.warning(f"[Object Chamfer] ⚠️  Template NOT FOUND for '{obj_category}'")
 
+                    if obj_category in self.object_templates:
+                        # ============================================================
+                        # VALIDATE SDF BEFORE EXTRACTION
+                        # ============================================================
+                        sdf_is_valid = False
 
+                    try:
+                        # ============================================================
+                        # FIX: ModuleDict doesn't support .get(), use 'in' check
+                        # ============================================================
+                        if 'object' in self.model.nodes:
+                            object_node = self.model.nodes['object']
+
+                            if object_node and hasattr(object_node, 'server'):
+                                object_server = object_node.server
+                                if hasattr(object_server, 'object_model'):
+                                    # Check for SDF representation
+                                    if hasattr(object_server.object_model, 'sdf_grid'):
+                                        sdf = object_server.object_model.sdf_grid
+
+                                        sdf_std = sdf.std().item()
+                                        sdf_min = sdf.min().item()
+                                        sdf_max = sdf.max().item()
+                                        has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
+
+                                        min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
+                                        sdf_is_valid = has_zero_crossing and sdf_std > min_std_threshold
+
+                                        if self.global_step % 500 == 0:
+                                            logger.info(
+                                                f"[SDF Validation] std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
+                                                f"zero_crossing={has_zero_crossing}, valid={sdf_is_valid}"
+                                            )
+
+                                        if not sdf_is_valid and self.global_step % 500 == 0:
+                                            logger.warning(
+                                                f"[Object Chamfer] DEGENERATE SDF at step {self.global_step}:\n"
+                                                f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
+                                                f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
+                                            )
+                                    elif hasattr(object_server.object_model, 'v3d_cano'):
+                                        # Using vertex representation (Session 62 approach)
+                                        sdf_is_valid = True
+                    except Exception as e:
+                        if self.global_step % 500 == 0:
+                            logger.warning(f"[Object Chamfer] SDF validation error: {e}")
+
+                        # Only extract mesh if valid
+                        if not sdf_is_valid:
+                            obj_verts_list = None
+                            obj_faces_list = None
+                        else:
+                            # EXISTING CODE (line 2496)
+                            obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
 
                     # Check if template exists (correct check!)
                     if obj_category in self.object_templates:
                         # ============================================================
                         # STEP 4: Extract Object Mesh
                         # ============================================================
-                        obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
 
-                        if obj_verts_list and len(obj_verts_list) > 0:
+                        if sdf_is_valid and obj_verts_list and len(obj_verts_list) > 0:
                             obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
 
                             if obj_verts.shape[0] > 0:
@@ -2586,7 +2714,7 @@ class HOLD(pl.LightningModule):
                             generic_weight = getattr(self.opt.loss, 'w_obj_generic', 0.05)
                             generic_loss = generic_weight * (0.5 * smoothness_loss + 0.5 * volume_loss)
 
-                            geometric_loss = geometric_loss + generic_loss
+                            total_loss = total_loss + generic_loss
                             loss_output['loss/obj_generic'] = generic_loss.item()
 
                             if self.global_step % 100 == 0:
@@ -2630,7 +2758,8 @@ class HOLD(pl.LightningModule):
                         if isinstance(v3d_cano, nn.Parameter):
                             # Compute smoothness loss
                             smoothness_loss = get_smoothness_loss(v3d_cano)
-                            total_loss = total_loss + 0.001 * smoothness_loss
+                            smoothness_weight = getattr(self.opt.loss, 'w_obj_smoothness', 0.01)
+                            total_loss = total_loss + smoothness_weight * smoothness_loss
 
                             smoothness_added = True
 
@@ -2671,6 +2800,92 @@ class HOLD(pl.LightningModule):
             logger.error("   1. Object node doesn't exist")
             logger.error("   2. v3d_cano is still a buffer (not nn.Parameter)")
             logger.error("   3. Path to object_model is different")
+
+        # ================================================================
+        # SDF VALIDITY REGULARIZATION (Forces proper zero-crossings)
+        # ================================================================
+        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+            object_node = self.model.nodes['object']
+
+            if hasattr(object_node, 'server'):
+                object_server = object_node.server
+
+                if (hasattr(object_server, 'object_model') and
+                        hasattr(object_server.object_model, 'sdf_grid')):
+
+                    sdf_grid = object_server.object_model.sdf_grid
+
+                    # Only apply if learnable
+                    if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
+
+                        # 1. Zero-crossing encouragement (mean ≈ 0)
+                        mean_sdf = sdf_grid.mean()
+                        zero_crossing_loss = torch.abs(mean_sdf) * 0.1
+
+                        # 2. Gradient magnitude (prevent flat fields)
+                        grad_x = sdf_grid[:, 1:, :, :] - sdf_grid[:, :-1, :, :]
+                        grad_y = sdf_grid[:, :, 1:, :] - sdf_grid[:, :, :-1, :]
+                        grad_z = sdf_grid[:, :, :, 1:] - sdf_grid[:, :, :, :-1]
+
+                        gradient_magnitude = (
+                                grad_x.pow(2).mean() +
+                                grad_y.pow(2).mean() +
+                                grad_z.pow(2).mean()
+                        ).sqrt()
+
+                        gradient_loss = torch.nn.functional.relu(0.05 - gradient_magnitude) * 0.1
+
+                        # 3. Eikonal loss (|∇φ| ≈ 1)
+                        eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.01
+
+                        # 4. Range encouragement (span positive/negative)
+                        sdf_min = sdf_grid.min()
+                        sdf_max = sdf_grid.max()
+                        range_loss = (torch.nn.functional.relu(-0.1 - sdf_min) +
+                                      torch.nn.functional.relu(0.1 - sdf_max)) * 0.05
+
+                        # Add to total
+                        sdf_regularization = (zero_crossing_loss + gradient_loss +
+                                              eikonal_loss + range_loss)
+                        total_loss = total_loss + sdf_regularization
+
+                        # Log every 100 steps
+                        if self.global_step % 100 == 0:
+                            self.log('loss/sdf_zero_crossing', zero_crossing_loss.item())
+                            self.log('loss/sdf_gradient', gradient_loss.item())
+                            self.log('loss/sdf_eikonal', eikonal_loss.item())
+                            self.log('loss/sdf_range', range_loss.item())
+
+                            logger.info(
+                                f"✅ SDF Regularization: zero_cross={zero_crossing_loss.item():.6f}, "
+                                f"grad={gradient_loss.item():.6f}, eikonal={eikonal_loss.item():.6f}, "
+                                f"range={range_loss.item():.6f}"
+                            )
+                    else:
+                        if self.global_step % 500 == 0:
+                            logger.warning(
+                                f"[SDF Reg] SDF grid not learnable: "
+                                f"is_param={isinstance(sdf_grid, nn.Parameter)}, "
+                                f"requires_grad={sdf_grid.requires_grad}"
+                            )
+                        # Skip regularization
+
+            # ================================================================
+            # VERTEX-BASED REGULARIZATION (for v3d_cano approach)
+            # ================================================================
+            if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'v3d_cano'):
+                v3d_cano = object_server.object_model.v3d_cano
+
+                if isinstance(v3d_cano, nn.Parameter) and v3d_cano.requires_grad:
+                    if v3d_cano.shape[0] > 100:  # Only for dense meshes
+                        vertex_variance = v3d_cano.var(dim=0).mean()
+                        vertex_smoothness_loss = vertex_variance * 0.01
+
+                        total_loss = total_loss + vertex_smoothness_loss
+
+                        if self.global_step % 100 == 0:
+                            self.log('loss/vertex_smoothness', vertex_smoothness_loss.item())
+                            logger.info(f"✅ Vertex smoothness: {vertex_smoothness_loss.item():.6f}")
 
         # ========================================
         # MANO Joint Supervision (MODIFIED)
@@ -3286,7 +3501,6 @@ class HOLD(pl.LightningModule):
         # ====================================================================
         # OPTIMIZATION: Calculate weight BEFORE expensive operations
         WEIGHT_THRESHOLD = 1e-6
-
         if hasattr(self, 'phase5_enabled') and self.phase5_enabled and hasattr(self, 'phase5_scheduler'):
             # Use scheduler weight (includes ramp-up/decay)
             effective_contact_weight = loss_weights.get('contact', 0.0)
@@ -3302,6 +3516,14 @@ class HOLD(pl.LightningModule):
             else:
                 effective_contact_weight = 0.0
             weight_source = "config"
+        # ← INSERT DEBUG LOG HERE (AFTER WEIGHT CALCULATION)
+        if self.global_step % 100 == 0:
+            logger.info(
+                f"[Phase 4 Debug] effective_contact_weight={effective_contact_weight:.6f}, "
+                f"scheduler_weight={loss_weights.get('contact', 'N/A')}, "
+                f"config_weight={getattr(self.opt.loss, 'w_contact', 'N/A')}, "
+                f"source={weight_source}"  # ← ADD weight_source for clarity
+            )
 
         # Check if Phase 4 should run (boundaries + weight)
         phase4_active = (
@@ -3329,194 +3551,213 @@ class HOLD(pl.LightningModule):
 
         if phase4_active:
             try:
-                # NEW: Add one-time activation log
+                # Activation log
                 if not hasattr(self, 'phase4_activated') or not self.phase4_activated:
                     logger.info(f"[Phase 4] Contact loss ACTIVATED at step {self.global_step}")
                     self.phase4_activated = True
-                logger.debug(
-                    f"[Phase 4] Running with weight {effective_contact_weight:.4f} from {weight_source}"
-                )
+
+                logger.debug(f"[Phase 4] Running with weight {effective_contact_weight:.4f}")
 
                 # ============================================================
-                # Expensive Operation 1: Mesh Extraction
+                # Extract hand mesh (always needed for validation)
                 # ============================================================
                 hand_verts, hand_faces = self._extract_hand_mesh(batch)
-                obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
 
-                # Debug logging (every 50 steps)
-                if self.global_step % 50 == 0:
-                    logger.info(f"[Phase 4 - Step {self.global_step}] Mesh Extraction:")
-                    logger.info(f"  Hand verts: {hand_verts.shape}")
-                    logger.info(f"  Hand faces: {hand_faces.shape if hand_faces is not None else 'None'}")
-
-                    if isinstance(obj_verts_list, list):
-                        for b_idx, obj_v in enumerate(obj_verts_list):
-                            obj_f = obj_faces_list[b_idx] if isinstance(obj_faces_list, list) else obj_faces_list[b_idx]
-                            logger.info(
-                                f"  Batch {b_idx}: Object verts={obj_v.shape[0]}, faces={obj_f.shape[0] if obj_f is not None else 0}"
-                            )
-                            if obj_v.shape[0] == 0:
-                                logger.error(f"    ❌ Empty object mesh for batch {b_idx}!")
+                # Around line 3465 (BEFORE the skip checks), ADD:
+                if self.global_step % 100 == 0:
+                    logger.info(
+                        f"[Phase 4 Debug] effective_contact_weight={effective_contact_weight:.6f}, "
+                        f"scheduler_weight={loss_weights.get('contact', 'N/A')}, "
+                        f"config_weight={getattr(self.opt.loss, 'w_contact', 'N/A')}"
+                    )
 
                 # ============================================================
-                # Expensive Operation 2: Adaptive Contact Zone Detection
+                # Validate SDF before proceeding
                 # ============================================================
-                contact_zones = None
+                sdf_is_valid = self._validate_sdf_for_extraction()
 
-                if (self.phase5_enabled and
-                    hasattr(self, 'adaptive_contacts') and
-                    hasattr(self, 'phase5_scheduler') and
-                    self.phase5_scheduler is not None and
-                    self.phase5_scheduler.should_update_contact_zones(self.global_step)):
-
-                    logger.debug(f"[Phase 5] Detecting adaptive contact zones at step {self.global_step}")
-
-                    try:
-                        contact_zones = self.adaptive_contacts(
-                            hand_verts=hand_verts,
-                            obj_verts_list=obj_verts_list,
-                            iteration=self.global_step,
-                            batch_indices=list(range(hand_verts.shape[0]))
-                        )
-
-                        # Log contact statistics
-                        if self.global_step % self.log_phase5_every == 0:
-                            contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
-
-                            self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
-                            self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
-                            self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
-                            self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
-
-                            logger.info(
-                                f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
-                                f"  Mean contacts:   {contact_stats['mean']:.1f} vertices\n"
-                                f"  Range:           [{contact_stats['min']:.0f}, {contact_stats['max']:.0f}]\n"
-                                f"  Std deviation:   {contact_stats['std']:.2f}"
-                            )
-
-                    except Exception as e:
-                        logger.warning(f"[Phase 5] Adaptive contact detection failed: {e}. Using fixed zones.")
-                        contact_zones = None
-
-                # ============================================================
-                # Expensive Operation 3: Contact Refinement
-                # ============================================================
-                batch_size = hand_verts.shape[0]
-                total_contact_loss = torch.tensor(0.0, device=self.device)
-                num_valid_samples = 0
-
-                contact_metrics_accum = {
-                    'penetration': 0.0,
-                    'attraction': 0.0,
-                    'dist_mean': 0.0,
-                    'num_contacts': 0,
-                    'num_penetrations': 0
-                }
-
-                for b in range(batch_size):
-                    # Get per-sample meshes
-                    h_verts = hand_verts[b]
-                    h_faces = hand_faces if hand_faces.dim() == 2 else hand_faces[b]
-                    o_verts = obj_verts_list[b] if isinstance(obj_verts_list, list) else obj_verts_list[b]
-                    o_faces = obj_faces_list[b] if isinstance(obj_faces_list, list) else obj_faces_list[b]
-
-                    # Skip empty meshes
-                    if o_verts.shape[0] == 0:
-                        logger.warning(f"[Phase 4] Empty object mesh for batch {b}, skipping")
-                        continue
-
-                    # Get contact zones for this sample
-                    zones_b = contact_zones[b] if contact_zones is not None else None
-
-                    try:
-                        # Call contact refiner
-                        if hasattr(self.contact_refiner, 'forward_with_faces'):
-                            contact_loss_b, contact_metrics_b = self.contact_refiner.forward_with_faces(
-                                hand_verts=h_verts,
-                                hand_faces=h_faces,
-                                obj_verts=o_verts,
-                                obj_faces=o_faces,
-                                contact_zones=zones_b,
-                            )
-                        # Method 2: Standard forward (vertex-only, no faces)
-                        else:
-                            contact_loss_b, contact_metrics_b = self.contact_refiner(
-                                hand_verts=h_verts,
-                                hand_faces=h_faces,
-                                obj_verts=o_verts,
-                                obj_faces=o_faces
-                            )
-                        logger.warning(f"[DEBUG Phase 4] contact_loss_b: {contact_loss_b}")
-                        logger.warning(f"[DEBUG Phase 4] contact_loss_b is None: {contact_loss_b is None}")
-                        if contact_loss_b is not None:
-                            logger.warning(f"[DEBUG Phase 4] contact_loss_b.item(): {contact_loss_b.item()}")
-
-                        total_contact_loss = total_contact_loss + contact_loss_b
-                        num_valid_samples += 1
-
-                        # Accumulate metrics
-                        for key in contact_metrics_accum:
-                            if key in contact_metrics_b:
-                                contact_metrics_accum[key] += contact_metrics_b[key]
-
-                    except Exception as e:
-                        logger.error(f"[Phase 4] Contact refiner failed for batch {b}: {e}")
-                        continue
-
-                # ============================================================
-                # Apply Weight and Add to Total Loss
-                # ============================================================
-                if num_valid_samples > 0:
-                    # Average over valid samples
-                    total_contact_loss = total_contact_loss / num_valid_samples
-                    for key in contact_metrics_accum:
-                        contact_metrics_accum[key] /= num_valid_samples
-
-                    # Apply pre-calculated effective weight
-                    weighted_contact_loss = total_contact_loss * effective_contact_weight
-
-                    # Line 2285 - SINGLE add to total_loss accumulator
-                    total_loss = total_loss + weighted_contact_loss              # keep gradients
-                    loss_output["loss_contact"] = weighted_contact_loss          # debug: grad-tracking
-                    loss_output['contact_loss'] = weighted_contact_loss.detach() # logging-only
-
-                    logger.debug(f"[Phase 4] Added contact loss WITH GRADIENTS: {weighted_contact_loss.item():.6f}")
-
-                    # Logging
-                    self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
-                    self.log('phase4/contact_weight', effective_contact_weight)
-                    self.log('phase4/penetration',
-                        contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor)
-                        else float(contact_metrics_accum['penetration']))
-                    self.log('phase4/attraction',
-                        contact_metrics_accum['attraction'].detach().item() if isinstance(contact_metrics_accum['attraction'], torch.Tensor)
-                        else float(contact_metrics_accum['attraction']))
-                    self.log('phase4/dist_mean',
-                        contact_metrics_accum['dist_mean'].detach().item() if isinstance(contact_metrics_accum['dist_mean'], torch.Tensor)
-                        else float(contact_metrics_accum['dist_mean']))
-                    self.log('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
-                    self.log('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
-
-                    # Console logging
-                    if self.global_step % self.log_contact_every == 0:
-                        contact_type = "Adaptive" if contact_zones is not None else "Fixed"
-                        logger.info(
-                            f"\n[Phase 4 - Step {self.global_step}] Contact Refinement ({contact_type}):\n"
-                            f"  Applied weight:   {effective_contact_weight:.4f} (from {weight_source})\n"
-                            f"  Valid samples:    {num_valid_samples}/{batch_size}\n"
-                            f"  Penetration loss: {contact_metrics_accum['penetration']:.4f}\n"
-                            f"  Attraction loss:  {contact_metrics_accum['attraction']:.4f}\n"
-                            f"  Mean distance:    {contact_metrics_accum['dist_mean']:.4f}m\n"
-                            f"  Num contacts:     {int(contact_metrics_accum['num_contacts'])}\n"
-                            f"  Num penetrations: {int(contact_metrics_accum['num_penetrations'])}\n"
-                            f"  Weighted loss:    {weighted_contact_loss:.4f}\n"
+                if not sdf_is_valid:
+                    # Log warning and skip entire Phase 4
+                    if self.global_step % 100 == 0:
+                        logger.warning(
+                            f"[Phase 4] Degenerate SDF at step {self.global_step}, "
+                            f"skipping contact loss computation"
                         )
                 else:
-                    logger.warning(
-                        f"[Phase 4] No valid samples at step {self.global_step}, "
-                        f"skipping contact loss"
-                    )
+                    # ============================================================
+                    # ONLY execute contact loss if SDF is valid
+                    # ============================================================
+                    obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
+
+                    # Debug logging (every 50 steps)
+                    if self.global_step % 50 == 0:
+                        logger.info(f"[Phase 4 - Step {self.global_step}] Mesh Extraction:")
+                        logger.info(f"  Hand verts: {hand_verts.shape}")
+                        logger.info(f"  Hand faces: {hand_faces.shape if hand_faces is not None else 'None'}")
+
+                        if isinstance(obj_verts_list, list):
+                            for b_idx, obj_v in enumerate(obj_verts_list):
+                                obj_f = obj_faces_list[b_idx] if isinstance(obj_faces_list, list) else obj_faces_list[b_idx]
+                                logger.info(
+                                    f"  Batch {b_idx}: Object verts={obj_v.shape[0]}, "
+                                    f"faces={obj_f.shape[0] if obj_f is not None else 0}"
+                                )
+                                if obj_v.shape[0] == 0:
+                                    logger.error(f"    ❌ Empty object mesh for batch {b_idx}!")
+
+                    # ============================================================
+                    # Adaptive Contact Zone Detection
+                    # ============================================================
+                    contact_zones = None
+
+                    if (self.phase5_enabled and
+                        hasattr(self, 'adaptive_contacts') and
+                        hasattr(self, 'phase5_scheduler') and
+                        self.phase5_scheduler is not None and
+                        self.phase5_scheduler.should_update_contact_zones(self.global_step)):
+
+                        logger.debug(f"[Phase 5] Detecting adaptive contact zones at step {self.global_step}")
+
+                        try:
+                            contact_zones = self.adaptive_contacts(
+                                hand_verts=hand_verts,
+                                obj_verts_list=obj_verts_list,
+                                iteration=self.global_step,
+                                batch_indices=list(range(hand_verts.shape[0]))
+                            )
+
+                            # Log contact statistics
+                            if self.global_step % self.log_phase5_every == 0:
+                                contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
+
+                                self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
+                                self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
+                                self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
+                                self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
+
+                                logger.info(
+                                    f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
+                                    f"  Mean contacts:   {contact_stats['mean']:.1f} vertices\n"
+                                    f"  Range:           [{contact_stats['min']:.0f}, {contact_stats['max']:.0f}]\n"
+                                    f"  Std deviation:   {contact_stats['std']:.2f}"
+                                )
+
+                        except Exception as e:
+                            logger.warning(f"[Phase 5] Adaptive contact detection failed: {e}. Using fixed zones.")
+                            contact_zones = None
+
+                    # ============================================================
+                    # Contact Refinement Computation
+                    # ============================================================
+                    batch_size = hand_verts.shape[0]
+                    total_contact_loss = torch.tensor(0.0, device=self.device)
+                    num_valid_samples = 0
+
+                    contact_metrics_accum = {
+                        'penetration': 0.0,
+                        'attraction': 0.0,
+                        'dist_mean': 0.0,
+                        'num_contacts': 0,
+                        'num_penetrations': 0
+                    }
+
+                    for b in range(batch_size):
+                        # Get per-sample meshes
+                        h_verts = hand_verts[b]
+                        h_faces = hand_faces if hand_faces.dim() == 2 else hand_faces[b]
+                        o_verts = obj_verts_list[b] if isinstance(obj_verts_list, list) else obj_verts_list[b]
+                        o_faces = obj_faces_list[b] if isinstance(obj_faces_list, list) else obj_faces_list[b]
+
+                        # Skip empty meshes
+                        if o_verts.shape[0] == 0:
+                            logger.warning(f"[Phase 4] Empty object mesh for batch {b}, skipping")
+                            continue
+
+                        # Get contact zones for this sample
+                        zones_b = contact_zones[b] if contact_zones is not None else None
+
+                        try:
+                            # Call contact refiner
+                            if hasattr(self.contact_refiner, 'forward_with_faces'):
+                                contact_loss_b, contact_metrics_b = self.contact_refiner.forward_with_faces(
+                                    hand_verts=h_verts,
+                                    hand_faces=h_faces,
+                                    obj_verts=o_verts,
+                                    obj_faces=o_faces,
+                                    contact_zones=zones_b,
+                                )
+                            else:
+                                contact_loss_b, contact_metrics_b = self.contact_refiner(
+                                    hand_verts=h_verts,
+                                    hand_faces=h_faces,
+                                    obj_verts=o_verts,
+                                    obj_faces=o_faces
+                                )
+
+                            if contact_loss_b is not None:
+                                total_contact_loss = total_contact_loss + contact_loss_b
+                                num_valid_samples += 1
+
+                                # Accumulate metrics
+                                for key in contact_metrics_accum:
+                                    if key in contact_metrics_b:
+                                        contact_metrics_accum[key] += contact_metrics_b[key]
+
+                        except Exception as e:
+                            logger.error(f"[Phase 4] Contact refiner failed for batch {b}: {e}")
+                            continue
+
+                    # ============================================================
+                    # Apply Weight and Add to Total Loss
+                    # ============================================================
+                    if num_valid_samples > 0:
+                        # Average over valid samples
+                        total_contact_loss = total_contact_loss / num_valid_samples
+                        for key in contact_metrics_accum:
+                            contact_metrics_accum[key] /= num_valid_samples
+
+                        # Apply pre-calculated effective weight
+                        weighted_contact_loss = total_contact_loss * effective_contact_weight
+
+                        # Add to total_loss accumulator
+                        total_loss = total_loss + weighted_contact_loss
+                        loss_output["loss_contact"] = weighted_contact_loss
+                        loss_output['contact_loss'] = weighted_contact_loss.detach()
+
+                        # Logging
+                        self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
+                        self.log('phase4/contact_weight', effective_contact_weight)
+                        self.log('phase4/penetration',
+                            contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor)
+                            else float(contact_metrics_accum['penetration']))
+                        self.log('phase4/attraction',
+                            contact_metrics_accum['attraction'].detach().item() if isinstance(contact_metrics_accum['attraction'], torch.Tensor)
+                            else float(contact_metrics_accum['attraction']))
+                        self.log('phase4/dist_mean',
+                            contact_metrics_accum['dist_mean'].detach().item() if isinstance(contact_metrics_accum['dist_mean'], torch.Tensor)
+                            else float(contact_metrics_accum['dist_mean']))
+                        self.log('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
+                        self.log('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
+
+                        # Console logging
+                        if self.global_step % self.log_contact_every == 0:
+                            contact_type = "Adaptive" if contact_zones is not None else "Fixed"
+                            logger.info(
+                                f"\n[Phase 4 - Step {self.global_step}] Contact Refinement ({contact_type}):\n"
+                                f"  Applied weight:   {effective_contact_weight:.4f} (from {weight_source})\n"
+                                f"  Valid samples:    {num_valid_samples}/{batch_size}\n"
+                                f"  Penetration loss: {contact_metrics_accum['penetration']:.4f}\n"
+                                f"  Attraction loss:  {contact_metrics_accum['attraction']:.4f}\n"
+                                f"  Mean distance:    {contact_metrics_accum['dist_mean']:.4f}m\n"
+                                f"  Num contacts:     {int(contact_metrics_accum['num_contacts'])}\n"
+                                f"  Num penetrations: {int(contact_metrics_accum['num_penetrations'])}\n"
+                                f"  Weighted loss:    {weighted_contact_loss:.4f}\n"
+                            )
+                    else:
+                        logger.warning(
+                            f"[Phase 4] No valid samples at step {self.global_step}, "
+                            f"skipping contact loss"
+                        )
 
             except Exception as e:
                 logger.error(f"[Phase 4] Contact loss computation failed: {e}")
@@ -5120,6 +5361,99 @@ class HOLD(pl.LightningModule):
         return obj_verts_list, obj_faces_list
     # ====================================================================
 
+    def _mesh_to_sdf_grid(self, vertices, grid_resolution=64, padding=0.1):
+        """Convert mesh vertices to approximate SDF grid for initialization."""
+        if vertices is None or vertices.shape[0] == 0:
+            logger.error("[SDF Init] Cannot initialize from empty mesh")
+            return None
+
+        device = vertices.device
+
+        # Normalize to [-1, 1]
+        v_min = vertices.min(dim=0)[0]
+        v_max = vertices.max(dim=0)[0]
+        v_center = (v_min + v_max) / 2
+        v_scale = (v_max - v_min).max() * (1 + padding)
+        v_scale = torch.clamp(v_scale, min=1e-6)  # Prevent division by zero
+
+        vertices_norm = (vertices - v_center) / (v_scale / 2)
+
+        # Create 3D grid
+        grid_coords = torch.linspace(-1, 1, grid_resolution, device=device)
+        grid_x, grid_y, grid_z = torch.meshgrid(grid_coords, grid_coords, grid_coords, indexing='ij')
+        grid_points = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)
+
+        # Compute distances (batched for memory)
+        batch_size = 5000
+        distances = []
+
+        for i in range(0, len(grid_points), batch_size):
+            batch = grid_points[i:i + batch_size]
+            dists = torch.cdist(batch, vertices_norm)
+            min_dists = dists.min(dim=1)[0]
+            distances.append(min_dists)
+
+        distances = torch.cat(distances, dim=0)
+        unsigned_sdf = distances.reshape(grid_resolution, grid_resolution, grid_resolution)
+
+        # Estimate sign (inside/outside)
+        centroid = vertices_norm.mean(dim=0)
+        grid_to_centroid = torch.norm(grid_points - centroid, dim=1)
+        grid_to_centroid = grid_to_centroid.reshape(grid_resolution, grid_resolution, grid_resolution)
+
+        median_dist = grid_to_centroid.median()
+        is_inside = grid_to_centroid < median_dist * 0.7
+
+        signed_sdf = unsigned_sdf.clone()
+        signed_sdf[is_inside] = -signed_sdf[is_inside]
+
+        return signed_sdf.unsqueeze(0)  # [1, H, W, D]
+
+    def _validate_sdf_for_extraction(self):
+        """
+        Validate that SDF grid is suitable for mesh extraction.
+        Returns True if SDF has proper zero-crossings and variance.
+        """
+        try:
+            object_node = self.model.nodes.get('object')
+            if not (object_node and hasattr(object_node, 'server')):
+                return False
+
+            object_server = object_node.server
+            if not hasattr(object_server, 'object_model'):
+                return False
+
+            # Check for SDF representation
+            if hasattr(object_server.object_model, 'sdf_grid'):
+                sdf = object_server.object_model.sdf_grid
+
+                sdf_std = sdf.std().item()
+                sdf_min = sdf.min().item()
+                sdf_max = sdf.max().item()
+                has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
+
+                is_valid = has_zero_crossing and sdf_std > 1e-4
+
+                if not is_valid and self.global_step % 500 == 0:
+                    logger.warning(
+                        f"[SDF Validation] Degenerate at step {self.global_step}: "
+                        f"std={sdf_std:.6f}, range=[{sdf_min:.4f}, {sdf_max:.4f}], "
+                        f"zero_crossing={has_zero_crossing}"
+                    )
+
+                return is_valid
+
+            elif hasattr(object_server.object_model, 'v3d_cano'):
+                # Using vertex representation - always valid
+                return True
+
+            return False
+
+        except Exception as e:
+            if self.global_step % 500 == 0:
+                logger.warning(f"[SDF Validation] Error: {e}")
+            return False
+
     def _is_video_batch(self, batch: Dict) -> bool:
         """
         Check if batch contains video sequence data from GHOP HOI4D dataset.
@@ -6260,3 +6594,5 @@ class HOLD(pl.LightningModule):
             vis_utils.record_vis(
                 idx, self.global_step, self.args.log_dir, self.args.experiment, vis_dict
             )
+
+

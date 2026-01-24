@@ -87,22 +87,21 @@ phase4:
   enabled: true
 
   # Phase boundaries - SCALED DOWN (30 epochs → 1 epoch)
-  # Original: 20000 (epoch 10) → New: 1000 (epoch 0.5)
-  contact_start_iter: 1500      # CHANGED: Start halfway through epoch 1
-  contact_end_iter: 1949
-  contact_warmup_iters: 10     # CHANGED: Reduced from 500
+  contact_start_iter: 1500       # Keep same (starts at 75% of epoch)
+  contact_end_iter: 1949         # Keep same
+  contact_warmup_iters: 33       # ← CHANGED: Scaled from 1000 (1000/60000 * 2000 ≈ 33)
 
   # Thresholds - SAME
   contact_thresh: 0.20
   collision_thresh: 0.08
 
-  # Contact weights - SAME
-  w_contact: 1.0
-  w_penetration: 100.0
-  w_attraction: 10.0
-  w_damping: 0.0
+  # Contact weights - UPDATE TO MATCH 30-EPOCH CONFIG
+  w_contact: 1.5                 # ← CHANGED: from 1.0 to 1.5
+  w_penetration: 150.0           # ← CHANGED: from 100.0 to 150.0
+  w_attraction: 15.0             # ← CHANGED: from 10.0 to 15.0
+  w_damping: 0.001               # ← CHANGED: from 0.0 to 0.001
 
-  mesh_resolution: 128
+  mesh_resolution: 256           # ← CHANGED: from 128 to 256
   mesh_padding: 0.1
 
   log_contact_every: 50
@@ -239,27 +238,28 @@ dataset:
     enabled: false
 
 # ================================================================
-# LOSS (UNCHANGED)
+# LOSS CONFIGURATION (UPDATED TO MATCH 30-EPOCH CONFIG)
 # ================================================================
 loss:
-  w_rgb: 1.0
-  w_mask: 0.3              # CHANGED: from 0.1
-  w_mask_edge: 0.1         # NEW: Add this line
-  w_eikonal: 1.0
-  w_smooth: 0.005
+  w_rgb: 0.8                     # ← CHANGED: from 1.0 to 0.8
+  w_mask: 0.5                    # ← CHANGED: from 0.3 to 0.5
+  w_mask_edge: 0.15              # ← CHANGED: from 0.1 to 0.15
+  w_eikonal: 0.8                 # ← CHANGED: from 1.0 to 0.8
+  w_smooth: 0.01                 # ← CHANGED: from 0.005 to 0.01
   w_temporal: 1.0
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
   w_normal_consistency: 0.15
   w_depth_smoothness: 0.1
-  w_chamfer: 0.05                    # ← CHANGED from w_template_chamfer
-  chamfer_start_step: 10            # ← NEW: Add this line!
+  w_chamfer: 0.05
+  chamfer_start_step: 15         # ← CHANGED: Scaled from 15000 (15000/60000 * 2000 = 500, but start earlier for testing)
   # ============================================================
   # Object Template Chamfer (NEW - Step 3A)
   # ============================================================
-  w_obj_chamfer: 0.1              # Weight for object shape regularization
-  obj_chamfer_start_step: 10   # Start after SDS warmup (Phase 3)
-  w_obj_generic: 0.05          # Generic prior fallback (weaker than template)
+  w_obj_chamfer: 0.15            # ← CHANGED: from 0.1 to 0.15
+  obj_chamfer_start_step: 10     # ← CHANGED: Scaled from 10000 (10000/60000 * 2000 ≈ 333, round to 10 for early testing)
+  w_obj_generic: 0.05            # ← Keep same
+  w_obj_smoothness: 0.001        # ← NEW: Add this line!
 
 # ================================================================
 # TRAINING - 1 EPOCH ONLY

@@ -478,8 +478,12 @@ def main():
         # # 30e oLR1e-7 refined semantic and geometric loss ckpt from beginning
         # ('logs/fe2096fe2/checkpoints/last.ckpt', 47),
         # # 30e oLR1e-7 addtional chamfer loss ckpt from beginning
-        ('logs/b54bd8f96/checkpoints/last.ckpt', 48),
+        # ('logs/b54bd8f96/checkpoints/last.ckpt', 48),
         # 30e oLR1e-7 addtional chamfer loss ckpt from official
+        # ('logs/694416964/checkpoints/last.ckpt', 49),
+        # # 40e SDS-Phase3-only ckpt from official
+        ('logs/694416964/checkpoints/steps/stepstep=07999.ckpt', 491),
+        # 40e SDS-Phase3-only ckpt from official step 8000
         # hold_GPMF12_ho3d case
         # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
         # hold_SM4_ho3d case

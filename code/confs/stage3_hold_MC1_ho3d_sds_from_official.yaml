@@ -258,6 +258,7 @@ loss:
   w_obj_chamfer: 0.15              # Weight for object shape regularization
   obj_chamfer_start_step: 10000   # Start after SDS warmup (Phase 3)
   w_obj_generic: 0.05          # Generic prior fallback (weaker than template)
+  w_obj_smoothness: 0.001
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
