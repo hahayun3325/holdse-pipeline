@@ -20,7 +20,9 @@ from src.utils.const import SEGM_IDS
 
 
 def load_data(full_seq_name):
+    # from smplx import MANO
     from src.utils.external.body_models import MANO
+    from common.body_models import build_mano_aa
 
     # load in opencv format
     seq_name = full_seq_name.split("_")[1]
@@ -100,6 +102,9 @@ def load_data(full_seq_name):
 
         v3d_h = mano_output.vertices  # .numpy()
         j3d_h = mano_output.joints  # .numpy()
+        print(f"[GT DEBUG] MANO output joints shape: {j3d_h.shape}")
+        print(f"[GT DEBUG] mano_layer type: {type(mano_layer)}")
+        print(f"[GT DEBUG] mano_layer config: {mano_layer.__dict__ if hasattr(mano_layer, '__dict__') else 'N/A'}")
 
         num_frames = hand_transl.shape[0]
     v_cano_o = torch.FloatTensor(obj_mesh.vertices).repeat(num_frames, 1, 1)

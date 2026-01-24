@@ -340,6 +340,10 @@ def eval_mpjpe_right(data_pred, data_gt, metric_dict):
     j3d_h_c_pred_ra = data_pred["j3d_ra.right"]
     j3d_h_c_gt_ra = data_gt["j3d_ra.right"]
     is_valid = data_gt["is_valid"]
+    # ADD DEBUGGING BEFORE LINE 344
+    print(f"[DEBUG] j3d_h_c_gt_ra shape: {j3d_h_c_gt_ra.shape}")
+    print(f"[DEBUG] j3d_h_c_pred_ra shape: {j3d_h_c_pred_ra.shape}")
+    print(f"[DEBUG] is_valid shape: {is_valid.shape if is_valid is not None else 'None'}")
 
     mpjpe_ra_r = metrics.compute_joint3d_error(j3d_h_c_gt_ra, j3d_h_c_pred_ra, is_valid)
     mpjpe_ra_r = mpjpe_ra_r.mean(axis=1) * 1000  # Use dim instead of axis for PyTorch

@@ -33,7 +33,53 @@ def main():
     import src.utils.io.ours as ours
 
     data_pred = ours.load_data(args.sd_p)
+    print(f"[DEBUG] data_pred keys: {list(data_pred.keys())}")
+    # ADD THIS:
+    print(f"\n[DEBUG] full_seq_name value: '{data_pred.get('full_seq_name', 'KEY NOT FOUND')}'")
+    print(f"[DEBUG] full_seq_name type: {type(data_pred.get('full_seq_name'))}")
+    if 'full_seq_name' in data_pred:
+        fsn = data_pred['full_seq_name']
+        print(f"[DEBUG] full_seq_name split('_'): {fsn.split('_')}")
+        print(f"[DEBUG] Number of parts after split: {len(fsn.split('_'))}")
+    for key, value in data_pred.items():
+        if hasattr(value, 'shape'):
+            print(f"[DEBUG] data_pred['{key}'] shape: {value.shape}")
+        elif isinstance(value, (list, tuple)):
+            print(f"[DEBUG] data_pred['{key}'] length: {len(value)}")
+            if len(value) > 0 and hasattr(value[0], 'shape'):
+                print(f"[DEBUG]   first element shape: {value[0].shape}")
+
+    print("\n[DEBUG] Loading GT data...")
     data_gt = gt.load_data(data_pred["full_seq_name"])
+    print(f"[DEBUG] data_gt keys: {list(data_gt.keys())}")
+    for key, value in data_gt.items():
+        if hasattr(value, 'shape'):
+            print(f"[DEBUG] data_gt['{key}'] shape: {value.shape}")
+        elif isinstance(value, (list, tuple)):
+            print(f"[DEBUG] data_gt['{key}'] length: {len(value)}")
+            if len(value) > 0 and hasattr(value[0], 'shape'):
+                print(f"[DEBUG]   first element shape: {value[0].shape}")
+
+    # Downsample predictions to match GT joint count
+    if data_pred["j3d_ra.right"].shape[1] != data_gt["j3d_ra.right"].shape[1]:
+        num_gt_joints = data_gt["j3d_ra.right"].shape[1]
+        print(f"[INFO] Downsampling predictions from {data_pred['j3d_ra.right'].shape[1]} to {num_gt_joints} joints")
+
+        # Extract sliced tensors
+        j3d_ra_downsampled = data_pred["j3d_ra.right"][:, :num_gt_joints, :]
+        j3d_c_downsampled = data_pred["j3d_c.right"][:, :num_gt_joints, :]
+        jnts_downsampled = data_pred["jnts.right"][:, :num_gt_joints, :]
+
+        # Delete original keys
+        del data_pred["j3d_ra.right"]
+        del data_pred["j3d_c.right"]
+        del data_pred["jnts.right"]
+
+        # Add downsampled versions
+        data_pred["j3d_ra.right"] = j3d_ra_downsampled
+        data_pred["j3d_c.right"] = j3d_c_downsampled
+        data_pred["jnts.right"] = jnts_downsampled
+
     seq_name = data_pred["full_seq_name"]
     out_p = args.sd_p
     eval_fn_dict["icp"] = eval_m.eval_icp_first_frame
