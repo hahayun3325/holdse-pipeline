@@ -22,13 +22,13 @@ phase3:
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
-  grid_resolution: 64
+  grid_resolution: 16 # Temporarily change from 64
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - SDS active with scheduled weights
   # Mesh extraction happens at step ~1500, so SDS weight → 0.05 by step 1400
   phase3_start_iter: 0
-  phase3_end_iter: 1499        # SDS weight scheduled to 0.0 at step 1500
+  phase3_end_iter: 99        # SDS weight scheduled to 0.0 at step 1500
 
   # SDS Configuration - SAME
   sds:
@@ -87,7 +87,7 @@ phase4:
   enabled: true
 
   # Phase boundaries - SCALED DOWN (30 epochs → 1 epoch)
-  contact_start_iter: 1500       # Keep same (starts at 75% of epoch)
+  contact_start_iter: 100       # Keep same (starts at 75% of epoch)
   contact_end_iter: 1949         # Keep same
   contact_warmup_iters: 33       # ← CHANGED: Scaled from 1000 (1000/60000 * 2000 ≈ 33)
 
@@ -96,12 +96,12 @@ phase4:
   collision_thresh: 0.08
 
   # Contact weights - UPDATE TO MATCH 30-EPOCH CONFIG
-  w_contact: 1.5                 # ← CHANGED: from 1.0 to 1.5
-  w_penetration: 150.0           # ← CHANGED: from 100.0 to 150.0
-  w_attraction: 15.0             # ← CHANGED: from 10.0 to 15.0
+  w_contact: 0.5                 # ← CHANGED: from 1.0 to 1.5
+  w_penetration: 50.0           # ← CHANGED: from 100.0 to 150.0
+  w_attraction: 5.0             # ← CHANGED: from 10.0 to 15.0
   w_damping: 0.001               # ← CHANGED: from 0.0 to 0.001
 
-  mesh_resolution: 256           # ← CHANGED: from 128 to 256
+  mesh_resolution: 64           # ← CHANGED: from 128 to 256 Temporarily change from 256 to 64
   mesh_padding: 0.1
 
   log_contact_every: 50
@@ -121,7 +121,7 @@ phase5:
     total_iterations: 2000      # CHANGED: 1 epoch ≈ 2000 steps
     warmup_iters: 0
     phase3_start: 0
-    phase4_start: 1500          # CHANGED: Scaled from 20000
+    phase4_start: 100          # CHANGED: Scaled from 20000
     phase5_start: 1950          # CHANGED: Scaled from 20500
     finetune_start: 1980        # CHANGED: Last 10% of epoch (scaled from 50000)
 

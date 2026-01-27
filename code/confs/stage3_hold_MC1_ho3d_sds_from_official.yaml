@@ -84,9 +84,9 @@ phase4:
   collision_thresh: 0.08
 
   # Contact weights
-  w_contact: 1.5                 # ← INCREASED
-  w_penetration: 150.0           # ← INCREASED
-  w_attraction: 15.0             # ← INCREASED
+  w_contact: 0.5                 # ← changed from 1.5
+  w_penetration: 50.0           # ← changed from 150
+  w_attraction: 5.0             # ← changed from 15
   w_damping: 0.001               # ← ENABLED
 
   # Mesh extraction settings

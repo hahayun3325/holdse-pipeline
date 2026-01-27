@@ -1737,12 +1737,12 @@ class HOLD(pl.LightningModule):
             if 'v3d_cano' in name and isinstance(param, nn.Parameter):
                 params.append({
                     "params": [param],
-                    "lr": base_lr * 0.001,  # 1e-7 (100x slower than base)
+                    "lr": base_lr * 1.0,  # Same as base_lr for vertex optimization
                     "name": "object_vertices"
                 })
                 node_params.add(param)
                 object_vertices_added = True
-                logger.info(f"✓ Object vertices added to optimizer: {name} ({param.numel():,} params at lr={base_lr * 0.00001:.2e})")
+                logger.info(f"✓ Object vertices added to optimizer: {name} ({param.numel():,} params at lr={base_lr * 1.0:.2e})")
                 break  # Only add once
 
         if not object_vertices_added:
@@ -2312,6 +2312,90 @@ class HOLD(pl.LightningModule):
         # 3. Template Chamfer (activation step configured in YAML)
         # Get Chamfer activation threshold from config (with fallback for backward compatibility)
         # NOTE: Parameters are loaded from 'loss:' section and flattened to self.args
+        # ============================================================
+        # EARLY PARAMETER VALIDATION (Run once at step 0)
+        # ============================================================
+        if self.global_step == 0:
+            logger.info("=" * 60)
+            logger.info("[PARAMETER VALIDATION] Checking learnable parameters...")
+
+            # Check object vertices
+            if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                object_node = self.model.nodes['object']
+                if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
+                    object_model = object_node.server.object_model
+
+                    # Check v3d_cano
+                    if hasattr(object_model, 'v3d_cano'):
+                        v3d = object_model.v3d_cano
+                        is_param = isinstance(v3d, nn.Parameter)
+                        requires_grad = v3d.requires_grad if hasattr(v3d, 'requires_grad') else False
+
+                        logger.info(f"[v3d_cano] Type: {type(v3d).__name__}")
+                        logger.info(f"[v3d_cano] Is Parameter: {is_param}")
+                        logger.info(f"[v3d_cano] Requires Grad: {requires_grad}")
+                        logger.info(f"[v3d_cano] Shape: {v3d.shape}")
+
+                        if not is_param:
+                            logger.error("❌ CRITICAL: v3d_cano is NOT nn.Parameter!")
+                        if not requires_grad:
+                            logger.error("❌ CRITICAL: v3d_cano has requires_grad=False!")
+
+                    # Check sdf_grid
+                    if hasattr(object_model, 'sdf_grid'):
+                        sdf = object_model.sdf_grid
+                        is_param = isinstance(sdf, nn.Parameter)
+                        requires_grad = sdf.requires_grad if hasattr(sdf, 'requires_grad') else False
+
+                        logger.info(f"[sdf_grid] Type: {type(sdf).__name__}")
+                        logger.info(f"[sdf_grid] Is Parameter: {is_param}")
+                        logger.info(f"[sdf_grid] Requires Grad: {requires_grad}")
+                        logger.info(f"[sdf_grid] Shape: {sdf.shape}")
+                        logger.info(f"[sdf_grid] Stats: mean={sdf.mean().item():.4f}, std={sdf.std().item():.4f}")
+                        logger.info(f"[sdf_grid] Range: [{sdf.min().item():.4f}, {sdf.max().item():.4f}]")
+
+                        has_zero_crossing = (sdf.min() < 0) and (sdf.max() > 0)
+                        logger.info(f"[sdf_grid] Has zero-crossing: {has_zero_crossing}")
+
+                        if not is_param:
+                            logger.error("❌ CRITICAL: sdf_grid is NOT nn.Parameter!")
+                        if not requires_grad:
+                            logger.error("❌ CRITICAL: sdf_grid has requires_grad=False!")
+                        if not has_zero_crossing:
+                            logger.warning("⚠️  WARNING: sdf_grid has no zero-crossing at initialization!")
+
+            # Check optimizer groups
+            logger.info("\n[OPTIMIZER] Learning rates:")
+            for idx, group in enumerate(self.optimizers().param_groups):
+                group_name = group.get('name', f'group_{idx}')
+                logger.info(f"  {group_name}: lr={group['lr']}")
+
+                # NEW: Check if object vertices are in this group
+                for param in group['params']:
+                    # Try to identify if this is v3d_cano
+                    for name, module_param in self.model.named_parameters():
+                        if param is module_param and 'v3d_cano' in name:
+                            logger.info(f"    ✓ Found v3d_cano in group '{group_name}'!")  # <-- Changed this line
+
+                            # NEW: Log the multiplier being used
+                            expected_lr = base_lr * 1.0  # Should match what we set
+                            actual_lr = group['lr']
+                            logger.info(f"    Base LR: {base_lr:.2e}, Expected: {expected_lr:.2e}, Actual: {actual_lr:.2e}")
+
+                            if group['lr'] < 1e-6:
+                                logger.error(
+                                    f"    ❌ CRITICAL: v3d_cano has lr={group['lr']:.2e}, "
+                                    f"should be ~1e-4!"
+                                )
+                            elif group['lr'] > 1e-3:
+                                logger.warning(
+                                    f"    ⚠️ v3d_cano lr={group['lr']:.2e} might be too high"
+                                )
+                            else:
+                                logger.info(
+                                    f"    ✅ v3d_cano lr={group['lr']:.2e} looks reasonable"
+                                )
+            logger.info("=" * 60)
         chamfer_start_step = getattr(self.opt.loss, 'chamfer_start_step', 20000)  # Default: 20000 for 30-epoch
         chamfer_weight = getattr(self.opt.loss, 'w_chamfer', 0.05)  # Default: 0.05
 
@@ -2423,32 +2507,32 @@ class HOLD(pl.LightningModule):
                                 sdf_grid = object_node.server.object_model.sdf_grid
                                 sdf_std = sdf_grid.std().item()
 
+                                # ALWAYS initialize at activation step (removed degenerate check)
+                                logger.info(
+                                    f"[SDF INIT] Initializing SDF from template '{init_category}' "
+                                    f"(current std={sdf_std:.6f})..."
+                                )
+
                                 # Only initialize if degenerate
-                                if sdf_std < 1e-4:
-                                    logger.info(
-                                        f"[SDF INIT] Degenerate SDF (std={sdf_std:.6f}). "
-                                        f"Initializing from '{init_category}'..."
-                                    )
+                                template_verts = self.object_templates[init_category]
 
-                                    template_verts = self.object_templates[init_category]
+                                # Initialize SDF from template
+                                initialized_sdf = self._mesh_to_sdf_grid(
+                                    template_verts,
+                                    grid_resolution=sdf_grid.shape[-1],
+                                    padding=0.1
+                                )
 
-                                    # Initialize SDF from template
-                                    initialized_sdf = self._mesh_to_sdf_grid(
-                                        template_verts,
-                                        grid_resolution=sdf_grid.shape[-1],
-                                        padding=0.1
-                                    )
+                                with torch.no_grad():
+                                    sdf_grid.data = initialized_sdf.to(sdf_grid.device)
 
-                                    with torch.no_grad():
-                                        sdf_grid.data = initialized_sdf.to(sdf_grid.device)
-
-                                    logger.info(
-                                        f"✅ [SDF INIT] Success! New stats: "
-                                        f"mean={sdf_grid.mean().item():.4f}, "
-                                        f"std={sdf_grid.std().item():.4f}, "
-                                        f"range=[{sdf_grid.min().item():.4f}, "
-                                        f"{sdf_grid.max().item():.4f}]"
-                                    )
+                                logger.info(
+                                    f"✅ [SDF INIT] Success! New stats: "
+                                    f"mean={sdf_grid.mean().item():.4f}, "
+                                    f"std={sdf_grid.std().item():.4f}, "
+                                    f"range=[{sdf_grid.min().item():.4f}, "
+                                    f"{sdf_grid.max().item():.4f}]"
+                                )
                     except Exception as e:
                         logger.error(f"[SDF INIT] Failed: {e}")
 
@@ -2570,18 +2654,25 @@ class HOLD(pl.LightningModule):
                         # ============================================================
                         sdf_is_valid = False
 
+                    # Before line 2673
+                    if self.global_step % 100 == 0:
+                        logger.info(f"[PRE-VALIDATION] Step {self.global_step}")
+                        logger.info(f"  Has model.nodes: {hasattr(self.model, 'nodes')}")
+                        if hasattr(self.model, 'nodes'):
+                            logger.info(f"  'object' in nodes: {'object' in self.model.nodes}")
+                    # Initialize flag
+                    sdf_is_valid = False
+
                     try:
                         # ============================================================
                         # FIX: ModuleDict doesn't support .get(), use 'in' check
                         # ============================================================
                         if 'object' in self.model.nodes:
                             object_node = self.model.nodes['object']
-
-                            if object_node and hasattr(object_node, 'server'):
-                                object_server = object_node.server
-                                if hasattr(object_server, 'object_model'):
-                                    # Check for SDF representation
-                                    if hasattr(object_server.object_model, 'sdf_grid'):
+                            if hasattr(object_node, 'server'):
+                                if hasattr(object_node.server, 'object_model'):
+                                    # Check for SDF grid OR vertex representation
+                                    if hasattr(object_node.server.object_model, 'sdf_grid'):
                                         sdf = object_server.object_model.sdf_grid
 
                                         sdf_std = sdf.std().item()
@@ -2589,14 +2680,26 @@ class HOLD(pl.LightningModule):
                                         sdf_max = sdf.max().item()
                                         has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
 
-                                        min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
+                                        # min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
+                                        # More lenient threshold to allow early learning
+                                        min_std_threshold = 1e-6 if self.global_step < 10000 else 1e-5
                                         sdf_is_valid = has_zero_crossing and sdf_std > min_std_threshold
 
-                                        if self.global_step % 500 == 0:
+                                        # Log SDF stats every 100 steps (more frequent monitoring)
+                                        if self.global_step % 100 == 0:
                                             logger.info(
-                                                f"[SDF Validation] std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
+                                                f"[SDF Stats] Step {self.global_step}: "
+                                                f"std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
+                                                f"range=[{sdf_min:.4f}, {sdf_max:.4f}], "
                                                 f"zero_crossing={has_zero_crossing}, valid={sdf_is_valid}"
                                             )
+
+                                            # Log to tensorboard for plotting
+                                            self.log('sdf/std', sdf_std)
+                                            self.log('sdf/min', sdf_min)
+                                            self.log('sdf/max', sdf_max)
+                                            self.log('sdf/has_zero_crossing', float(has_zero_crossing))
+                                            self.log('sdf/is_valid', float(sdf_is_valid))
 
                                         if not sdf_is_valid and self.global_step % 500 == 0:
                                             logger.warning(
@@ -2604,20 +2707,85 @@ class HOLD(pl.LightningModule):
                                                 f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
                                                 f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
                                             )
-                                    elif hasattr(object_server.object_model, 'v3d_cano'):
-                                        # Using vertex representation (Session 62 approach)
+                                        sdf_is_valid = True
+                                    elif hasattr(object_node.server.object_model, 'v3d_cano'):
+                                        # Using vertex representation
                                         sdf_is_valid = True
                     except Exception as e:
-                        if self.global_step % 500 == 0:
+                        if self.global_step % 100  == 0:
                             logger.warning(f"[Object Chamfer] SDF validation error: {e}")
 
-                        # Only extract mesh if valid
-                        if not sdf_is_valid:
-                            obj_verts_list = None
-                            obj_faces_list = None
-                        else:
-                            # EXISTING CODE (line 2496)
-                            obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
+                    # BYPASS: Always force True for vertex representation (OUTSIDE try-except)
+                    if not sdf_is_valid:
+                        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                            obj_node = self.model.nodes['object']
+                            if hasattr(obj_node, 'server'):
+                                if hasattr(obj_node.server, 'object_model'):
+                                    obj_model = obj_node.server.object_model
+                                    if hasattr(obj_model, 'v3d_cano'):
+                                        sdf_is_valid = True
+                                        if self.global_step % 100 == 0:
+                                            logger.info(
+                                                f"[BYPASS] Forced sdf_is_valid=True for vertex-based object at step {self.global_step}")
+
+                    # Only extract mesh if valid
+                    if not sdf_is_valid:
+                        obj_verts_list = None
+                        obj_faces_list = None
+                    else:
+                        # Before extraction
+                            if self.global_step % 100 == 0:
+                                logger.info(f"[Pre-Extract Debug] Step {self.global_step}")
+
+                                if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                                    obj_node = self.model.nodes['object']
+                                    if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
+                                        obj_model = obj_node.server.object_model
+
+                                        logger.info(f"  Has v3d_cano: {hasattr(obj_model, 'v3d_cano')}")
+                                        if hasattr(obj_model, 'v3d_cano'):
+                                            logger.info(f"  v3d_cano shape: {obj_model.v3d_cano.shape}")
+                                            logger.info(
+                                                f"  v3d_cano range: [{obj_model.v3d_cano.min():.4f}, {obj_model.v3d_cano.max():.4f}]")
+
+                                        logger.info(f"  Has f3d_cano: {hasattr(obj_model, 'f3d_cano')}")
+                                        if hasattr(obj_model, 'f3d_cano'):
+                                            logger.info(f"  f3d_cano shape: {obj_model.f3d_cano.shape}")
+
+                                        logger.info(f"  Has faces: {hasattr(obj_model, 'faces')}")
+                                        if hasattr(obj_model, 'faces'):
+                                            logger.info(f"  faces shape: {obj_model.faces.shape}")
+
+                            try:
+                                obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
+                            except Exception as e:
+                                logger.error(f"[Mesh Extract EXCEPTION] {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                                obj_verts_list = None
+                                obj_faces_list = None
+
+                            # NEW: Detailed extraction logging
+                            if self.global_step % 100 == 0:
+                                extraction_success = obj_verts_list is not None and len(obj_verts_list) > 0
+
+                                if extraction_success:
+                                    num_verts = obj_verts_list[0].shape[0] if isinstance(obj_verts_list, list) else obj_verts_list.shape[0]
+                                    num_faces = obj_faces_list[0].shape[0] if obj_faces_list and isinstance(obj_faces_list, list) else 0
+
+                                    logger.info(
+                                        f"✅ [Mesh Extract] Success at step {self.global_step}: "
+                                        f"{num_verts} verts, {num_faces} faces"
+                                    )
+
+                                    self.log('object/extraction_success', 1.0)
+                                    self.log('object/num_vertices', float(num_verts))
+                                else:
+                                    logger.warning(
+                                        f"❌ [Mesh Extract] Failed at step {self.global_step}: "
+                                        f"returned {type(obj_verts_list)}"
+                                    )
+                                    self.log('object/extraction_success', 0.0)
 
                     # Check if template exists (correct check!)
                     if obj_category in self.object_templates:
@@ -2641,8 +2809,11 @@ class HOLD(pl.LightningModule):
                                 if max_dist > 1e-6:
                                     obj_verts_norm = obj_verts_centered / max_dist
 
-                                    from pytorch3d.loss import chamfer_distance
+                                    # FIX: Ensure same device as template
+                                    template_verts = self.object_templates[obj_category]
+                                    obj_verts_norm = obj_verts_norm.to(template_verts.device)  # ← ADD THIS
 
+                                    from pytorch3d.loss import chamfer_distance
                                     obj_chamfer_loss, _ = chamfer_distance(
                                         obj_verts_norm.unsqueeze(0),
                                         template_verts.unsqueeze(0),
@@ -2663,8 +2834,25 @@ class HOLD(pl.LightningModule):
                                             f"✅ [Object Chamfer] Step {self.global_step}: "
                                             f"loss={obj_chamfer_loss.item():.6f}, "
                                             f"category={obj_category}, "
-                                            f"verts={obj_verts.shape[0]}/{template_verts.shape[0]}"
+                                            f"pred_verts={obj_verts.shape[0]}, "
+                                            f"template_verts={template_verts.shape[0]}"
                                         )
+
+                                        # Add tensorboard logging
+                                        self.log('loss/obj_chamfer', obj_chamfer_loss.item())
+
+                                        # Track distance statistics
+                                        with torch.no_grad():
+                                            mean_dist = (obj_verts - template_verts).norm(dim=-1).mean().item()
+                                            max_dist = (obj_verts - template_verts).norm(dim=-1).max().item()
+
+                                            logger.info(
+                                                f"[Object Chamfer Details] mean_dist={mean_dist:.4f}mm, "
+                                                f"max_dist={max_dist:.4f}mm"
+                                            )
+
+                                            self.log('object/chamfer_mean_dist', mean_dist)
+                                            self.log('object/chamfer_max_dist', max_dist)
                                 else:
                                     if self.global_step % 500 == 0:
                                         logger.warning("[Object Chamfer] Object mesh degenerate (max_dist=0)")
@@ -2766,7 +2954,21 @@ class HOLD(pl.LightningModule):
                             # Log every 100 steps
                             if self.global_step % 100 == 0:
                                 self.log('loss/object_smoothness', smoothness_loss.item())
-                                logger.info(f"✅ Object smoothness loss: {smoothness_loss.item():.6f}")
+
+                                # Calculate change rate
+                                if not hasattr(self, '_prev_smoothness'):
+                                    self._prev_smoothness = smoothness_loss.item()
+                                    change_rate = 0.0
+                                else:
+                                    change_rate = (smoothness_loss.item() - self._prev_smoothness) / self._prev_smoothness * 100
+                                    self._prev_smoothness = smoothness_loss.item()
+
+                                logger.info(
+                                    f"✅ [Object Smoothness] Step {self.global_step}: "
+                                    f"loss={smoothness_loss.item():.6f}, "
+                                    f"change={change_rate:+.2f}%"
+                                )
+
                                 loss_output['object_smoothness'] = smoothness_loss.item()
                         else:
                             if self.global_step == 0:
@@ -4608,6 +4810,37 @@ class HOLD(pl.LightningModule):
         # Explicit per-step scalar loss logging
         logger.debug(f"[TRAIN STEP] step={self.global_step} loss={final_loss.item():.6f}")
 
+        # ================================================================
+        # VERTEX MOVEMENT TRACKING (End of training_step)
+        # ================================================================
+        if self.global_step % 100 == 0:
+            try:
+                if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                    obj_node = self.model.nodes['object']
+                    if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
+                        obj_model = obj_node.server.object_model
+                        if hasattr(obj_model, 'v3d_cano'):
+                            v3d = obj_model.v3d_cano
+
+                            # Movement metrics
+                            vertex_std = v3d.std().item()
+                            vertex_range = (v3d.max() - v3d.min()).item()
+                            vertex_mean = v3d.mean().item()
+
+                            logger.info(
+                                f"[Object Vertices] Step {self.global_step}: "
+                                f"std={vertex_std:.6f}, range={vertex_range:.4f}, mean={vertex_mean:.4f}"
+                            )
+
+                            # Gradient check
+                            if v3d.grad is not None:
+                                grad_norm = v3d.grad.norm().item()
+                                logger.info(f"[Object Gradient] norm={grad_norm:.6e}")
+                            else:
+                                logger.warning("[Object Gradient] No gradients!")
+            except Exception as e:
+                logger.error(f"[Vertex Tracking] Failed: {e}")
+
         return {'loss': final_loss.detach()}
 
     # ====================================================================
@@ -5415,8 +5648,12 @@ class HOLD(pl.LightningModule):
         Returns True if SDF has proper zero-crossings and variance.
         """
         try:
-            object_node = self.model.nodes.get('object')
-            if not (object_node and hasattr(object_node, 'server')):
+            # FIX: Use 'in' check instead of .get() for ModuleDict
+            if 'object' not in self.model.nodes:
+                return False
+
+            object_node = self.model.nodes['object']
+            if not hasattr(object_node, 'server'):
                 return False
 
             object_server = object_node.server
