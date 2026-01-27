@@ -1003,8 +1003,8 @@ class HOLD(pl.LightningModule):
         # ============================================================
         # OBJECT TEMPLATE CHAMFER: Load Templates
         # ============================================================
-
-        obj_chamfer_enabled = getattr(self.opt.loss, 'w_obj_chamfer', 0.0) > 0
+        loss_config = getattr(self.opt, 'loss', None)
+        obj_chamfer_enabled = getattr(loss_config, 'w_obj_chamfer', 0.0) > 0 if loss_config else False
         if obj_chamfer_enabled:
             logger.info("=" * 70)
             logger.info("OBJECT TEMPLATE CHAMFER: Loading Templates")

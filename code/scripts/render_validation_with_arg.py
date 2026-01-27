@@ -90,7 +90,7 @@ def render_checkpoint(checkpoint_path, config_path, output_dir, frame_indices=No
     
     # Setup args
     class Args:
-        case = 'hold_MC1_ho3d' # hold_GPMF12_ho3d hold_SM4_ho3d hold_MC1_ho3d
+        case = 'hold_GSF13_ho3d' # hold_GPMF12_ho3d hold_SM4_ho3d hold_MC1_ho3d hold_ABF12_ho3d hold_GSF12_ho3d hold_GSF13_ho3d
         n_images = 71  # Placeholder, will be overwritten
         num_sample = 2048
         infer_ckpt = checkpoint_path
@@ -420,7 +420,8 @@ def main():
     # config_path = 'confs/stage1_hold_MC1_ho3d_8layer_implicit_joint002.yaml' # Case hold_MC1_ho3d Stage 1 8-layer implicitnet Joint Supervision Configuration File
     # config_path = 'confs/ghop_stage1_rgb_only.yaml' # Case hold_bottle1_itw Stage 1 Configuration File(Stage 2 and 3 use the same. Phase 3, 4, 5 have no influence on rendering process)
     # config_path = '/home/fredcui/Projects/hold-master/code/confs/general.yaml' # HOLD Officail Configuration
-    config_path = 'confs/stage1_hold_MC1_ho3d_sds_from_official.yaml' # Case hold_MC1_ho3d Stage 2 on Official Checkpoint
+    config_path = 'confs/stage1_hold_MC1_ho3d_sds_from_official.yaml' # General Rendering Config
+    # config_path = 'confs/render_3phases_hold_MC1_ho3d_phase3.yaml' # Rendering Config for HOLDSE(SDS Only) Trained ckpt
     base_output_dir = Path('rgb_validation_renders')
 
     # All checkpoints from training session
@@ -482,7 +483,7 @@ def main():
         # 30e oLR1e-7 addtional chamfer loss ckpt from official
         # ('logs/694416964/checkpoints/last.ckpt', 49),
         # # 40e SDS-Phase3-only ckpt from official
-        ('logs/694416964/checkpoints/steps/stepstep=07999.ckpt', 491),
+        # ('logs/694416964/checkpoints/steps/stepstep=07999.ckpt', 491),
         # 40e SDS-Phase3-only ckpt from official step 8000
         # hold_GPMF12_ho3d case
         # ('logs/fadb8ec38/checkpoints/last.ckpt', 20),  # Stage 2 Checkpoint 10-epoch(full SDS) on Official Checkpoint
@@ -493,6 +494,11 @@ def main():
         # HOLD Official Checkpoint(Case hold_bottle1_itw)
         # ('/home/fredcui/Projects/hold/code/logs/009c2e923/checkpoints/last.ckpt', 999), # hold_bottle1_itw
         # ('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 999), # hold_MC1_ho3d
+        # Trained ckpts for HO3D dataset
+        # ('logs/71f17bb52/checkpoints/last.ckpt', 1001), # stage3_1to40_hold_SM4_ho3d_object_phase3_official
+        # ('logs/9c60aa891/checkpoints/last.ckpt', 1002), # stage3_1to40_hold_ABF12_ho3d_object_phase3_official
+        # ('logs/44521f421/checkpoints/last.ckpt', 1003), # stage3_1to40_hold_GSF12_ho3d_object_phase3_official
+        ('logs/a09881c64/checkpoints/last.ckpt', 1004), # stage3_1to40_hold_GSF13_ho3d_object_phase3_official
     ]
 
     print("="*70)
