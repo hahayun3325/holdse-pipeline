@@ -184,29 +184,29 @@ dataset:
 # ================================================================
 loss:
   # Base losses - Balanced based on Session 60 findings
-  w_rgb: 1.0                     # ← Primary photometric constraint
+  w_rgb: 0.8                    # ← Primary photometric constraint
   w_mask: 0.5                    # ← Silhouette supervision
   w_mask_edge: 0.15              # ← Edge sharpness
-  w_eikonal: 0.1                 # ← SDF regularization (reduced)
+  w_eikonal: 0.8                 # ← SDF regularization (reduced)
   w_smooth: 0.01                 # ← Surface smoothness
   rgb_loss_type: "l1"
 
   # Self-supervised geometry - DISABLED (problematic)
-  w_normal_consistency: 0.0      # ← Ray rendering incompatible
-  w_depth_smoothness: 0.0        # ← Per-ray depth incompatible
+  w_normal_consistency: 0.15    # ← Ray rendering incompatible
+  w_depth_smoothness: 0.1       # ← Per-ray depth incompatible
 
   # Hand Chamfer - KEEP (proven working in logs)
-  w_chamfer: 0.08                # ← Increased from 0.05
-  chamfer_start_step: 10000      # ← Earlier activation for 80K training
+  w_chamfer: 0.05                # ← Increased from 0.05
+  chamfer_start_step: 15000     # ← Earlier activation for 80K training
 
   # Object Chamfer - DISABLED (mesh extraction failing)
-  w_obj_chamfer: 0.0
-  obj_chamfer_start_step: 999999
-  w_obj_generic: 0.0
-  w_obj_smoothness: 0.0001       # ← Minimal vertex smoothness only
+  w_obj_chamfer: 0.15
+  obj_chamfer_start_step: 10
+  w_obj_generic: 0.05
+  w_obj_smoothness: 0.001       # ← Minimal vertex smoothness only
 
   # Temporal - Not used (Phase 5 disabled)
-  w_temporal: 0.0
+  w_temporal: 1.0
 
 # ================================================================
 # TRAINING CONFIGURATION - 40 EPOCHS (80K steps)

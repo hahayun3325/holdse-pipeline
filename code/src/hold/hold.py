@@ -5055,6 +5055,20 @@ class HOLD(pl.LightningModule):
 
                 # FALLBACK: Return zero grid
                 if sdf_values is None:
+                    # ADD DETAILED DIAGNOSTICS:
+                    logger.error(f"[SDF Debug] All methods failed for node: {object_node.node_id}")
+                    logger.error(f"  Has server: {hasattr(object_node, 'server')}")
+                    if hasattr(object_node, 'server'):
+                        logger.error(f"  Has forward_sdf: {hasattr(object_node.server, 'forward_sdf')}")
+                        logger.error(f"  Has shape_net: {hasattr(object_node.server, 'shape_net')}")
+                        logger.error(f"  Has object_model: {hasattr(object_node.server, 'object_model')}")
+                    logger.error(f"  Has forward: {hasattr(object_node, 'forward')}")
+                    logger.error(f"  Has implicit_network: {hasattr(object_node, 'implicit_network')}")
+
+                    # ALSO check if all SDF methods returned None
+                    logger.warning("[Helper] Listing all node attributes:")
+                    logger.warning(f"  {dir(object_node)}")
+
                     logger.warning(
                         "[Helper] All SDF extraction methods failed, using zero grid. "
                         "This is expected in early training before object geometry is initialized. "
