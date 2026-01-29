@@ -20,17 +20,37 @@ import torch.nn as nn
 import numpy as np
 from loguru import logger
 
+# Try Kaolin first (differentiable)
+try:
+    from kaolin.ops.conversions import voxelgrids_to_trianglemeshes
+    KAOLIN_AVAILABLE = True
+    logger.info("[mesh_extraction] Kaolin available (will try, may fall back if CUDA errors)")
+except ImportError:
+    KAOLIN_AVAILABLE = False
+    logger.info("[mesh_extraction] Kaolin not available")
+
+# scikit-image fallback (non-differentiable but reliable)
 try:
     from skimage import measure
-
     SKIMAGE_AVAILABLE = True
+    if not KAOLIN_AVAILABLE:
+        logger.info("[mesh_extraction] Using scikit-image (non-differentiable)")
 except ImportError:
-    logger.error(
-        "[mesh_extraction] scikit-image not available. "
-        "Install with: pip install scikit-image"
-    )
     SKIMAGE_AVAILABLE = False
-
+# PyTorch3D fallback
+if not KAOLIN_AVAILABLE and not SKIMAGE_AVAILABLE:
+    try:
+        from pytorch3d.ops.marching_cubes import marching_cubes
+        PYTORCH3D_AVAILABLE = True
+        logger.warning("[mesh_extraction] Using PyTorch3D (non-differentiable in 0.7.4)")
+    except ImportError:
+        PYTORCH3D_AVAILABLE = False
+        logger.error(
+            "[mesh_extraction] No marching cubes backend available! "
+            "Install: pip install scikit-image"
+        )
+else:
+    PYTORCH3D_AVAILABLE = False
 
 class GHOPMeshExtractor(nn.Module):
     """Extract explicit meshes from implicit HOLD SDF representations.
@@ -55,10 +75,10 @@ class GHOPMeshExtractor(nn.Module):
     def __init__(self, vqvae_wrapper, resolution=128):
         super().__init__()
 
-        if not SKIMAGE_AVAILABLE:
+        if not KAOLIN_AVAILABLE and not PYTORCH3D_AVAILABLE:
             raise ImportError(
-                "scikit-image is required for mesh extraction. "
-                "Install with: pip install scikit-image"
+                "Kaolin or PyTorch3D required for mesh extraction. "
+                "Install one: pip install kaolin OR pip install --upgrade pytorch3d"
             )
 
         self.vqvae_wrapper = vqvae_wrapper
@@ -72,9 +92,10 @@ class GHOPMeshExtractor(nn.Module):
     def extract_object_mesh(self, sdf_grid, coordinate_range=(-1.5, 1.5)):
         """Convert SDF grid to mesh via Marching Cubes.
 
-        This method applies the Marching Cubes algorithm to extract the zero-level
-        isosurface from a volumetric SDF grid. Each batch element is processed
-        independently since object meshes may have different topologies.
+        Tries backends in order:
+        1. Kaolin (differentiable) - if available and CUDA works
+        2. scikit-image (non-diff) - fast and reliable fallback
+        3. PyTorch3D (non-diff) - if scikit-image unavailable
 
         Args:
             sdf_grid (torch.Tensor): [B, H, W, D] or [B, 1, H, W, D] SDF values
@@ -91,84 +112,170 @@ class GHOPMeshExtractor(nn.Module):
                 Empty mesh (0 vertices) returned on failure
 
         Example:
-            >>> sdf_grid = torch.randn(2, 128, 128, 128)  # Batch of 2
+            >>> sdf_grid = torch.randn(2, 128, 128, 128, requires_grad=True)
             >>> meshes = extractor.extract_object_mesh(sdf_grid)
             >>> verts_0, faces_0 = meshes[0]
-            >>> print(f"Object 0: {verts_0.shape[0]} vertices")
+            >>> print(f"Object 0: {verts_0.shape[0]} vertices, gradients: {verts_0.requires_grad}")
         """
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-image not available for Marching Cubes")
+        # Handle channel dimension
+        if sdf_grid.dim() == 5:
+            sdf_grid = sdf_grid.squeeze(1)
+
+        batch_size = sdf_grid.shape[0]
+        resolution = sdf_grid.shape[1]
+        device = sdf_grid.device
+        meshes = []
+
+        # Compute coordinate transformation parameters
+        coord_min, coord_max = coordinate_range
+        coord_span = coord_max - coord_min
 
         # ================================================================
-        # FIX 3: Wrap entire mesh extraction in torch.no_grad()
+        # BACKEND 1: Try Kaolin (differentiable) first
         # ================================================================
-        with torch.no_grad():
-            # Handle channel dimension
-            if sdf_grid.dim() == 5:  # [B, 1, H, W, D]
-                sdf_grid = sdf_grid.squeeze(1)
+        if KAOLIN_AVAILABLE:
+            try:
+                from kaolin.ops.conversions import voxelgrids_to_trianglemeshes
 
-            batch_size = sdf_grid.shape[0]
-            resolution = sdf_grid.shape[1]  # Assume cubic grid
-            meshes = []
+                occupancy = (sdf_grid < 0.0).float()
+                if occupancy.dim() == 4:
+                    occupancy = occupancy.unsqueeze(1)
 
-            # Compute spacing for coordinate transformation
-            coord_min, coord_max = coordinate_range
-            coord_span = coord_max - coord_min
-            spacing = (coord_span / resolution,) * 3
+                verts_list, faces_list = voxelgrids_to_trianglemeshes(occupancy)
+
+                # Check if extraction succeeded
+                success = False
+                for b in range(batch_size):
+                    if len(verts_list[b]) > 0:
+                        verts = verts_list[b].float()
+                        faces = faces_list[b]
+
+                        # Transform coordinates
+                        verts = verts / (resolution - 1)
+                        verts = verts * coord_span + coord_min
+
+                        meshes.append((verts, faces))
+                        success = True
+                    else:
+                        # Empty mesh
+                        meshes.append((
+                            torch.zeros((0, 3), device=device, dtype=torch.float32),
+                            torch.zeros((0, 3), device=device, dtype=torch.long)
+                        ))
+
+                if success:
+                    logger.debug(f"[GHOPMeshExtractor] Kaolin backend: extracted meshes (✅ differentiable)")
+                    return meshes
+                else:
+                    # Kaolin returned empty, try fallback
+                    meshes = []
+                    logger.warning("[GHOPMeshExtractor] Kaolin returned empty meshes, trying fallback")
+
+            except RuntimeError as e:
+                if "CUDA Error" in str(e) or "invalid configuration" in str(e):
+                    logger.warning(f"[GHOPMeshExtractor] Kaolin CUDA error (RTX 4090 incompatibility), using fallback")
+                    meshes = []
+                else:
+                    raise
+
+        # ================================================================
+        # BACKEND 2: scikit-image fallback (non-differentiable but reliable)
+        # ================================================================
+        try:
+            from skimage import measure
+
+            logger.debug("[GHOPMeshExtractor] Using scikit-image backend (⚠️ non-differentiable)")
 
             for b in range(batch_size):
-                # FIX: Detach before numpy conversion
-                sdf = sdf_grid[b].detach().cpu().numpy()
-
                 try:
-                    # Apply Marching Cubes algorithm
+                    sdf_np = sdf_grid[b].detach().cpu().numpy()
+
+                    # Compute spacing
+                    spacing = (coord_span / resolution,) * 3
+
+                    # Marching cubes
                     verts, faces, normals, values = measure.marching_cubes(
-                        sdf,
-                        level=0.0,  # Zero-level set (object surface)
+                        sdf_np,
+                        level=0.0,
                         spacing=spacing,
                         gradient_direction='descent'
                     )
 
-                    # Transform vertices from grid coordinates to world coordinates
-                    # Grid coords: [0, resolution] -> World coords: [coord_min, coord_max]
+                    # Transform vertices
                     verts = verts + coord_min
 
-                    # FIX: Create tensors and explicitly detach
-                    verts_tensor = torch.from_numpy(verts).float().to(sdf_grid.device).detach()
-                    faces_tensor = torch.from_numpy(faces).long().to(sdf_grid.device).detach()
+                    # Convert to tensors
+                    verts_tensor = torch.from_numpy(verts.copy()).float().to(device)
+                    faces_tensor = torch.from_numpy(faces.copy()).long().to(device)
 
                     meshes.append((verts_tensor, faces_tensor))
 
                     logger.debug(
-                        f"[GHOPMeshExtractor] Batch {b}: extracted {verts.shape[0]} verts, "
-                        f"{faces.shape[0]} faces (no gradient graph)"
+                        f"[GHOPMeshExtractor] Batch {b}: {verts.shape[0]} verts, "
+                        f"{faces.shape[0]} faces (scikit-image)"
                     )
 
                 except Exception as e:
-                    # Marching Cubes can fail for various reasons:
-                    # - No zero-crossing in SDF grid
-                    # - Degenerate geometry
-                    # - Numerical issues
-                    logger.warning(
-                        f"[GHOPMeshExtractor] Marching Cubes failed for batch {b}: {e}. "
-                        f"Returning empty mesh."
-                    )
-
-                    # Empty mesh fallback
+                    logger.warning(f"[GHOPMeshExtractor] Batch {b} marching cubes failed: {e}")
                     meshes.append((
-                        torch.zeros((0, 3), device=sdf_grid.device, dtype=torch.float32, requires_grad=False),
-                        torch.zeros((0, 3), device=sdf_grid.device, dtype=torch.long, requires_grad=False)
+                        torch.zeros((0, 3), device=device, dtype=torch.float32),
+                        torch.zeros((0, 3), device=device, dtype=torch.long)
                     ))
 
-            # Log statistics
-            num_verts = [m[0].shape[0] for m in meshes]
-            avg_verts = np.mean(num_verts) if num_verts else 0
-            logger.debug(
-                f"[GHOPMeshExtractor] Extracted {len(meshes)} meshes, "
-                f"avg {avg_verts:.0f} vertices (memory-safe)"
-            )
+            return meshes
+
+        except ImportError:
+            logger.warning("[GHOPMeshExtractor] scikit-image not available, trying PyTorch3D")
+
+        # ================================================================
+        # BACKEND 3: PyTorch3D fallback (if scikit-image unavailable)
+        # ================================================================
+        if PYTORCH3D_AVAILABLE:
+            from pytorch3d.ops.marching_cubes import marching_cubes
+
+            logger.debug("[GHOPMeshExtractor] Using PyTorch3D backend (⚠️ non-differentiable in 0.7.4)")
+
+            for b in range(batch_size):
+                try:
+                    sdf_batch = sdf_grid[b:b+1]  # [1, H, W, D]
+
+                    # Returns ([verts_list], [faces_list])
+                    verts_list, faces_list = marching_cubes(
+                        sdf_batch,
+                        isolevel=0.0,
+                        return_local_coords=False
+                    )
+
+                    if len(verts_list) > 0 and verts_list[0].shape[0] > 0:
+                        verts = verts_list[0].float()
+                        faces = faces_list[0]
+
+                        # Transform coordinates
+                        verts = verts / (resolution - 1)
+                        verts = verts * coord_span + coord_min
+
+                        meshes.append((verts, faces))
+                    else:
+                        meshes.append((
+                            torch.zeros((0, 3), device=device),
+                            torch.zeros((0, 3), device=device, dtype=torch.long)
+                        ))
+                except Exception as e:
+                    logger.warning(f"[GHOPMeshExtractor] PyTorch3D batch {b} failed: {e}")
+                    meshes.append((
+                        torch.zeros((0, 3), device=device),
+                        torch.zeros((0, 3), device=device, dtype=torch.long)
+                    ))
 
             return meshes
+
+        # ================================================================
+        # If all backends failed
+        # ================================================================
+        raise RuntimeError(
+            "No marching cubes backend available. "
+            "Install: pip install scikit-image"
+        )
 
     def forward(self, sdf_grid):
         """Alias for extract_object_mesh() to support nn.Module interface.

@@ -5594,7 +5594,7 @@ class HOLD(pl.LightningModule):
                 verts = verts - 1.5
 
                 # Convert to tensors
-                obj_verts_list.append(torch.from_numpy(verts).float().to(object_sdf.device))
+                obj_verts_list.append(torch.from_numpy(verts.copy()).float().to(object_sdf.device))
                 obj_faces_list.append(torch.from_numpy(faces.copy()).long().to(object_sdf.device))  # ✅ FIX: faces has negative strides
 
                 logger.debug(f"[Phase 4] Extracted object mesh {b}: {verts.shape[0]} verts, {faces.shape[0]} faces")
