@@ -1704,7 +1704,7 @@ class HOLD(pl.LightningModule):
         out_p = f"{self.args.log_dir}/misc/{self.global_step:09d}.npy"
         os.makedirs(op.dirname(out_p), exist_ok=True)
         np.save(out_p, out)
-        print(f"Exported misc to {out_p}")
+        logger.info(f"Exported misc to {out_p}")
 
     def configure_optimizers(self):
         base_lr = self.args.lr
@@ -1784,7 +1784,7 @@ class HOLD(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         """Training step with Phase 3 GHOP + Phase 4 Contact + Phase 5 Advanced integration."""
-        print(f"[DEBUG BATCH] Keys: {list(batch.keys())}")
+        logger.info(f"[DEBUG BATCH] Keys: {list(batch.keys())}")
 
         # ================================================================
         # ✅ FIX: Correctly access Embedding.weight.requires_grad
@@ -1801,7 +1801,7 @@ class HOLD(pl.LightningModule):
             logger.warning(f"  pose.weight.shape = {pose_param.shape}")
 
         if 'rgb' in batch:
-            print(f"[DEBUG BATCH] rgb shape: {batch['rgb'].shape}")
+            logger.info(f"[DEBUG BATCH] rgb shape: {batch['rgb'].shape}")
 
         # ====================================================================
         # INITIALIZATION: Verify critical phase variables exist
@@ -4433,7 +4433,8 @@ class HOLD(pl.LightningModule):
             # Extract all components
             total_f = to_float(total_loss)
             rgb_f = to_float(loss_output.get('loss/rgb', 0.0))
-            mask_f = to_float(loss_output.get('loss/mask', 0.0))
+            mask_f = to_float(loss_output.get('loss/sem', 0.0)) # Semantic loss
+            mask_binary_f = to_float(loss_output.get("loss/mask_binary", 0.0))  # New binary mask loss
             eikonal_f = to_float(loss_output.get('loss/eikonal', 0.0))
             geometric_f = to_float(loss_output.get('geometric_loss', 0.0))
             normal_f = to_float(loss_output.get('loss/normal_consistency', 0.0))
@@ -4490,7 +4491,8 @@ class HOLD(pl.LightningModule):
             logger.info("-" * 80)
             logger.info(f"  Base Components:")
             logger.info(f"    RGB:               {rgb_f:.6f}  ({rgb_pct:5.1f}%)")
-            logger.info(f"    Mask:              {mask_f:.6f}")
+            logger.info(f"    Mask (semantic):   {mask_f:.6f}")
+            logger.info(f"    Mask (binary):     {mask_binary_f:.6f}")
             logger.info(f"    Eikonal:           {eikonal_f:.6f}")
             logger.info("-" * 80)
             logger.info(f"  Step 2 - Geometric Regularization:")
@@ -6731,7 +6733,7 @@ class HOLD(pl.LightningModule):
                     )
                     os.makedirs(op.dirname(out_p), exist_ok=True)
                     mesh_c.export(out_p)
-                    print(f"Exported canonical to {out_p}")
+                    logger.info(f"Exported canonical to {out_p}")
 
                     mesh_dict[f"{node.node_id}_cano"] = mesh_c
 
@@ -6828,7 +6830,7 @@ class HOLD(pl.LightningModule):
         out_p = f"./exports/{exp_key}/normal/{out['idx']:04}.npy"
         os.makedirs(op.dirname(out_p), exist_ok=True)
         np.save(out_p, normal_np)
-        print(f"Exported normal to {out_p}")
+        logger.info(f"Exported normal to {out_p}")
         return out
 
     def validation_step_end(self, batch_parts):

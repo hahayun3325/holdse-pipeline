@@ -36,40 +36,40 @@ class Loss(nn.Module):
         self.im_h = None
 
         # DEBUG: Print config structure
-        print(f"[DEBUG INIT] args type: {type(args)}")
-        print(f"[DEBUG INIT] args has __dict__: {hasattr(args, '__dict__')}")
+        logger.info(f"[DEBUG INIT] args type: {type(args)}")
+        logger.info(f"[DEBUG INIT] args has __dict__: {hasattr(args, '__dict__')}")
 
         if hasattr(args, '__dict__'):
-            print(f"[DEBUG INIT] args keys: {list(vars(args).keys())[:20]}")  # First 20 keys
+            logger.info(f"[DEBUG INIT] args keys: {list(vars(args).keys())[:20]}")  # First 20 keys
 
         # Check for w_mask_edge at top level
-        print(f"[DEBUG INIT] hasattr(args, 'w_mask_edge'): {hasattr(args, 'w_mask_edge')}")
+        logger.info(f"[DEBUG INIT] hasattr(args, 'w_mask_edge'): {hasattr(args, 'w_mask_edge')}")
 
         # Check for nested loss config (SAFE)
         has_loss_attr = hasattr(args, 'loss')
-        print(f"[DEBUG INIT] hasattr(args, 'loss'): {has_loss_attr}")
+        logger.info(f"[DEBUG INIT] hasattr(args, 'loss'): {has_loss_attr}")
 
         if has_loss_attr:
             try:
                 loss_keys = list(vars(args.loss).keys()) if hasattr(args.loss, '__dict__') else []
-                print(f"[DEBUG INIT] args.loss keys: {loss_keys[:20]}")
-                print(f"[DEBUG INIT] hasattr(args.loss, 'w_mask_edge'): {hasattr(args.loss, 'w_mask_edge')}")
+                logger.info(f"[DEBUG INIT] args.loss keys: {loss_keys[:20]}")
+                logger.info(f"[DEBUG INIT] hasattr(args.loss, 'w_mask_edge'): {hasattr(args.loss, 'w_mask_edge')}")
             except Exception as e:
-                print(f"[DEBUG INIT] Error accessing args.loss: {e}")
+                logger.info(f"[DEBUG INIT] Error accessing args.loss: {e}")
 
         # Extract edge weight from config (SAFE)
         try:
             if hasattr(args, 'w_mask_edge'):
                 self.edge_weight = args.w_mask_edge
-                print(f"[DEBUG INIT] Found w_mask_edge (flat): {self.edge_weight}")
+                logger.info(f"[DEBUG INIT] Found w_mask_edge (flat): {self.edge_weight}")
             elif hasattr(args, 'loss') and hasattr(args.loss, 'w_mask_edge'):
                 self.edge_weight = args.loss.w_mask_edge
-                print(f"[DEBUG INIT] Found w_mask_edge (nested): {self.edge_weight}")
+                logger.info(f"[DEBUG INIT] Found w_mask_edge (nested): {self.edge_weight}")
             else:
                 self.edge_weight = 0.1
-                print(f"[WARN] w_mask_edge not found in config, using default: {self.edge_weight}")
+                logger.info(f"[WARN] w_mask_edge not found in config, using default: {self.edge_weight}")
         except Exception as e:
-            print(f"[ERROR] Failed to read w_mask_edge: {e}")
+            logger.info(f"[ERROR] Failed to read w_mask_edge: {e}")
             self.edge_weight = 0.1
 
     def forward(self, batch, model_outputs):
@@ -159,6 +159,21 @@ class Loss(nn.Module):
         # ================================================================
         # ✅ FIX: Compute losses only if ground truth exists
         # ================================================================
+        # ✅ ADD THIS:
+        # ================================================================
+        # DEBUG: Inspect what model actually outputs
+        # ================================================================
+        current_step = model_outputs.get("step", 0)  # ✅ Extract step from outputs
+        if current_step % 50 == 0:  # Log every 50 steps
+            output_keys = list(model_outputs.keys())
+            logger.info(f"\n[MODEL OUTPUT DEBUG - Step {current_step}]")
+            logger.info(f"  Total keys: {len(output_keys)}")
+            logger.info(f"  Keys (first 20): {output_keys[:20]}")
+            logger.info(f"  Has 'semantics': {'semantics' in model_outputs}")
+            logger.info(f"  Has 'fg_semantics': {'fg_semantics' in model_outputs}")
+            logger.info(f"  Has 'mask_prob': {'mask_prob' in model_outputs}")
+            logger.info(f"  Keys containing 'semantic': {[k for k in output_keys if 'semantic' in k.lower()]}")
+            logger.info(f"  Keys containing 'mask': {[k for k in output_keys if 'mask' in k.lower()]}\n")
         loss_dict = {}
 
         # RGB reconstruction loss
@@ -166,9 +181,9 @@ class Loss(nn.Module):
             nan_filter = ~torch.any(model_outputs["rgb"].isnan(), dim=1)
 
             # ✅ NEW DEBUG LOGGING
-            print(f"[RGB LOSS DEBUG] Before nan_filter: rgb_pred shape={model_outputs['rgb'].shape}, rgb_gt shape={rgb_gt.shape}")
-            print(f"[RGB LOSS DEBUG] nan_filter sum={nan_filter.sum().item()} out of {nan_filter.shape[0]}")
-            print(f"[RGB LOSS DEBUG] valid_pix sum={valid_pix[nan_filter].sum().item()}")
+            logger.info(f"[RGB LOSS DEBUG] Before nan_filter: rgb_pred shape={model_outputs['rgb'].shape}, rgb_gt shape={rgb_gt.shape}")
+            logger.info(f"[RGB LOSS DEBUG] nan_filter sum={nan_filter.sum().item()} out of {nan_filter.shape[0]}")
+            logger.info(f"[RGB LOSS DEBUG] valid_pix sum={valid_pix[nan_filter].sum().item()}")
 
             rgb_loss = loss_terms.get_rgb_loss(
                 model_outputs["rgb"][nan_filter],
@@ -177,11 +192,24 @@ class Loss(nn.Module):
                 image_scores,
             )
             loss_dict["loss/rgb"] = rgb_loss * 1.0
-            print(f"[DEBUG RGB LOSS] rgb_loss value: {rgb_loss.item():.6f}")
+            logger.info(f"[DEBUG RGB LOSS] rgb_loss value: {rgb_loss.item():.6f}")
 
-        # Semantic segmentation loss
-        if "semantics" in model_outputs:
-            sem_pred = model_outputs["semantics"]  # [N, 4] where N = num pixels
+        # ================================================================
+        # SEMANTIC LOSS WITH FALLBACK KEY DETECTION
+        # ================================================================
+        logger.info(f"[DEBUG CONDITION] Checking for semantic outputs in model_outputs")
+        logger.info(f"[DEBUG CONDITION] model_outputs keys (first 30): {list(model_outputs.keys())[:30]}")
+
+        # Try multiple key variations (prioritize 'semantics' over 'fg_semantics')
+        sem_key = None
+        for key in ["semantics", "fg_semantics", "semantic", "sem_pred"]:
+            if key in model_outputs:
+                sem_key = key
+                break
+
+        if sem_key is not None:
+            logger.info(f"[DEBUG] ✅ Found semantic output under key: '{sem_key}'")
+            sem_pred = model_outputs[sem_key]  # [N, 4] where N = num pixels
 
             # ✅ FIX: Flatten mask_gt to match sem_pred
             if "gt.mask" in batch:
@@ -193,8 +221,13 @@ class Loss(nn.Module):
                 mask_gt_sem = torch.zeros(sem_pred.shape[0], device=device).long()
 
             # ✅ VALIDATION: Ensure shapes match
-            assert mask_gt_sem.shape[0] == sem_pred.shape[0], \
-                f"Semantic loss shape mismatch: mask {mask_gt_sem.shape} vs pred {sem_pred.shape}"
+            if sem_pred.shape[0] != mask_gt_sem.shape[0]:
+                logger.info(f"[WARN] Shape mismatch before adjustment: sem_pred={sem_pred.shape[0]} vs mask_gt={mask_gt_sem.shape[0]}")
+                # Adjust to minimum length
+                min_len = min(sem_pred.shape[0], mask_gt_sem.shape[0])
+                sem_pred = sem_pred[:min_len]
+                mask_gt_sem = mask_gt_sem[:min_len]
+                logger.info(f"[WARN] Adjusted to min_len={min_len}")
 
             sem_loss = loss_terms.get_sem_loss(
                 sem_pred,
@@ -204,16 +237,56 @@ class Loss(nn.Module):
                 edge_weight=self.edge_weight,
             )
 
-            # Standard semantic weight scheduling
-            # w_sem = torch.linspace(1.1, 0.1, self.milestone + 1)[progress]
-            w_sem = 1.0  # Constant weight like official HOLD
+            # Semantic weight schedule: low early, moderate later
+            if progress < 1000:
+                w_sem = 0.10
+            elif progress < 5000:
+                w_sem = 0.20
+            else:
+                w_sem = 0.30
 
             # Apply weight and store
             loss_dict["loss/sem"] = sem_loss * w_sem
 
-            # ✅ LOG: Confirm semantic loss is being computed
-            print(f"[DEBUG SEM LOSS] Value: {sem_loss.item():.6f}, Weight: {w_sem:.6f}, Weighted: {(sem_loss * w_sem).item():.6f}")
+            # Log: confirm semantic loss and weight
+            logger.info(
+                f"[DEBUG SEM LOSS] Value: {sem_loss.item():.6f}, "
+                f"Weight: {w_sem:.6f}, Weighted: {(sem_loss * w_sem).item():.6f}"
+            )
+            # ✅ ADD THIS SECTION (lines 216-230):
+            # ================================================================
+            # BINARY MASK LOSS (NEW - EXPERIMENTAL)
+            # ================================================================
+            if "mask_prob" in model_outputs:
+                mask_prob = model_outputs["mask_prob"]
 
+                # Convert semantic GT to binary (0=background, 1=foreground)
+                mask_gt_binary = (mask_gt_sem > 0).float()
+
+                # Ensure lengths match
+                min_len = min(mask_prob.shape[0], mask_gt_binary.shape[0])
+
+                try:
+                    mask_loss_binary = loss_terms.get_mask_loss(
+                        mask_prob[:min_len],
+                        mask_gt_binary[:min_len],
+                        valid_pix[:min_len]
+                    )
+
+                    # Add to loss dict with weight
+                    # w_mask_binary = 0.5  # Test weight
+                    w_mask_binary = 0.1
+                    loss_dict["loss/mask_binary"] = mask_loss_binary * w_mask_binary
+
+                    logger.info(f"[MASK BINARY DEBUG] loss={mask_loss_binary.item():.6f}, "
+                          f"weighted={(mask_loss_binary * w_mask_binary).item():.6f}")
+                except Exception as e:
+                    logger.info(f"[ERROR] Binary mask loss computation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+        else:
+            logger.info(f"[DEBUG] ❌ No semantic output found in model_outputs")
+            logger.info(f"[DEBUG] Available keys (full list): {list(model_outputs.keys())}")
         # Opacity sparse loss
         opacity_sparse_loss = 0.0
         for key in model_outputs.search("index_off_surface").keys():

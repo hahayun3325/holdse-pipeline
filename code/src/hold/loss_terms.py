@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 import common.torch_utils as torch_utils
 from src.model.mano.server import MANOServer
+import logging
+logger = logging.getLogger(__name__)
 
 eps = 1e-6
 l1_loss = nn.L1Loss(reduction="none")
@@ -45,7 +47,7 @@ def get_rgb_loss(rgb_values, rgb_gt, valid_pix, scores):
         num_pix_per_score = num_pix_total // num_scores
         new_N = num_pix_per_score * num_scores
         # Only log once per run ideally, but for now warn each time
-        print(
+        logger.info(
             f"[get_rgb_loss] ⚠️ Size mismatch: N={num_pix_total}, "
             f"scores={num_scores}. Truncating to N={new_N}."
         )
@@ -63,7 +65,7 @@ def get_rgb_loss(rgb_values, rgb_gt, valid_pix, scores):
 
     # Normalize by number of valid pixels
     rgb_loss = rgb_loss.sum() / (valid_pix.sum() + 1e-6)
-    print(f"[get_rgb_loss DEBUG] rgb_loss.sum()={rgb_loss.sum().item():.6f}, valid_pix.sum()={valid_pix.sum().item():.6f}")
+    logger.info(f"[get_rgb_loss DEBUG] rgb_loss.sum()={rgb_loss.sum().item():.6f}, valid_pix.sum()={valid_pix.sum().item():.6f}")
     return rgb_loss
 
 
@@ -144,8 +146,6 @@ def get_opacity_sparse_loss(acc_map, index_off_surface, scores):
     if acc_map.shape[0] % scores_flat.shape[0] != 0:
         # Mismatch: acc_map size not divisible by scores size
         # This is a warning condition but continue
-        import logging
-        logger = logging.getLogger(__name__)
         logger.warning(
             f"[get_opacity_sparse_loss] Pixel/score mismatch: "
             f"acc_map={acc_map.shape[0]}, scores={scores_flat.shape[0]} (from {original_shape}). "
@@ -203,9 +203,21 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
         loss: Scalar semantic loss
     """
     # Detect format
-    print(f"[DEBUG get_sem_loss] sem_pred shape: {sem_pred.shape}")
-    print(f"[DEBUG get_sem_loss] mask_gt shape: {mask_gt.shape}")
-    print(f"[DEBUG get_sem_loss] valid_pix shape: {valid_pix.shape}")
+    logger.info(f"[DEBUG get_sem_loss] sem_pred shape: {sem_pred.shape}")
+    logger.info(f"[DEBUG get_sem_loss] mask_gt shape: {mask_gt.shape}")
+    logger.info(f"[DEBUG get_sem_loss] valid_pix shape: {valid_pix.shape}")
+
+    # ADD VALIDATION:
+    if mask_gt.numel() == 0:
+        logger.info(f"[ERROR] mask_gt is empty!")
+        return torch.tensor(0.0, device=sem_pred.device)
+
+    # Check for unexpected mask values
+    unique_vals = torch.unique(mask_gt)
+    logger.info(f"[DEBUG] mask_gt unique values: {unique_vals}")
+    if len(unique_vals) <= 2:
+        logger.info(f"[WARN] mask_gt appears binary (only {len(unique_vals)} unique values)")
+
 
     is_sampled_pixels = (sem_pred.ndim == 2)  # (N, 4) format
     is_full_image = (sem_pred.ndim == 4)  # (B, H, W, 4) or (B, 4, H, W)
@@ -240,7 +252,7 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
     # CASE 1: SAMPLED PIXELS (N, 4)
     # ================================================================
     if is_sampled_pixels:
-        print(f"[DEBUG] Using sampled pixel loss (no edge weighting)")
+        logger.info(f"[DEBUG] Using sampled pixel loss (no edge weighting)")
 
         # Flatten GT to match sampled format
         if semantic_gt.ndim > 1:
@@ -252,6 +264,16 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
             valid_pix_flat = valid_pix.flatten()
         else:
             valid_pix_flat = valid_pix
+
+        # ✅ MOVE ASSERTIONS HERE (BEFORE loss computation)
+        assert sem_pred.shape[0] == semantic_gt_flat.shape[0], \
+            f"Shape mismatch: sem_pred[0]={sem_pred.shape[0]} vs semantic_gt={semantic_gt_flat.shape[0]}"
+
+        assert sem_pred.shape[0] == valid_pix_flat.shape[0], \
+            f"Shape mismatch: sem_pred[0]={sem_pred.shape[0]} vs valid_pix={valid_pix_flat.shape[0]}"
+
+        logger.info(f"[DEBUG] Shapes validated: sem_pred={sem_pred.shape}, "
+              f"semantic_gt_flat={semantic_gt_flat.shape}, valid_pix_flat={valid_pix_flat.shape}")
 
         # Standard cross-entropy loss
         sem_loss = F.cross_entropy(
@@ -266,9 +288,19 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
         # Average over valid pixels
         sem_loss = sem_loss.sum() / (valid_pix_flat.sum() + 1e-6)
 
+        # ADD DETAILED LOGGING:
+        if torch.rand(()) < 0.01:  # 1% sampling
+            ce_raw = F.cross_entropy(sem_pred, semantic_gt_flat.long(), reduction='none')
+            logger.info(f"[SEM DETAIL]")
+            logger.info(f"  ce_raw: mean={ce_raw.mean():.6f}, std={ce_raw.std():.6f}, "
+                  f"min={ce_raw.min():.6f}, max={ce_raw.max():.6f}")
+            logger.info(f"  valid_pix_flat: sum={valid_pix_flat.sum()}, mean={valid_pix_flat.mean():.4f}")
+            logger.info(f"  sem_loss (final): {sem_loss.item():.10f}")
+            logger.info(f"  Class distribution in GT: {torch.bincount(semantic_gt_flat.long())}")
+
         # Note: edge_weight is ignored for sampled pixels (can't detect edges)
         if edge_weight > 0.0:
-            print(f"[WARN] edge_weight={edge_weight} ignored for sampled pixel format")
+            logger.info(f"[WARN] edge_weight={edge_weight} ignored for sampled pixel format")
 
         return sem_loss
 
@@ -276,7 +308,7 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
     # CASE 2: FULL IMAGE (B, H, W, 4) or (B, 4, H, W)
     # ================================================================
     elif is_full_image:
-        print(f"[DEBUG] Using full image loss (edge weighting={edge_weight})")
+        logger.info(f"[DEBUG] Using full image loss (edge weighting={edge_weight})")
 
         # Normalize to (B, C, H, W) format
         if sem_pred.shape[1] == 4:
@@ -338,10 +370,10 @@ def get_sem_loss(sem_pred, mask_gt, valid_pix, scores, edge_weight=0.0):
                 return total_loss
 
             except ImportError:
-                print("WARNING: kornia not installed, edge_weight ignored")
+                logger.info("WARNING: kornia not installed, edge_weight ignored")
                 return sem_loss_standard
             except Exception as e:
-                print(f"WARNING: Edge detection failed: {e}, using standard loss")
+                logger.info(f"WARNING: Edge detection failed: {e}, using standard loss")
                 return sem_loss_standard
         else:
             return sem_loss_standard
