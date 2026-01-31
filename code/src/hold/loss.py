@@ -205,7 +205,8 @@ class Loss(nn.Module):
             )
 
             # Standard semantic weight scheduling
-            w_sem = torch.linspace(1.1, 0.1, self.milestone + 1)[progress]
+            # w_sem = torch.linspace(1.1, 0.1, self.milestone + 1)[progress]
+            w_sem = 1.0  # Constant weight like official HOLD
 
             # Apply weight and store
             loss_dict["loss/sem"] = sem_loss * w_sem
