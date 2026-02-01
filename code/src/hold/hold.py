@@ -194,6 +194,8 @@ class HOLD(pl.LightningModule):
             opt = validate_phase2_config(opt)
             phase3_cfg = opt.phase3
 
+            self.grid_resolution = phase3_cfg.get('grid_resolution', 64)  # ← changed from 24
+
             # Determine initialization mode
             use_modular_init = phase3_cfg.get('use_modular_init', False)
 
@@ -825,7 +827,6 @@ class HOLD(pl.LightningModule):
             self.warmup_iters = phase3_cfg.get('warmup_iters', 0)
             self.sds_iters = phase3_cfg.get('sds_iters', 500)
             self.w_sds = phase3_cfg.get('w_sds', 5000.0)
-            self.grid_resolution = phase3_cfg.get('grid_resolution', 64)  # ← changed from 24
 
             self.phase3_enabled = True
             self.ghop_enabled = True
@@ -1280,6 +1281,7 @@ class HOLD(pl.LightningModule):
         self.log_contact_every = getattr(args, 'log_contact_every', 10)
         self.log_phase5_every = getattr(args, 'log_phase5_every', 10)
 
+
         logger.debug(f"[HOLD] Logging frequencies initialized:")
         logger.debug(f"  log_ghop_every: {self.log_ghop_every}")
         logger.debug(f"  log_contact_every: {self.log_contact_every}")
@@ -1316,6 +1318,10 @@ class HOLD(pl.LightningModule):
                 logger.error(f"  Test Chamfer FAILED: {e}")
 
             logger.info("=" * 70)
+
+        # Logging / export intervals
+        self.save_misc_every = getattr(self.opt.logging, "save_misc_every", 100)
+        logger.info(f"save_misc_every: {self.save_misc_every}")
 
     def _load_object_templates(self):
         """
@@ -2224,6 +2230,7 @@ class HOLD(pl.LightningModule):
                 logger.info(f"[Loss Debug] w_chamfer value: {self.loss.w_chamfer}")
         # 1. Normal Consistency
         # Model uses 'nodes', not 'servers' - confirmed via diagnostics
+        logger.info(f"[GEOM-DEBUG] Before normal consistency: {geometric_loss.item()}")
         if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
             object_node = self.model.nodes['object']
 
@@ -2233,8 +2240,14 @@ class HOLD(pl.LightningModule):
 
                 if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'sdf_grid'):
                     normal_loss = normal_consistency_loss(object_server.object_model.sdf_grid)
-                    geometric_loss = geometric_loss + self.opt.loss.w_normal_consistency * normal_loss
-
+                    if not torch.isfinite(normal_loss).all():
+                        logger.warning(
+                            f"[Normal Consistency] Step {self.global_step}: non-finite value "
+                            f"(min={torch.nan_to_num(normal_loss).min().item():.4e}, "
+                            f"max={torch.nan_to_num(normal_loss).max().item():.4e}); skipping term."
+                        )
+                    else:
+                        geometric_loss = geometric_loss + self.opt.loss.w_normal_consistency * normal_loss
                     if self.global_step % 100 == 0:
                         logger.info(f"[Normal Consistency] Step {self.global_step}: {normal_loss.item():.6f}")
 
@@ -2245,6 +2258,7 @@ class HOLD(pl.LightningModule):
                 logger.warning("⚠️ Object node has no 'server' - skipping normal consistency")
         elif self.global_step == 0:
             logger.warning("⚠️ Model has no 'nodes' or no 'object' node - Normal Consistency DISABLED")
+        logger.info(f"[GEOM-DEBUG] After normal consistency: {geometric_loss.item()}")
 
         # 2. Depth Smoothness (edge-aware) - UNCHANGED
         depth_key = None
@@ -2308,6 +2322,7 @@ class HOLD(pl.LightningModule):
             logger.warning(f"   rgb_key found: {rgb_key}")
             logger.warning(f"   Available depth keys: {[k for k in model_outputs.keys() if 'depth' in k.lower()]}")
             logger.warning(f"   Available rgb keys: {[k for k in batch.keys() if 'rgb' in k.lower() or 'image' in k.lower()]}")
+        logger.info(f"[GEOM-DEBUG] After depth smoothness: {geometric_loss.item()}")
 
         # 3. Template Chamfer (activation step configured in YAML)
         # Get Chamfer activation threshold from config (with fallback for backward compatibility)
@@ -2456,6 +2471,7 @@ class HOLD(pl.LightningModule):
         # Add to total loss (FIXED variable name)
         total_loss = total_loss + geometric_loss
         loss_output['geometric_loss'] = geometric_loss.item()
+        logger.info(f"[GEOM-DEBUG] After chamfer: {geometric_loss.item()}")
 
         # ============================================================
         # OBJECT TEMPLATE CHAMFER (New - Step 3A)
@@ -3469,6 +3485,9 @@ class HOLD(pl.LightningModule):
                         if self.global_step % self.log_sds_weight_every == 0:
                             logger.debug(f"[SDS-WEIGHT] Using scheduler weight only: {final_sds_weight:.4f}")
 
+                    # ✅ INSERT HERE: Amplify SDS to compete with RGB - Test higher SDS weight
+                    final_sds_weight = final_sds_weight * 2.0
+
                     # Apply weight to raw SDS loss
                     if 'sds' in ghop_losses:
                         raw_sds_loss = ghop_losses['sds']
@@ -4333,7 +4352,9 @@ class HOLD(pl.LightningModule):
 
             # Return dummy loss for PyTorch Lightning
             dummy_loss = torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=False)
-            return {"loss": dummy_loss}
+            logger.error(
+                f"[DEBUG] About to hit dummy_loss return at step {self.global_step}, loss={total_loss.item()}")
+            loss_to_return = dummy_loss
 
         # ================================================================
         # GHOP FIX: Manual optimization to prevent double backward
@@ -4353,7 +4374,8 @@ class HOLD(pl.LightningModule):
             # - Do not call backward/step.
             # - Return a zero loss tensor (so Lightning's machinery still works).
             safe_zero = torch.tensor(0.0, device=final_loss.device, requires_grad=False)
-            return {"loss": safe_zero}
+            logger.error(f"[DEBUG] About to hit GHOP safe_zero return at step {self.global_step}")
+            loss_to_return = safe_zero
 
         # ================================================================
         # UNIFIED LOSS LOGGING - Place at END of training_step (before return)
@@ -4842,6 +4864,13 @@ class HOLD(pl.LightningModule):
                                 logger.warning("[Object Gradient] No gradients!")
             except Exception as e:
                 logger.error(f"[Vertex Tracking] Failed: {e}")
+
+        # STEP-LEVEL misc export: every save_misc_every steps
+        if getattr(self, "save_misc_every", -1) > 0 and self.global_step > 0:
+            if self.global_step % self.save_misc_every == 0 and not getattr(self.args, "no_meshing", False):
+                # Use a consistent tag for meshing; "misc" is fine
+                self.meshing_cano("misc")
+                self.save_misc()
 
         return {'loss': final_loss.detach()}
 
@@ -6531,11 +6560,6 @@ class HOLD(pl.LightningModule):
                 f"  Reserved: {reserved_final:.2f} MB"
             )
 
-        # Canonical mesh update every 3 epochs
-        if (current_epoch > 0 and current_epoch % 3 == 0 and not self.args.no_meshing) or \
-                (current_step > 0 and self.args.fast_dev_run and not self.args.no_meshing):
-            self.meshing_cano(current_step)
-            self.save_misc()
         # ================================================================
         # ✅ NEW FIX 7: Clear DataLoader Worker Memory
         # ================================================================

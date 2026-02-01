@@ -238,12 +238,13 @@ class Loss(nn.Module):
             )
 
             # Semantic weight schedule: low early, moderate later
-            if progress < 1000:
-                w_sem = 0.10
-            elif progress < 5000:
-                w_sem = 0.20
-            else:
-                w_sem = 0.30
+            # if progress < 1000:
+            #     w_sem = 0.10
+            # elif progress < 5000:
+            #     w_sem = 0.20
+            # else:
+            #     w_sem = 0.30
+            w_sem = 0.05 # Test: keep a small semantic signal
 
             # Apply weight and store
             loss_dict["loss/sem"] = sem_loss * w_sem
@@ -275,7 +276,7 @@ class Loss(nn.Module):
 
                     # Add to loss dict with weight
                     # w_mask_binary = 0.5  # Test weight
-                    w_mask_binary = 0.1
+                    w_mask_binary = 0.05   # was 0.1
                     loss_dict["loss/mask_binary"] = mask_loss_binary * w_mask_binary
 
                     logger.info(f"[MASK BINARY DEBUG] loss={mask_loss_binary.item():.6f}, "

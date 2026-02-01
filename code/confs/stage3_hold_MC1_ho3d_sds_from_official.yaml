@@ -47,10 +47,10 @@ phase3:
     step_5000: 0.25
     step_10000: 0.22             # ← Slower decay
     step_15000: 0.18
-    step_20000: 0.15             # ← Higher than before
-    step_25000: 0.12
-    step_30000: 0.10
-    step_34999: 0.04             # ← Minimal baseline (not 0)
+    step_20000: 0.18             # was 0.15
+    step_25000: 0.16             # was 0.12
+    step_30000: 0.12             # was 0.10
+    step_34999: 0.10             # was 0.04
     interpolation: "linear"
 
   diagnostics:
@@ -248,17 +248,17 @@ loss:
   w_temporal: 1.0               # NEW: Temporal base weight
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
-  w_normal_consistency: 0.15
-  w_depth_smoothness: 0.1
+  w_normal_consistency: 0.01 # was 0.15
+  w_depth_smoothness: 0.01 # was 0.1
   w_chamfer: 0.05                    # ← CHANGED from w_template_chamfer
-  chamfer_start_step: 15000            # ← NEW: Add this line!
+  chamfer_start_step: 1000            # was 15000
   # ============================================================
-  # Object Template Chamfer (NEW - Step 3A)
+  # Object Template Chamfer (temporarily disabled)
   # ============================================================
-  w_obj_chamfer: 0.8              # Weight for object shape regularization ↑ from 0.15 → 0.8
-  obj_chamfer_start_step: 0     # Start after SDS warmup (Phase 3) ↑ start from step 0 instead of 10
-  w_obj_generic: 0.05          # Generic prior fallback (weaker than template)
-  w_obj_smoothness: 0.02       # ↑ from 0.001 → 0.02
+  w_obj_chamfer: 0.0          # ✅ disable template Chamfer, changed from 0.8
+  obj_chamfer_start_step: 999999  # > max_steps, so it never activates
+  w_obj_generic: 0.0          # avoid extra priors while debugging, changed from 0.05
+  w_obj_smoothness: 0.05       # was 0.02
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
@@ -326,3 +326,6 @@ callbacks:
     filename: "step{step:05d}"
     save_on_train_epoch_end: false
     verbose: true
+
+logging:
+  save_misc_every: 500

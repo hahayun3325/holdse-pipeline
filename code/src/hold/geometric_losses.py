@@ -4,13 +4,18 @@ import torch.nn.functional as F
 
 def normal_consistency_loss(sdf_grid):
     """Encourages smooth surfaces by penalizing SDF gradient variance."""
-    # Compute gradients in 3D
-    normals_x = sdf_grid[1:] - sdf_grid[:-1]
-    normals_y = sdf_grid[:, 1:] - sdf_grid[:, :-1]
-    normals_z = sdf_grid[:, :, 1:] - sdf_grid[:, :, :-1]
+    # supports [D,H,W] or [B,D,H,W]
+    if sdf_grid.dim() == 4:
+      sdf = sdf_grid  # [B,D,H,W]
+    else:
+      sdf = sdf_grid.unsqueeze(0)  # [1,D,H,W]
 
-    # Return average variance
-    return (normals_x.var() + normals_y.var() + normals_z.var()) / 3.0
+    normals_x = sdf[..., 1:, :, :] - sdf[..., :-1, :, :]
+    normals_y = sdf[..., :, 1:, :] - sdf[..., :, :-1, :]
+    normals_z = sdf[..., :, :, 1:] - sdf[..., :, :, :-1]
+
+    loss = (normals_x.var() + normals_y.var() + normals_z.var()) / 3.0
+    return loss
 
 
 def depth_smoothness_loss(depth, image):
