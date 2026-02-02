@@ -1671,7 +1671,8 @@ class HOLD(pl.LightningModule):
         for node in self.model.nodes.values():
             if "object" in node.node_id:
                 if hasattr(node.server, 'object_model') and hasattr(node.server.object_model, 'obj_scale'):
-                    out[f"{node.node_id}.obj_scale"] = node.server.object_model.obj_scale
+                    # Store under official key used in evaluation
+                    out["obj_scale"] = node.server.object_model.obj_scale
 
         # ================================================================
         # Extract image paths
@@ -1701,7 +1702,26 @@ class HOLD(pl.LightningModule):
         out["w2c"] = w2c
 
         # Generate canonical meshes
-        mesh_dict = self.meshing_cano("misc")
+        mesh_dict = self.meshing_cano(self.global_step)
+
+        # Map to official HOLD keys expected by evaluation
+        # 'object_cano' and 'right_cano' come from meshing_cano:
+        #   mesh_dict[f"{node.node_id}_cano"] = mesh_c
+        object_cano = mesh_dict.get("object_cano", None)
+        right_cano = mesh_dict.get("right_cano", None)
+        # Validate object mesh before saving
+        if object_cano is not None and hasattr(object_cano, "faces"):
+            if object_cano.faces is None or object_cano.faces.shape[0] == 0:
+                logger.error(
+                    f"[save_misc] Step {self.global_step}: mesh_c_o has zero or no faces; "
+                    f"canonical extraction failed. Evaluation ICP will not be valid."
+                )
+                # Option 1: drop it so eval can detect missing mesh
+                object_cano = None
+        out["mesh_c_o"] = object_cano
+        out["mesh_c_h"] = right_cano
+
+        # Optionally keep the original keys too (harmless for evaluation)
         out.update(mesh_dict)
         # ⚠️ CRITICAL FIX: Restore model to training mode after meshing
         self.model.train()
@@ -2813,6 +2833,7 @@ class HOLD(pl.LightningModule):
                                     obj_model = obj_node.server.object_model
                                     if hasattr(obj_model, 'v3d_cano'):
                                         sdf_is_valid = True
+                                        obj_verts_list = [obj_model.v3d_cano]  # ← ADD THIS LINE
                                         if self.global_step % 100 == 0:
                                             logger.info(
                                                 f"[BYPASS] Forced sdf_is_valid=True for vertex-based object at step {self.global_step}")
@@ -2881,7 +2902,6 @@ class HOLD(pl.LightningModule):
                         # ============================================================
                         # STEP 4: Extract Object Mesh
                         # ============================================================
-
                         if sdf_is_valid and obj_verts_list and len(obj_verts_list) > 0:
                             obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
 
@@ -3119,6 +3139,18 @@ class HOLD(pl.LightningModule):
                     # Only apply if learnable
                     if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
 
+                        # --- SDF health statistics ---
+                        sdf_min = sdf_grid.min()
+                        sdf_max = sdf_grid.max()
+                        sdf_std = sdf_grid.std()
+                        has_zero = (sdf_min < 0.0) & (sdf_max > 0.0)
+
+                        if self.global_step % 100 == 0:
+                            self.log('sdf/min', sdf_min.item())
+                            self.log('sdf/max', sdf_max.item())
+                            self.log('sdf/std', sdf_std.item())
+                            self.log('sdf/has_zero_crossing', float(has_zero))
+
                         # 1. Zero-crossing encouragement (mean ≈ 0)
                         mean_sdf = sdf_grid.mean()
                         zero_crossing_loss = torch.abs(mean_sdf) * 0.1
@@ -3149,6 +3181,29 @@ class HOLD(pl.LightningModule):
                         sdf_regularization = (zero_crossing_loss + gradient_loss +
                                               eikonal_loss + range_loss)
                         total_loss = total_loss + sdf_regularization
+                        # --- Degeneracy detection & re-init ---
+                        if not hasattr(self, '_sdf_bad_count'):
+                            self._sdf_bad_count = 0
+
+                        is_degenerate = (not has_zero) or (sdf_std.item() < 1e-5)
+
+                        if is_degenerate:
+                            self._sdf_bad_count += 1
+                        else:
+                            self._sdf_bad_count = 0
+
+                        if self._sdf_bad_count >= 5 and self.global_step > 1000:
+                            logger.error(
+                                f"[SDF COLLAPSE] Step {self.global_step}: "
+                                f"range=[{sdf_min.item():.4f}, {sdf_max.item():.4f}], "
+                                f"std={sdf_std.item():.6e}. "
+                                f"Re-initializing from template."
+                            )
+                            # object_server is already in scope here
+                            self._reinit_object_sdf_from_template(
+                                object_server.object_model, batch
+                            )
+                            self._sdf_bad_count = 0
 
                         # Log every 100 steps
                         if self.global_step % 100 == 0:
@@ -4961,6 +5016,45 @@ class HOLD(pl.LightningModule):
     # ====================================================================
     # HELPER METHODS
     # ====================================================================
+
+    def _reinit_object_sdf_from_template(self, object_model, batch):
+        # 1. Extract category (same pattern as lines 2578–2587)
+        init_category = batch.get('object_category') or batch.get('category')
+
+        while isinstance(init_category, (list, tuple)) and len(init_category) > 0:
+            init_category = init_category[0]
+        if isinstance(init_category, torch.Tensor):
+            init_category = (init_category.item() if init_category.numel() == 1
+                             else str(init_category[0].item()))
+        if init_category:
+            init_category = str(init_category).strip().lower()
+
+        if not (init_category and init_category in self.object_templates):
+            logger.warning(f"[SDF REINIT] No template for '{init_category}', aborting.")
+            return
+
+        if not hasattr(object_model, 'sdf_grid'):
+            logger.error("[SDF REINIT] object_model has no sdf_grid attribute.")
+            return
+
+        sdf_grid = object_model.sdf_grid
+        template_verts = self.object_templates[init_category]
+
+        initialized_sdf = self._mesh_to_sdf_grid(
+            template_verts,
+            grid_resolution=sdf_grid.shape[-1],
+            padding=0.1
+        )
+
+        with torch.no_grad():
+            sdf_grid.data = initialized_sdf.to(sdf_grid.device)
+
+        logger.info(
+            f"[SDF REINIT] Success for '{init_category}'. "
+            f"mean={sdf_grid.mean().item():.4f}, "
+            f"std={sdf_grid.std().item():.6f}, "
+            f"range=[{sdf_grid.min().item():.4f}, {sdf_grid.max().item():.4f}]"
+        )
 
     def _extract_sdf_grid_from_nodes(self, batch, resolution=32):
         """Extract SDF values on regular grid from object node."""
@@ -6819,7 +6913,11 @@ class HOLD(pl.LightningModule):
                 try:
                     # Call node's meshing method (also wrapped in no_grad internally)
                     mesh_c = node.meshing_cano()
-
+                    # For object node, reject meshes with no faces so we hit the fallback
+                    if node.node_id == "object":
+                        if mesh_c is None or not hasattr(mesh_c, "faces") or mesh_c.faces is None or mesh_c.faces.shape[
+                            0] == 0:
+                            raise ValueError(f"[meshing_cano] {node.node_id} returned mesh with no faces")
                     # ================================================================
                     # FIX 3: Verify mesh has no gradient tracking
                     # ================================================================
@@ -6847,6 +6945,56 @@ class HOLD(pl.LightningModule):
 
                 except Exception as e:
                     logger.error(f"Failed to mesh out {node.node_id}: {e}")
+
+                    # Fallback: try vertex-based canonical mesh for object node
+                    if node.node_id == "object":
+                        try:
+                            if hasattr(node, 'server') and hasattr(node.server, 'object_model'):
+                                obj_model = node.server.object_model
+
+                                import trimesh
+                                verts = None
+                                if hasattr(obj_model, 'v3d_cano'):
+                                    verts = obj_model.v3d_cano.detach().cpu().numpy()
+
+                                # 1) Prefer stored faces if they exist and are non-empty
+                                if verts is not None and hasattr(obj_model, 'f3d_cano'):
+                                    faces = obj_model.f3d_cano
+                                    if isinstance(faces, torch.Tensor):
+                                        faces = faces.detach().cpu().numpy()
+
+                                    if faces is not None and faces.shape[0] > 0:
+                                        mesh_c = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+                                        mesh_dict[f"{node.node_id}_cano"] = mesh_c
+                                        logger.warning(
+                                            f"[meshing_cano] Using v3d_cano/f3d_cano fallback for {node.node_id} "
+                                            f"({verts.shape[0]} verts, {faces.shape[0]} faces)"
+                                        )
+                                        return  # or `continue` outer loop
+
+                                # 2) No usable faces: build a convex hull from verts (gives valid faces)
+                                if verts is not None:
+                                    hull = trimesh.Trimesh(vertices=verts, process=True)
+                                    if hull.faces.shape[0] == 0:
+                                        hull = hull.convex_hull  # ensure faces
+                                    mesh_c = hull
+                                    mesh_dict[f"{node.node_id}_cano"] = mesh_c
+                                    logger.warning(
+                                        f"[meshing_cano] Using convex-hull fallback for {node.node_id} "
+                                        f"({verts.shape[0]} verts, {mesh_c.faces.shape[0]} faces)"
+                                    )
+                                else:
+                                    # 3) Absolute last resort: minimal dummy triangle so evaluation doesn't crash
+                                    dummy_verts = np.array([[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0]], dtype=np.float32)
+                                    dummy_faces = np.array([[0, 1, 2]], dtype=np.int64)
+                                    mesh_c = trimesh.Trimesh(vertices=dummy_verts, faces=dummy_faces, process=False)
+                                    mesh_dict[f"{node.node_id}_cano"] = mesh_c
+                                    logger.error(
+                                        f"[meshing_cano] All fallbacks failed, using dummy mesh for {node.node_id}"
+                                    )
+
+                        except Exception as e2:
+                            logger.error(f"[meshing_cano] Fallback for object failed: {e2}")
 
             return mesh_dict
 

@@ -57,5 +57,5 @@ if __name__ == "__main__":
 '''
 export COMET_API_KEY="4hhuylWTxYQBirmxKwuwGv4Q5"
 export COMET_WORKSPACE="cloudy"
-python render.py --case hold_MC1_ho3d --load_ckpt logs/5b9638e3d/checkpoints/last.ckpt --config confs/render_3phases_hold_MC1_ho3d_phase3.yaml --mute --agent_id -1
+python render.py --case hold_MC1_ho3d --load_ckpt logs/aa59e9bb3_000002000/checkpoints/last.ckpt --config confs/render_3phases_hold_MC1_ho3d_phase3.yaml --mute --agent_id -1
 '''
