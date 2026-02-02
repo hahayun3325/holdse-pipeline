@@ -274,3 +274,5 @@ callbacks:
     filename: "step{step:05d}"
     save_on_train_epoch_end: false
     verbose: true
+logging:
+  save_misc_every: 500

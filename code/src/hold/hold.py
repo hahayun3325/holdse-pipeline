@@ -2165,6 +2165,8 @@ class HOLD(pl.LightningModule):
         # ================================================================
         logger.info("[Forward] Calling self.model(batch)...")
         model_outputs = self.model(batch)
+        # Compute base loss first; this will initialize self.loss.im_h/im_w
+        loss_output = self.loss(batch, model_outputs)
         # Check which nodes contributed to output
         if self.global_step % 100 == 0:
             logger.warning(f"\n[NODE CHECK - Step {self.global_step}]")
@@ -2176,11 +2178,71 @@ class HOLD(pl.LightningModule):
         logger.info(f"[Forward] Model returned {len(model_outputs)} keys")
         if should_profile:
             self.memory_profiler.checkpoint("after_forward")
+        # ------------------------------------------------------------------
+        # BUILD LOW-RES DEPTH MAP FOR GEOMETRY PRIOR (Option A)
+        # ------------------------------------------------------------------
+        try:
+            # Prefer object view depth; fall back to scene depth if needed
+            cand_keys = ["object.depth", "right.depth", "depth"]
+            depth_vec = None
+            for k in cand_keys:
+                if k in model_outputs:
+                    depth_vec = model_outputs[k]
+                    chosen_key = k
+                    break
+
+            if depth_vec is not None:
+                # depth_vec is typically [N_rays, 1] or [N_rays]
+                if depth_vec.dim() == 2 and depth_vec.shape[1] == 1:
+                    depth_vec = depth_vec[:, 0]  # [N_rays]
+
+                N = depth_vec.shape[0]
+
+                # Build a compact H×W grid from N rays (e.g., 16×16 for N=256)
+                H = int(N ** 0.5)
+                while H > 1 and N % H != 0:
+                    H -= 1
+                W = N // H  # This will be >= H
+
+                depth_img = depth_vec.view(H, W)  # [H, W]
+                model_outputs["depth_map"] = depth_img
+
+                if self.global_step == 0:
+                    logger.info(
+                        f"[depth_map] Built low-res depth_map from {chosen_key} "
+                        f"with shape=(H={H}, W={W}), N={N}"
+                    )
+
+                depth_img = None
+                if H is not None and W is not None and H * W == N:
+                    # Single-view grid
+                    depth_img = depth_vec.view(H, W)  # [H, W]
+                elif H is not None and W is not None and N % (H * W) == 0:
+                    # Multi-view grid: [B, H, W], take first view
+                    B = N // (H * W)
+                    depth_img = depth_vec.view(B, H, W)[0]  # [H, W]
+
+                if depth_img is not None:
+                    model_outputs["depthmap"] = depth_img
+                    if self.global_step == 0:
+                        logger.info(
+                            f"[DEPTHMAP] Built low-res depthmap from {chosen_key} "
+                            f"with shape={tuple(depth_img.shape)}"
+                        )
+                else:
+                    if self.global_step == 0:
+                        logger.warning(
+                            f"[DEPTHMAP] Could not reshape {chosen_key} with N={N} "
+                            f"into (H={H}, W={W}); depth smoothness will be skipped."
+                        )
+        except Exception as e:
+            if self.global_step == 0:
+                logger.warning(f"[DEPTHMAP] Failed to construct depthmap: {e}")
 
         # ================================================================
         # COMPUTE BASE LOSSES
         # ================================================================
-        loss_output = self.loss(batch, model_outputs)
+        # loss_output = self.loss(batch, model_outputs)
         total_loss = loss_output["loss"]  # base HOLD loss
         # After line 2178, ADD COMMENT:
         # ================================================================
@@ -2262,7 +2324,7 @@ class HOLD(pl.LightningModule):
 
         # 2. Depth Smoothness (edge-aware) - UNCHANGED
         depth_key = None
-        for key in ['depth', 'right.depth', 'object.depth', 'depth_map', 'z_vals']:
+        for key in ["depth_map", "object.depth", "right.depth", "depth", "z_vals"]:
             if key in model_outputs:
                 depth_key = key
                 break
@@ -2291,21 +2353,32 @@ class HOLD(pl.LightningModule):
                             f"(shape={rendered_depth.shape}) incompatible with spatial gradients. "
                             f"Use normal consistency + GSD instead."
                         )
-                    # Skip this loss - proceed to next section
+                # Skip this loss - proceed to next section
                 elif rendered_depth.dim() >= 2:
-                    # Ensure both tensors have compatible shapes
-                    if rendered_depth.shape[:2] != image_rgb.shape[:2]:
-                        # Reshape if needed
-                        H, W = image_rgb.shape[:2]
-                        if rendered_depth.numel() == H * W:
-                            rendered_depth = rendered_depth.reshape(H, W)
+                    # Normalize depth to [H, W]
+                    if rendered_depth.dim() == 4:
+                        # e.g., [B, 1, H, W] or [B, C, H, W] – take first sample, first channel
+                        rendered_depth = rendered_depth[0, 0]  # [H, W]
+                    elif rendered_depth.dim() == 3:
+                        # e.g., [B, H, W] – take first sample
+                        rendered_depth = rendered_depth[0]     # [H, W]
+                    # else: dim == 2 already, assume [H, W] or [Nrays, ?]
+
+                    # Ensure both tensors have compatible H, W
+                    H_rgb, W_rgb = image_rgb.shape[-2:]
+                    if rendered_depth.dim() == 2 and rendered_depth.shape != (H_rgb, W_rgb):
+                        if rendered_depth.numel() == H_rgb * W_rgb:
+                            rendered_depth = rendered_depth.reshape(H_rgb, W_rgb)
 
                     depth_smooth_loss = depth_smoothness_loss(rendered_depth, image_rgb)
                     geometric_loss = geometric_loss + self.opt.loss.w_depth_smoothness * depth_smooth_loss
-                    self.log('loss/depth_smoothness', depth_smooth_loss.item())
+                    self.log("loss/depth_smoothness", depth_smooth_loss.item())
+                    loss_output["loss/depth_smoothness"] = depth_smooth_loss.item()
 
-                    if self.global_step % 100 == 0 and geometric_loss.item() > 0:
-                        logger.info(f"[Geometric Loss] Step {self.global_step}: {geometric_loss.item():.6f}")
+                    if self.global_step % 100 == 0 and geometric_loss.item() != 0:
+                        logger.info(
+                            f"Geometric Loss Step {self.global_step} {geometric_loss.item():.6f}"
+                        )
                     elif self.global_step % 100 == 0:
                         logger.debug(
                             f"[Geometric Loss] Step {self.global_step}: 0.000000 "
@@ -2842,6 +2915,13 @@ class HOLD(pl.LightningModule):
                                     # ============================================================
                                     geometric_loss = geometric_loss + obj_chamfer_weight * obj_chamfer_loss
                                     loss_output['loss/obj_chamfer'] = obj_chamfer_loss.item()
+                                    loss_output['geometric_loss'] = geometric_loss.item()
+                                    if self.global_step % 500 == 0:
+                                        logger.info(
+                                            f"[Object Chamfer] Step {self.global_step}: "
+                                            f"loss={obj_chamfer_loss.item():.4f}, "
+                                            f"weight={obj_chamfer_weight:.3f}"
+                                        )
                                     template_applied = True
 
                                     # Log every 100 steps
@@ -2859,8 +2939,11 @@ class HOLD(pl.LightningModule):
 
                                         # Track distance statistics
                                         with torch.no_grad():
-                                            mean_dist = (obj_verts - template_verts).norm(dim=-1).mean().item()
-                                            max_dist = (obj_verts - template_verts).norm(dim=-1).max().item()
+                                            # Compute one-way nearest-neighbor distance (obj → template)
+                                            dist_matrix = torch.cdist(obj_verts, template_verts)  # [N_obj, N_template]
+                                            nn_dists, _ = dist_matrix.min(dim=1)  # [N_obj]
+                                            mean_dist = nn_dists.mean().item()
+                                            max_dist = nn_dists.max().item()
 
                                             logger.info(
                                                 f"[Object Chamfer Details] mean_dist={mean_dist:.4f}mm, "
@@ -4621,7 +4704,8 @@ class HOLD(pl.LightningModule):
                     logger.warning(f"[GRAD FLOW - Step {self.global_step}]")
                     logger.warning(f"  ❌ pose.grad is None - GRADIENTS NOT FLOWING!")
                 # ADD: Check object vertex gradients
-                obj_model = self.model.servers['object'].object_model
+                # obj_model = self.model.servers['object'].object_model
+                obj_model = self.model.nodes["object"].server.object_model
                 if hasattr(obj_model, 'v3d_cano'):
                     obj_vertices = obj_model.v3d_cano
 
