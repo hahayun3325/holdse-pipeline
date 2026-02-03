@@ -1,97 +1,69 @@
-# import torch
-#
-# ckpt_path = '/home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt'
-# ckpt = torch.load(ckpt_path, map_location='cpu')
-# state_dict = ckpt['state_dict']
-#
-# print(f"Total keys: {len(state_dict)}")
-# print(f"\n{'=' * 70}")
-# print("KEY PREFIX ANALYSIS")
-# print('=' * 70)
-#
-# # Group by first prefix
-# prefixes = {}
-# for key in state_dict.keys():
-#     parts = key.split('.')
-#     prefix = parts[0] if len(parts) > 0 else 'root'
-#     prefixes[prefix] = prefixes.get(prefix, 0) + 1
-#
-# for prefix, count in sorted(prefixes.items(), key=lambda x: -x[1]):
-#     print(f"{prefix:30s}: {count:4d} keys")
-#
-# print(f"\n{'=' * 70}")
-# print("VQ-VAE KEY SEARCH")
-# print('=' * 70)
-#
-# # Search for encoder/decoder patterns
-# vqvae_patterns = ['encoder', 'decoder', 'quantiz', 'quant_conv', 'post_quant']
-# vqvae_keys = {}
-# for key in state_dict.keys():
-#     for pattern in vqvae_patterns:
-#         if pattern in key.lower():
-#             prefix = '.'.join(key.split('.')[:2])  # First two levels
-#             vqvae_keys[prefix] = vqvae_keys.get(prefix, 0) + 1
-#             break
-#
-# if vqvae_keys:
-#     print("Found VQ-VAE related keys:")
-#     for prefix, count in sorted(vqvae_keys.items()):
-#         print(f"  {prefix}: {count} keys")
-#
-#     # Show samples
-#     print("\nSample VQ-VAE keys:")
-#     sample_keys = [k for k in list(state_dict.keys())[:50] if any(p in k.lower() for p in vqvae_patterns)]
-#     for key in sample_keys[:5]:
-#         print(f"  {key}")
-# else:
-#     print("❌ NO VQ-VAE keys found!")
-#
-# print(f"\n{'=' * 70}")
-# print("U-NET KEY SEARCH")
-# print('=' * 70)
-#
-# unet_patterns = ['unet', 'diffusion', 'time_embed', 'in_layers', 'out_layers']
-# unet_keys = {}
-# for key in state_dict.keys():
-#     for pattern in unet_patterns:
-#         if pattern in key.lower():
-#             prefix = '.'.join(key.split('.')[:2])
-#             unet_keys[prefix] = unet_keys.get(prefix, 0) + 1
-#             break
-#
-# if unet_keys:
-#     print("Found U-Net related keys:")
-#     for prefix, count in sorted(unet_keys.items()):
-#         print(f"  {prefix}: {count} keys")
-#
-#     print("\nSample U-Net keys:")
-#     sample_keys = [k for k in list(state_dict.keys())[:50] if any(p in k.lower() for p in unet_patterns)]
-#     for key in sample_keys[:5]:
-#         print(f"  {key}")
-# else:
-#     print("❌ NO U-Net keys found!")
-#
-# print(f"\n{'=' * 70}")
-# print("ACTUAL KEY SAMPLES (first 20)")
-# print('=' * 70)
-# for key in list(state_dict.keys())[:20]:
-#     print(f"  {key}")
-
 import torch
+import numpy as np
 
-ckpt = torch.load('/home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt', map_location='cpu')
 
-# Check for architecture config
-if 'hyper_parameters' in ckpt:
-    print("Hyperparameters:", ckpt['hyper_parameters'])
+def inspect_checkpoint(path, name):
+    ckpt = torch.load(path, map_location='cpu')
+    sd = ckpt['state_dict']
 
-if 'config' in ckpt:
-    print("Config:", ckpt['config'])
+    print(f"\n{'=' * 60}")
+    print(f"Inspecting: {name}")
+    print(f"{'=' * 60}")
 
-# Check encoder weight shapes to infer architecture
-state_dict = ckpt['state_dict']
+    # Find all object-related keys
+    obj_keys = [k for k in sd.keys() if 'object' in k.lower()]
+    print(f"\n1. Found {len(obj_keys)} object-related keys")
 
-# Find GroupNorm weights
-for key, value in state_dict.items():
-    if 'norm' in key and 'weight' in key and 'ae.model' in key:
-        print(f"{key}: {value.shape}")
+    # Check for specific geometry keys
+    geometry_patterns = ['v3d_cano', 'f3d_cano', 'sdf', 'implicit', 'verts', 'mesh']
+    for pattern in geometry_patterns:
+        matching = [k for k in obj_keys if pattern in k.lower()]
+        print(f"   - {pattern}: {len(matching)} keys")
+        for k in matching[:3]:  # Show first 3
+            tensor = sd[k]
+            if tensor.dtype.is_floating_point:
+                print(f"     {k}: shape={tensor.shape}, "
+                      f"mean={tensor.mean():.4f}, std={tensor.std():.4f}, "
+                      f"has_nan={torch.isnan(tensor).any().item()}")
+            else:
+                print(f"     {k}: shape={tensor.shape}, dtype={tensor.dtype} "
+                      f"(integer tensor, skipping mean/std)")
+    # Add to inspection script for HOLDSE
+    sdf_keys = [k for k in sd.keys() if 'sdf' in k.lower() or 'implicit' in k.lower()]
+    print(f"\nSDF/Implicit network keys: {len(sdf_keys)}")
+
+    # Check if object model has valid parameters
+    obj_param_keys = [k for k in sd.keys() if 'object' in k.lower() and 'model' in k.lower()]
+    for k in obj_param_keys[:10]:
+        tensor = sd[k]
+        if tensor.dtype.is_floating_point:
+            print(f"{k}: shape={tensor.shape}, mean={tensor.mean():.4f}, has_nan={torch.isnan(tensor).any()}")
+        else:
+            print(f"{k}: shape={tensor.shape}, dtype={tensor.dtype} (integer tensor)")
+
+    # Check for NaN or extreme values
+    print(f"\n2. Checking for invalid values...")
+    for k in obj_keys:
+        if torch.isnan(sd[k]).any():
+            print(f"   WARNING: {k} contains NaN!")
+        if torch.isinf(sd[k]).any():
+            print(f"   WARNING: {k} contains Inf!")
+
+    # Check SDF health
+    sdf_grid = sd.get('model.nodes.object.server.object_model.sdf_grid', None)
+    if sdf_grid is not None:
+        print(f"\nSDF Grid Analysis:")
+        print(f"  min: {sdf_grid.min():.4f}, max: {sdf_grid.max():.4f}")
+        print(f"  zero-crossings: {((sdf_grid[:-1] * sdf_grid[1:]) < 0).sum().item()}")
+
+    # Check v3d_cano variance
+    v3d = sd.get('model.nodes.object.server.object_model.v3d_cano', None)
+    if v3d is not None:
+        print(f"\nv3d_cano Analysis:")
+        print(f"  bbox: [{v3d.min():.4f}, {v3d.max():.4f}]")
+        print(f"  std: {v3d.std():.4f} (very low = collapsed)")
+
+
+# Run comparison
+inspect_checkpoint('logs/92ebd6cdc_000020000/checkpoints/last.ckpt', 'HOLDSE step 20000')
+inspect_checkpoint('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 'OFFICIAL HOLD')

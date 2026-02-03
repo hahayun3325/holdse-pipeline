@@ -2904,7 +2904,6 @@ class HOLD(pl.LightningModule):
                         # ============================================================
                         if sdf_is_valid and obj_verts_list and len(obj_verts_list) > 0:
                             obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
-
                             if obj_verts.shape[0] > 0:
                                 # ============================================================
                                 # STEP 5: Compute Template Chamfer Distance
@@ -2981,6 +2980,50 @@ class HOLD(pl.LightningModule):
                         else:
                             if self.global_step % 500 == 0:
                                 logger.warning("[Object Chamfer] Mesh extraction returned None")
+                        # AFTER (updated):
+                        obj_verts_for_chamfer = None
+
+                        if sdf_is_valid and obj_verts_list and len(obj_verts_list) > 0:
+                            obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
+                            if obj_verts.shape[0] > 0:
+                                obj_verts_for_chamfer = obj_verts
+
+                        # Fallback: use v3d_cano if SDF/MC path failed
+                        if obj_verts_for_chamfer is None:
+                            if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                                obj_node = self.model.nodes['object']
+                                if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
+                                    obj_model = obj_node.server.object_model
+                                    if hasattr(obj_model, 'v3d_cano'):
+                                        v3d = obj_model.v3d_cano
+                                        if v3d is not None and v3d.numel() > 0:
+                                            obj_verts_for_chamfer = v3d
+                                            if self.global_step % 100 == 0:
+                                                logger.info(
+                                                    f"[Object Chamfer] Using v3d_cano fallback for Chamfer at step {self.global_step}"
+                                                )
+
+                        if obj_verts_for_chamfer is not None and obj_verts_for_chamfer.shape[0] > 0:
+                            template_verts = self.object_templates[obj_category]
+
+                            # Normalize both to zero-mean, unit scale (same as before)
+                            obj_verts_centered = obj_verts_for_chamfer - obj_verts_for_chamfer.mean(dim=0, keepdim=True)
+                            template_centered = template_verts - template_verts.mean(dim=0, keepdim=True)
+
+                            obj_scale = obj_verts_centered.norm(dim=1).max()
+                            template_scale = template_centered.norm(dim=1).max()
+
+                            obj_verts_norm = obj_verts_centered / (obj_scale + 1e-6)
+                            template_verts_norm = template_centered / (template_scale + 1e-6)
+
+                            from pytorch3d.loss import chamfer_distance
+                            chamfer_loss, _ = chamfer_distance(
+                                obj_verts_norm.unsqueeze(0),
+                                template_verts_norm.unsqueeze(0)
+                            )
+
+                            total_loss = total_loss + obj_chamfer_weight * chamfer_loss
+                            loss_output['loss/obj_chamfer'] = chamfer_loss.item()
                     else:
                         # Template not available - generic prior will be used later
                         if self.global_step == obj_chamfer_start:
@@ -3135,6 +3178,7 @@ class HOLD(pl.LightningModule):
                         hasattr(object_server.object_model, 'sdf_grid')):
 
                     sdf_grid = object_server.object_model.sdf_grid
+                    w_sdf_reg = getattr(self.opt.loss, 'w_sdf_reg', 1.0)  # NEW hyperparameter
 
                     # Only apply if learnable
                     if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
@@ -3180,7 +3224,15 @@ class HOLD(pl.LightningModule):
                         # Add to total
                         sdf_regularization = (zero_crossing_loss + gradient_loss +
                                               eikonal_loss + range_loss)
+                        # Apply global weight
+                        sdf_regularization = w_sdf_reg * sdf_regularization
                         total_loss = total_loss + sdf_regularization
+                        # If you have loss_components dict in scope (see LOSS AGGREGATION ORDER block)
+                        if 'loss_components' in locals():
+                            loss_components['object_shape'] += sdf_regularization.item()
+
+                        # Optional: expose a scalar for TensorBoard
+                        loss_output['loss/sdf_regularization'] = sdf_regularization.item()
                         # --- Degeneracy detection & re-init ---
                         if not hasattr(self, '_sdf_bad_count'):
                             self._sdf_bad_count = 0

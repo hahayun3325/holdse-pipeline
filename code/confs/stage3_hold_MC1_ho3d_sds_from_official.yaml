@@ -240,6 +240,7 @@ dataset:
 # LOSS CONFIGURATION (UPDATED FOR STAGE 3)
 # ================================================================
 loss:
+  w_sdf_reg: 1.0
   w_rgb: 1.0                   # was 0.8
   w_mask: 0.5              # CHANGED: from 0.1
   w_mask_edge: 0.15         # NEW: Add this line
