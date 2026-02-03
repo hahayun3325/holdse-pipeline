@@ -6,7 +6,7 @@ sys.path.insert(0, '.')
 sys.path.insert(0, '..')
 
 # Load NEW checkpoint's misc
-new_misc = np.load('logs/92ebd6cdc/misc/000005000.npy', allow_pickle=True).item()
+new_misc = np.load('logs/88ca842a2/misc/000059500.npy', allow_pickle=True).item()
 # new_misc = np.load('/home/fredcui/Projects/hold-master/code/logs/fe2096fe2/misc/000032000_original.npy', allow_pickle=True).item()
 
 # Load official canonical mesh
@@ -25,7 +25,7 @@ hybrid = {
 }
 
 # Save for official HOLD evaluation
-np.save('/home/fredcui/Projects/holdse/code/logs/92ebd6cdc_000005000_hybrid/misc/000005000.npy',
+np.save('/home/fredcui/Projects/holdse/code/logs/88ca842a2_000060000_hybrid/misc/000059500.npy',
         hybrid)
 
 print("✅ Created hybrid: New checkpoint + official canonical mesh")

@@ -1293,6 +1293,37 @@ class HOLD(pl.LightningModule):
         # ✅ ADD: Setup and validate phase boundaries
         self.setup_phase_boundaries()
 
+        # ================================================================
+        # ADD: Logging frequency attributes
+        # ================================================================
+        self.log_ghop_every = args.log_every if args is not None else 10
+        self.log_contact_every = getattr(args, 'log_contact_every', 10)
+        self.log_phase5_every = getattr(args, 'log_phase5_every', 10)
+
+        logger.debug(f"[HOLD] Logging frequencies initialized:")
+        logger.debug(f"  log_ghop_every: {self.log_ghop_every}")
+        logger.debug(f"  log_contact_every: {self.log_contact_every}")
+        logger.debug(f"  log_phase5_every: {self.log_phase5_every}")
+
+        # ✅ ADD: Memory profiler for diagnostics
+        self.memory_profiler = MemoryProfiler()
+        self.profile_memory = True  # Set to False to disable
+        # ✅ ADD: Setup and validate phase boundaries
+        self.setup_phase_boundaries()
+
+        # ================================================================
+        # NEW: Geometry-share controller state
+        # ================================================================
+        # Target fraction of total loss that geometry should occupy in Phase 3
+        self.target_geom_share = getattr(getattr(self.opt, 'loss', {}), 'target_geom_share', 0.05)
+        self.max_geom_scale = getattr(getattr(self.opt, 'loss', {}), 'max_geom_scale', 5.0)
+        self.geom_boost_factor = getattr(getattr(self.opt, 'loss', {}), 'geom_boost_factor', 1.5)
+
+        # Runtime state
+        self._geom_scale = 1.0
+        self._geom_share_ema = 0.0
+        self._geom_share_ema_momentum = 0.9
+
         '''
         Object Chamfer Debugging Section Temporary
         '''
@@ -1899,10 +1930,10 @@ class HOLD(pl.LightningModule):
                 temporal_weight = float(loss_weights['temporal']) if isinstance(loss_weights['temporal'], torch.Tensor) else loss_weights['temporal']
                 lr_mult = float(lr_multiplier) if isinstance(lr_multiplier, torch.Tensor) else lr_multiplier
 
-                self.log('phase5/weight_sds', sds_weight, prog_bar=False)
-                self.log('phase5/weight_contact', contact_weight, prog_bar=False)
-                self.log('phase5/weight_temporal', temporal_weight, prog_bar=False)
-                self.log('phase5/lr_multiplier', lr_mult, prog_bar=False)
+                logger.info('phase5/weight_sds', sds_weight, prog_bar=False)
+                logger.info('phase5/weight_contact', contact_weight, prog_bar=False)
+                logger.info('phase5/weight_temporal', temporal_weight, prog_bar=False)
+                logger.info('phase5/lr_multiplier', lr_mult, prog_bar=False)
 
                 logger.debug(
                     f"[Step {self.global_step}] Phase 5 Scheduler: "
@@ -2333,7 +2364,7 @@ class HOLD(pl.LightningModule):
                     if self.global_step % 100 == 0:
                         logger.info(f"[Normal Consistency] Step {self.global_step}: {normal_loss.item():.6f}")
 
-                    self.log('loss/normal_consistency', normal_loss.item())
+                    logger.info('loss/normal_consistency', normal_loss.item())
                 elif self.global_step == 0:
                     logger.warning("⚠️ Object server has no 'sdf_grid' - skipping normal consistency")
             elif self.global_step == 0:
@@ -2392,7 +2423,7 @@ class HOLD(pl.LightningModule):
 
                     depth_smooth_loss = depth_smoothness_loss(rendered_depth, image_rgb)
                     geometric_loss = geometric_loss + self.opt.loss.w_depth_smoothness * depth_smooth_loss
-                    self.log("loss/depth_smoothness", depth_smooth_loss.item())
+                    logger.info("loss/depth_smoothness", depth_smooth_loss.item())
                     loss_output["loss/depth_smoothness"] = depth_smooth_loss.item()
 
                     if self.global_step % 100 == 0 and geometric_loss.item() != 0:
@@ -2578,7 +2609,20 @@ class HOLD(pl.LightningModule):
             logger.info(
                 f"  Should activate: {self.global_step >= getattr(self.opt.loss, 'obj_chamfer_start_step', 20000)}")
 
-        obj_chamfer_weight = getattr(self.opt.loss, 'w_obj_chamfer', 0.0)
+        # obj_chamfer_weight = getattr(self.opt.loss, 'w_obj_chamfer', 0.0)
+        base_w = getattr(self.opt.loss, 'w_obj_chamfer', 0.2)
+        step = self.global_step
+
+        # Simple piecewise schedule
+        if step < 5000:
+            obj_chamfer_weight = base_w
+        elif step < 10000:
+            obj_chamfer_weight = base_w * 2.0  # 0.4
+        else:
+            obj_chamfer_weight = base_w * 4.0  # 0.8
+
+        if step % 1000 == 0:
+            logger.info(f"[Obj Chamfer] Step {step}: weight={obj_chamfer_weight:.4f}")
         obj_chamfer_start = getattr(self.opt.loss, 'obj_chamfer_start_step', 20000)
 
         if obj_chamfer_weight > 0 and self.global_step >= obj_chamfer_start:
@@ -2804,11 +2848,11 @@ class HOLD(pl.LightningModule):
                                             )
 
                                             # Log to tensorboard for plotting
-                                            self.log('sdf/std', sdf_std)
-                                            self.log('sdf/min', sdf_min)
-                                            self.log('sdf/max', sdf_max)
-                                            self.log('sdf/has_zero_crossing', float(has_zero_crossing))
-                                            self.log('sdf/is_valid', float(sdf_is_valid))
+                                            logger.info('sdf/std', sdf_std)
+                                            logger.info('sdf/min', sdf_min)
+                                            logger.info('sdf/max', sdf_max)
+                                            logger.info('sdf/has_zero_crossing', float(has_zero_crossing))
+                                            logger.info('sdf/is_valid', float(sdf_is_valid))
 
                                         if not sdf_is_valid and self.global_step % 500 == 0:
                                             logger.warning(
@@ -2824,19 +2868,19 @@ class HOLD(pl.LightningModule):
                         if self.global_step % 100  == 0:
                             logger.warning(f"[Object Chamfer] SDF validation error: {e}")
 
-                    # BYPASS: Always force True for vertex representation (OUTSIDE try-except)
-                    if not sdf_is_valid:
-                        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-                            obj_node = self.model.nodes['object']
-                            if hasattr(obj_node, 'server'):
-                                if hasattr(obj_node.server, 'object_model'):
-                                    obj_model = obj_node.server.object_model
-                                    if hasattr(obj_model, 'v3d_cano'):
-                                        sdf_is_valid = True
-                                        obj_verts_list = [obj_model.v3d_cano]  # ← ADD THIS LINE
-                                        if self.global_step % 100 == 0:
-                                            logger.info(
-                                                f"[BYPASS] Forced sdf_is_valid=True for vertex-based object at step {self.global_step}")
+                    # # BYPASS: Always force True for vertex representation (OUTSIDE try-except)
+                    # if not sdf_is_valid:
+                    #     if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                    #         obj_node = self.model.nodes['object']
+                    #         if hasattr(obj_node, 'server'):
+                    #             if hasattr(obj_node.server, 'object_model'):
+                    #                 obj_model = obj_node.server.object_model
+                    #                 if hasattr(obj_model, 'v3d_cano'):
+                    #                     sdf_is_valid = True
+                    #                     obj_verts_list = [obj_model.v3d_cano]  # ← ADD THIS LINE
+                    #                     if self.global_step % 100 == 0:
+                    #                         logger.info(
+                    #                             f"[BYPASS] Forced sdf_is_valid=True for vertex-based object at step {self.global_step}")
 
                     # Only extract mesh if valid
                     if not sdf_is_valid:
@@ -2888,14 +2932,14 @@ class HOLD(pl.LightningModule):
                                         f"{num_verts} verts, {num_faces} faces"
                                     )
 
-                                    self.log('object/extraction_success', 1.0)
-                                    self.log('object/num_vertices', float(num_verts))
+                                    logger.info('object/extraction_success', 1.0)
+                                    logger.info('object/num_vertices', float(num_verts))
                                 else:
                                     logger.warning(
                                         f"❌ [Mesh Extract] Failed at step {self.global_step}: "
                                         f"returned {type(obj_verts_list)}"
                                     )
-                                    self.log('object/extraction_success', 0.0)
+                                    logger.info('object/extraction_success', 0.0)
 
                     # Check if template exists (correct check!)
                     if obj_category in self.object_templates:
@@ -2954,7 +2998,7 @@ class HOLD(pl.LightningModule):
                                         )
 
                                         # Add tensorboard logging
-                                        self.log('loss/obj_chamfer', obj_chamfer_loss.item())
+                                        logger.info('loss/obj_chamfer', obj_chamfer_loss.item())
 
                                         # Track distance statistics
                                         with torch.no_grad():
@@ -2969,8 +3013,8 @@ class HOLD(pl.LightningModule):
                                                 f"max_dist={max_dist:.4f}mm"
                                             )
 
-                                            self.log('object/chamfer_mean_dist', mean_dist)
-                                            self.log('object/chamfer_max_dist', max_dist)
+                                            logger.info('object/chamfer_mean_dist', mean_dist)
+                                            logger.info('object/chamfer_max_dist', max_dist)
                                 else:
                                     if self.global_step % 500 == 0:
                                         logger.warning("[Object Chamfer] Object mesh degenerate (max_dist=0)")
@@ -3115,7 +3159,7 @@ class HOLD(pl.LightningModule):
 
                             # Log every 100 steps
                             if self.global_step % 100 == 0:
-                                self.log('loss/object_smoothness', smoothness_loss.item())
+                                logger.info('loss/object_smoothness', smoothness_loss.item())
 
                                 # Calculate change rate
                                 if not hasattr(self, '_prev_smoothness'):
@@ -3153,7 +3197,7 @@ class HOLD(pl.LightningModule):
                         smoothness_added = True
 
                         if self.global_step % 100 == 0:
-                            self.log('loss/object_smoothness', smoothness_loss.item())
+                            logger.info('loss/object_smoothness', smoothness_loss.item())
                             logger.info(f"✅ Object smoothness loss: {smoothness_loss.item():.6f}")
                             loss_output['object_smoothness'] = smoothness_loss.item()
 
@@ -3187,13 +3231,25 @@ class HOLD(pl.LightningModule):
                         sdf_min = sdf_grid.min()
                         sdf_max = sdf_grid.max()
                         sdf_std = sdf_grid.std()
+
+                        # Coarse sign test
                         has_zero = (sdf_min < 0.0) & (sdf_max > 0.0)
 
+                        # Approximate zero-crossing count along each axis
+                        zc_x = ((sdf_grid[:, 1:, :, :] * sdf_grid[:, :-1, :, :]) < 0).sum()
+                        zc_y = ((sdf_grid[:, :, 1:, :] * sdf_grid[:, :, :-1, :]) < 0).sum()
+                        zc_z = ((sdf_grid[:, :, :, 1:] * sdf_grid[:, :, :, :-1]) < 0).sum()
+                        zero_cross_count = (zc_x + zc_y + zc_z).item()
+                            
                         if self.global_step % 100 == 0:
-                            self.log('sdf/min', sdf_min.item())
-                            self.log('sdf/max', sdf_max.item())
-                            self.log('sdf/std', sdf_std.item())
-                            self.log('sdf/has_zero_crossing', float(has_zero))
+                            logger.info('sdf/min', sdf_min.item())
+                            logger.info('sdf/max', sdf_max.item())
+                            logger.info('sdf/std', sdf_std.item())
+                            logger.info('sdf/has_zero_crossing', float(has_zero))
+                            logger.info('sdf/zero_cross_count', zero_cross_count)
+
+                        min_zc = 10  # tune; 0 clearly means no surface
+                        is_degenerate = (zero_cross_count < min_zc) or (sdf_std.item() < 1e-5)
 
                         # 1. Zero-crossing encouragement (mean ≈ 0)
                         mean_sdf = sdf_grid.mean()
@@ -3237,7 +3293,7 @@ class HOLD(pl.LightningModule):
                         if not hasattr(self, '_sdf_bad_count'):
                             self._sdf_bad_count = 0
 
-                        is_degenerate = (not has_zero) or (sdf_std.item() < 1e-5)
+                        # is_degenerate = (not has_zero) or (sdf_std.item() < 1e-5)
 
                         if is_degenerate:
                             self._sdf_bad_count += 1
@@ -3259,10 +3315,10 @@ class HOLD(pl.LightningModule):
 
                         # Log every 100 steps
                         if self.global_step % 100 == 0:
-                            self.log('loss/sdf_zero_crossing', zero_crossing_loss.item())
-                            self.log('loss/sdf_gradient', gradient_loss.item())
-                            self.log('loss/sdf_eikonal', eikonal_loss.item())
-                            self.log('loss/sdf_range', range_loss.item())
+                            logger.info('loss/sdf_zero_crossing', zero_crossing_loss.item())
+                            logger.info('loss/sdf_gradient', gradient_loss.item())
+                            logger.info('loss/sdf_eikonal', eikonal_loss.item())
+                            logger.info('loss/sdf_range', range_loss.item())
 
                             logger.info(
                                 f"✅ SDF Regularization: zero_cross={zero_crossing_loss.item():.6f}, "
@@ -3286,14 +3342,24 @@ class HOLD(pl.LightningModule):
 
                 if isinstance(v3d_cano, nn.Parameter) and v3d_cano.requires_grad:
                     if v3d_cano.shape[0] > 100:  # Only for dense meshes
+                        # Average variance over XYZ
                         vertex_variance = v3d_cano.var(dim=0).mean()
-                        vertex_smoothness_loss = vertex_variance * 0.01
 
-                        total_loss = total_loss + vertex_smoothness_loss
+                        # Hinge loss: penalize only if variance is TOO LOW
+                        # Official HOLD v3d_cano std ≈ 0.29, so a floor like 0.05 is safe
+                        min_var = 0.05
+                        vertex_collapse_loss = torch.nn.functional.relu(min_var - vertex_variance)
+
+                        vertex_collapse_weight = 0.1  # start small
+                        total_loss = total_loss + vertex_collapse_weight * vertex_collapse_loss
 
                         if self.global_step % 100 == 0:
-                            self.log('loss/vertex_smoothness', vertex_smoothness_loss.item())
-                            logger.info(f"✅ Vertex smoothness: {vertex_smoothness_loss.item():.6f}")
+                            self.log('loss/vertex_collapse', vertex_collapse_loss.item())
+                            self.log('debug/vertex_variance', vertex_variance.item())
+                            logger.info(
+                                f"✅ [Vertex spread] step={self.global_step}, "
+                                f"loss={vertex_collapse_loss.item():.6f}, var={vertex_variance.item():.6f}"
+                            )
 
         # ========================================
         # MANO Joint Supervision (MODIFIED)
@@ -3734,15 +3800,15 @@ class HOLD(pl.LightningModule):
                     stage_map = {'sds': 1, 'contact': 2, 'contact_only': 3, 'unknown': 0}
                     stage_numeric = stage_map.get(ghop_info.get('stage', 'unknown'), 0)
 
-                    self.log('ghop/stage_numeric', float(stage_numeric), prog_bar=False)
-                    self.log('ghop/stage_progress', ghop_info.get('stage_progress', 0.0), prog_bar=True)
-                    self.log('ghop/total_loss', weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else float(weighted_ghop), prog_bar=True)
+                    logger.info('ghop/stage_numeric', float(stage_numeric), prog_bar=False)
+                    logger.info('ghop/stage_progress', ghop_info.get('stage_progress', 0.0), prog_bar=True)
+                    logger.info('ghop/total_loss', weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else float(weighted_ghop), prog_bar=True)
 
                     # Log SDS-specific metrics
                     if 'sds' in ghop_losses:
                         sds_value = ghop_losses['sds']
                         if isinstance(sds_value, torch.Tensor):
-                            self.log('ghop/sds_loss', sds_value.item(), prog_bar=True)
+                            logger.info('ghop/sds_loss', sds_value.item(), prog_bar=True)
 
                     # Console logging
                     if self.global_step % self.log_ghop_every == 0:
@@ -4041,10 +4107,10 @@ class HOLD(pl.LightningModule):
                             if self.global_step % self.log_phase5_every == 0:
                                 contact_stats = self.adaptive_contacts.get_contact_statistics(contact_zones)
 
-                                self.log('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
-                                self.log('phase5/contact_min', contact_stats['min'], prog_bar=False)
-                                self.log('phase5/contact_max', contact_stats['max'], prog_bar=False)
-                                self.log('phase5/contact_std', contact_stats['std'], prog_bar=False)
+                                logger.info('phase5/contact_mean', contact_stats['mean'], prog_bar=False)
+                                logger.info('phase5/contact_min', contact_stats['min'], prog_bar=False)
+                                logger.info('phase5/contact_max', contact_stats['max'], prog_bar=False)
+                                logger.info('phase5/contact_std', contact_stats['std'], prog_bar=False)
 
                                 logger.info(
                                     f"\n[Phase 5 - Step {self.global_step}] Adaptive Contacts:\n"
@@ -4136,19 +4202,19 @@ class HOLD(pl.LightningModule):
                         loss_output['contact_loss'] = weighted_contact_loss.detach()
 
                         # Logging
-                        self.log('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
-                        self.log('phase4/contact_weight', effective_contact_weight)
-                        self.log('phase4/penetration',
+                        logger.info('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
+                        logger.info('phase4/contact_weight', effective_contact_weight)
+                        logger.info('phase4/penetration',
                             contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor)
                             else float(contact_metrics_accum['penetration']))
-                        self.log('phase4/attraction',
+                        logger.info('phase4/attraction',
                             contact_metrics_accum['attraction'].detach().item() if isinstance(contact_metrics_accum['attraction'], torch.Tensor)
                             else float(contact_metrics_accum['attraction']))
-                        self.log('phase4/dist_mean',
+                        logger.info('phase4/dist_mean',
                             contact_metrics_accum['dist_mean'].detach().item() if isinstance(contact_metrics_accum['dist_mean'], torch.Tensor)
                             else float(contact_metrics_accum['dist_mean']))
-                        self.log('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
-                        self.log('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
+                        logger.info('phase4/num_contacts', float(contact_metrics_accum['num_contacts']))
+                        logger.info('phase4/num_penetrations', float(contact_metrics_accum['num_penetrations']))
 
                         # Console logging
                         if self.global_step % self.log_contact_every == 0:
@@ -4236,7 +4302,7 @@ class HOLD(pl.LightningModule):
                     loss_output["sds_loss"] = loss_sds
 
                     if loss_sds.item() > 0:
-                        self.log('train/sds_loss', loss_sds.detach().item(), prog_bar=True)
+                        logger.info('train/sds_loss', loss_sds.detach().item(), prog_bar=True)
 
             except Exception as e:
                 logger.error(f"[Phase 2] SDS loss failed: {e}")
@@ -4360,7 +4426,7 @@ class HOLD(pl.LightningModule):
                         logger.warning(f"[DEBUG Phase 5] temporal_loss IS NONE - no loss to log")
                     # Add logging
                     if temporal_loss is not None:
-                        self.log('phase5/temporal_loss', temporal_loss.detach().item(), prog_bar=True)
+                        logger.info('phase5/temporal_loss', temporal_loss.detach().item(), prog_bar=True)
                         if self.global_step % self.log_phase5_every == 0:
                             logger.info(
                                 f"[Phase 5 - Step {self.global_step}] Temporal loss: {temporal_loss.item():.6f}")
@@ -4400,15 +4466,15 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     # Step 8: Log temporal metrics
                     # =============================================================
-                    self.log('phase5/temporal_loss', weighted_temporal.item(), prog_bar=True)
+                    logger.info('phase5/temporal_loss', weighted_temporal.item(), prog_bar=True)
                     v = temporal_metrics.get('velocity', 0.0)
-                    self.log('phase5/velocity_loss', v.detach().item() if isinstance(v, torch.Tensor) else float(v), prog_bar=False)
+                    logger.info('phase5/velocity_loss', v.detach().item() if isinstance(v, torch.Tensor) else float(v), prog_bar=False)
                     a = temporal_metrics.get('acceleration', 0.0)
-                    self.log('phase5/acceleration_loss', a.detach().item() if isinstance(a, torch.Tensor) else float(a), prog_bar=False)
+                    logger.info('phase5/acceleration_loss', a.detach().item() if isinstance(a, torch.Tensor) else float(a), prog_bar=False)
                     c = temporal_metrics.get('camera_motion', 0.0)
-                    self.log('phase5/camera_motion_loss', c.detach().item() if isinstance(c, torch.Tensor) else float(c), prog_bar=False)
+                    logger.info('phase5/camera_motion_loss', c.detach().item() if isinstance(c, torch.Tensor) else float(c), prog_bar=False)
                     w = temporal_metrics.get('adaptive_weight', 1.0)
-                    self.log('phase5/temporal_adaptive_weight', w.detach().item() if isinstance(w, torch.Tensor) else float(w), prog_bar=False)
+                    logger.info('phase5/temporal_adaptive_weight', w.detach().item() if isinstance(w, torch.Tensor) else float(w), prog_bar=False)
 
                     # Console logging at reduced frequency
                     if self.global_step % self.log_phase5_every == 0:
@@ -4576,45 +4642,45 @@ class HOLD(pl.LightningModule):
         # -------------------------------------------------------------------
         # 1. TENSORBOARD LOGGING (every step for all metrics)
         # -------------------------------------------------------------------
-        self.log('train/loss_total', total_loss.item(), prog_bar=True)
+        logger.info('train/loss_total', total_loss.item(), prog_bar=True)
 
         # Base losses
         if 'loss/rgb' in loss_output:
-            self.log('train/loss_rgb', loss_output['loss/rgb'], prog_bar=False)
+            logger.info('train/loss_rgb', loss_output['loss/rgb'], prog_bar=False)
         if 'loss/mask' in loss_output:
-            self.log('train/loss_mask', loss_output['loss/mask'], prog_bar=False)
+            logger.info('train/loss_mask', loss_output['loss/mask'], prog_bar=False)
         if 'loss/eikonal' in loss_output:
-            self.log('train/loss_eikonal', loss_output['loss/eikonal'], prog_bar=False)
+            logger.info('train/loss_eikonal', loss_output['loss/eikonal'], prog_bar=False)
 
         # Geometric losses (Step 2)
         if 'geometric_loss' in loss_output:
-            self.log('train/geometric_loss', loss_output['geometric_loss'], prog_bar=False)
+            logger.info('train/geometric_loss', loss_output['geometric_loss'], prog_bar=False)
         if 'loss/normal_consistency' in loss_output:
-            self.log('train/normal_consistency', loss_output['loss/normal_consistency'], prog_bar=False)
+            logger.info('train/normal_consistency', loss_output['loss/normal_consistency'], prog_bar=False)
         if 'loss/depth_smoothness' in loss_output:
-            self.log('train/depth_smoothness', loss_output['loss/depth_smoothness'], prog_bar=False)
+            logger.info('train/depth_smoothness', loss_output['loss/depth_smoothness'], prog_bar=False)
         if 'loss/chamfer' in loss_output:  # ← ADD THIS
-            self.log('train/chamfer', loss_output['loss/chamfer'], prog_bar=False)
+            logger.info('train/chamfer', loss_output['loss/chamfer'], prog_bar=False)
         if 'loss/obj_chamfer' in loss_output:  # ← ADD THIS (Object Chamfer)
-            self.log('train/obj_chamfer', loss_output['loss/obj_chamfer'], prog_bar=False)
+            logger.info('train/obj_chamfer', loss_output['loss/obj_chamfer'], prog_bar=False)
 
         # Object smoothness (if active)
         if 'object_smoothness' in loss_output:
-            self.log('train/object_smoothness', loss_output['object_smoothness'], prog_bar=False)
+            logger.info('train/object_smoothness', loss_output['object_smoothness'], prog_bar=False)
 
         # Phase 3: SDS losses
         if 'loss/sds_weighted' in loss_output:
-            self.log('train/sds_weighted', loss_output['loss/sds_weighted'], prog_bar=True)
-            self.log('train/sds_raw', loss_output.get('loss/sds_raw', 0.0), prog_bar=False)
-            self.log('train/sds_weight', loss_output.get('sds_weight', 0.0), prog_bar=False)
+            logger.info('train/sds_weighted', loss_output['loss/sds_weighted'], prog_bar=True)
+            logger.info('train/sds_raw', loss_output.get('loss/sds_raw', 0.0), prog_bar=False)
+            logger.info('train/sds_weight', loss_output.get('sds_weight', 0.0), prog_bar=False)
 
         # Phase 4: Contact loss
         if 'contact_loss' in loss_output:
-            self.log('train/contact_loss', loss_output['contact_loss'], prog_bar=False)
+            logger.info('train/contact_loss', loss_output['contact_loss'], prog_bar=False)
 
         # Phase 5: Temporal loss
         if 'temporal_loss' in loss_output:
-            self.log('train/temporal_loss', loss_output['temporal_loss'], prog_bar=False)
+            logger.info('train/temporal_loss', loss_output['temporal_loss'], prog_bar=False)
 
         # -------------------------------------------------------------------
         # 2. CONSOLE LOGGING - Key Metrics (every 10 steps)
@@ -4827,7 +4893,17 @@ class HOLD(pl.LightningModule):
                         logger.warning(f"  ✅ v3d_cano.grad EXISTS: mean={grad_mean:.10f}, max={grad_max:.10f}")
                     else:
                         logger.warning(f"  ❌ v3d_cano.grad is None - GRADIENTS NOT FLOWING!")
-
+                # ADD: Check SDF gradients as well
+                if hasattr(obj_model, 'sdf_grid'):
+                    sdf_param = obj_model.sdf_grid
+                    logger.warning(f"  sdf_grid.requires_grad = {sdf_param.requires_grad}")
+                    logger.warning(f"  sdf_grid.is_leaf = {sdf_param.is_leaf}")
+                    if sdf_param.grad is not None:
+                        sdf_grad_mean = sdf_param.grad.abs().mean().item()
+                        sdf_grad_max = sdf_param.grad.abs().max().item()
+                        logger.warning(f"  ✅ sdf_grid.grad EXISTS: mean={sdf_grad_mean:.10f}, max={sdf_grad_max:.10f}")
+                    else:
+                        logger.warning(f"  ❌ sdf_grid.grad is None - SDF NOT RECEIVING GRADIENTS!")
             except Exception as e:
                 logger.warning(f"[GRAD FLOW - Step {self.global_step}] Error checking gradients: {e}")
 
@@ -5017,10 +5093,10 @@ class HOLD(pl.LightningModule):
             )
 
         # Log to Lightning metrics
-        self.log('train/loss', final_loss.detach().item(), prog_bar=True)
+        logger.info('train/loss', final_loss.detach().item(), prog_bar=True)
         for key, value in loss_output.items():
             if isinstance(value, torch.Tensor) and key != 'loss':
-                self.log(f'train/{key}', value.detach().item(), prog_bar=False)
+                logger.info(f'train/{key}', value.detach().item(), prog_bar=False)
 
         # Explicit per-step scalar loss logging
         logger.debug(f"[TRAIN STEP] step={self.global_step} loss={final_loss.item():.6f}")
