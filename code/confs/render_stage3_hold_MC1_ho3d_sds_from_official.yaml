@@ -1,13 +1,13 @@
 # ================================================================
-# Stage 3: 30-Epoch Training with OOM Protection
-# Phase Distribution: 2:1 ratio (Phase 3:Phase 4), Phase 5 minimal
+# Stage 3: Pure SDS Training - 80K Steps (40 Epochs)
+# Phase Distribution: Phase 3 only (SDS Diffusion)
 # ================================================================
 
 # ================================================================
-# PHASE 3: SDS GUIDANCE (39,700 steps = 19.85 epochs)
+# PHASE 3: SDS GUIDANCE ONLY (80,000 steps = 40 epochs)
 # ================================================================
 phase3:
-  enabled: true
+  enabled: false
 
   # GHOP Checkpoints
   ghop:
@@ -18,18 +18,17 @@ phase3:
     vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unet_use_pretrained: true
     vqvae_use_pretrained: true
-    # ✅ NEW: Use Hugging Face CLIP instead of checkpoint CLIP
     use_huggingface_clip: true
-    clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
+    clip_model_name: "openai/clip-vit-large-patch14"
 
   grid_resolution: 64
   spatial_lim: 1.5
 
-  # Phase 3 Boundaries - 2/3 of training (40,000 steps)
+  # Phase 3 spans entire training
   phase3_start_iter: 0
-  phase3_end_iter: 34999         # ← CHANGED: End earlier for longer Phase 4
+  phase3_end_iter: 34999         # ← CHANGED: Entire 80K training
 
-  # SDS Configuration - KEEP FROM STAGE 2
+  # SDS Configuration - Refined based on Session 60-62
   sds:
     diffusion_steps: 1000
     guidance_scale: 3.0
@@ -41,6 +40,7 @@ phase3:
   sds_iters: 1
   use_modular_init: true
 
+  # Extended weight schedule for 80K steps
   w_sds_schedule:
     enabled: true
     step_0: 0.50                 # was 0.25
@@ -69,89 +69,28 @@ phase3:
   warmup_iters: 0
 
 # ================================================================
-# PHASE 4: CONTACT REFINEMENT (19,500 steps = 9 epochs)
+# PHASE 4: CONTACT REFINEMENT (DISABLED)
 # ================================================================
 phase4:
-  enabled: true
-
-  # Phase boundaries - 1/3 of training (19,800 steps)
-  contact_start_iter: 35000      # ← CHANGED: Start earlier
-  contact_end_iter: 59499       # End before Phase 5
-  contact_warmup_iters: 1000     # ← CHANGED: Longer warmup
-
-  # Thresholds
-  contact_thresh: 0.20
-  collision_thresh: 0.08
-
-  # Contact weights
-  w_contact: 0.5                 # ← changed from 1.5
-  w_penetration: 50.0           # ← changed from 150
-  w_attraction: 5.0             # ← changed from 15
-  w_damping: 0.001               # ← ENABLED
-
-  # Mesh extraction settings
-  mesh_resolution: 64          # Marching cubes resolution changed from 256
-  mesh_padding: 0.1             # Padding around object bounds
-
-  log_contact_every: 100
+  enabled: false                 # ← DISABLED: Contact loss stuck at 0.0
 
 # ================================================================
-# PHASE 5: TEMPORAL CONSISTENCY (500 steps = 0.25 epochs, FINAL ONLY)
+# PHASE 5: TEMPORAL CONSISTENCY (DISABLED)
 # ================================================================
 phase5:
-  enabled: true
-
-  # Minimal Phase 5 - last 500 steps only
-  phase5_start_iter: 59500      # Start at epoch 29.75
-  phase5_end_iter: 60000        # Explicit termination at training end
-
-  # Scheduler configuration
-  use_scheduler: true
-  scheduler:
-    total_iterations: 60000
-    warmup_iters: 0
-    phase3_start: 0
-    phase4_start: 40000         # Match contact_start_iter
-    phase5_start: 59500         # Match phase5_start_iter
-    finetune_start: 59750       # 250 steps before end
-
-  # Temporal weights - conservative
-  w_temporal: 0.01
-  w_velocity: 0.005
-  w_acceleration: 0.005
-  w_camera_motion: 0.001
-
-  # Memory optimizations - CRITICAL for OOM prevention
-  adaptive_contacts:
-    enabled: false              # Disabled to save ~125 MB
-    k_neighbors: 5
-    contact_threshold: 0.10
-    update_frequency: 50
-    cache_size: 50
-
-  temporal:
-    history_size: 3             # Reduced from 10 to minimum (saves 70% memory)
-    velocity_weight: 1.0
-    acceleration_weight: 0.5
-
-  log_phase5_every: 100
+  enabled: false                 # ← DISABLED: Cannot skip Phase 4
 
 # ================================================================
-# SCENE & MODEL (UNCHANGED FROM STAGE 2)
+# SCENE & MODEL (UNCHANGED)
 # ================================================================
 scene_bounding_sphere: 6.0
 
-# ================================================================
-# MODEL CONFIGURATION (MUST MATCH STAGE 2 CHECKPOINT)
-# ================================================================
 model:
-  # Density configuration
   density:
     params_init:
       beta: 0.1
     beta_min: 0.0001
 
-  # Ray sampler configuration
   ray_sampler:
     near: 0.0
     N_samples: 64
@@ -163,7 +102,6 @@ model:
     N_samples_inverse_sphere: 32
     add_tiny: 0.000001
 
-  # Hand implicit network
   implicit_network:
     feature_vector_size: 256
     d_in: 3
@@ -176,7 +114,6 @@ model:
     multires: 6
     cond: pose
 
-  # Hand rendering network
   rendering_network:
     feature_vector_size: 256
     mode: pose
@@ -187,7 +124,6 @@ model:
     multires_view: 0
     d_implicit_features: 256
 
-  # Background implicit network
   bg_implicit_network:
     feature_vector_size: 256
     d_in: 4
@@ -201,7 +137,6 @@ model:
     cond: frame
     dim_frame_encoding: 32
 
-  # Background rendering network
   bg_rendering_network:
     feature_vector_size: 256
     mode: nerf_frame_encoding
@@ -215,7 +150,7 @@ model:
     d_implicit_features: 171
 
 # ================================================================
-# DATASET CONFIGURATION (KEEP FROM STAGE 2)
+# DATASET CONFIGURATION
 # ================================================================
 dataset:
   dataset_path: data/hold_MC1_ho3d/build
@@ -236,8 +171,15 @@ dataset:
     pixel_per_batch: 512
     enabled: false
 
+  test:
+    type: test
+    batch_size: 1
+    drop_last: false
+    shuffle: false
+    pixel_per_batch: 512
+
 # ================================================================
-# LOSS CONFIGURATION (UPDATED FOR STAGE 3)
+# LOSS CONFIGURATION - Proven Working Losses Only
 # ================================================================
 loss:
   target_geom_share: 0.05       # try 0.05–0.10
@@ -265,7 +207,7 @@ loss:
   w_obj_smoothness: 0.05       # was 0.02
 
 # ================================================================
-# TRAINING CONFIGURATION - 30 EPOCHS
+# TRAINING CONFIGURATION - 40 EPOCHS (80K steps)
 # ================================================================
 training:
   num_epochs: 30
@@ -275,7 +217,7 @@ training:
   gradient_clip: 1.0
 
 # ================================================================
-# OPTIMIZER CONFIGURATION (KEEP FROM STAGE 2)
+# OPTIMIZER CONFIGURATION
 # ================================================================
 optimizer:
   lr: 0.0001                    # Same learning rate as Stage 2
@@ -284,7 +226,7 @@ optimizer:
   betas: [0.9, 0.999]
   eps: 1.0e-08
 
-# Learning rate scheduler - cosine annealing
+# Learning rate scheduler - Cosine annealing over 80K
 scheduler:
   type: "cosine"
   T_max: 60000                  # Full 30 epochs
@@ -295,7 +237,7 @@ scheduler:
 # EXPERIMENT CONFIGURATION
 # ================================================================
 experiment:
-  name: 'stage3_30epoch_optimized_2to1_ratio'
+  name: 'stage3_80k_sds_only_pure'
 
 # ================================================================
 # CHECKPOINT
@@ -303,11 +245,11 @@ experiment:
 checkpoint:
   # Load Stage 2 trained checkpoint
   resume_from: 'outputs/stage2_official_cb20a1702_FIXED/checkpoints/last.ckpt'
-  load_optimizer: false
-  load_scheduler: false
+  load_optimizer: false          # ← Fresh optimizer state
+  load_scheduler: false          # ← Fresh scheduler state
 
 # ================================================================
-# CALLBACKS - DUAL CHECKPOINT SYSTEM
+# CALLBACKS - CHECKPOINT SYSTEM
 # ================================================================
 callbacks:
   # Epoch-based: Best model selection
@@ -320,7 +262,7 @@ callbacks:
     dirpath: "checkpoints"
     filename: "epoch{epoch:02d}-loss{loss:.4f}"
 
-  # Step-based checkpoint (saves every 500 steps)
+  # Step-based checkpoint - More granular
   checkpoint_steps:
     monitor: null
     mode: "min"
@@ -330,6 +272,5 @@ callbacks:
     filename: "step{step:05d}"
     save_on_train_epoch_end: false
     verbose: true
-
 logging:
   save_misc_every: 500

@@ -1305,12 +1305,6 @@ class HOLD(pl.LightningModule):
         logger.debug(f"  log_contact_every: {self.log_contact_every}")
         logger.debug(f"  log_phase5_every: {self.log_phase5_every}")
 
-        # ✅ ADD: Memory profiler for diagnostics
-        self.memory_profiler = MemoryProfiler()
-        self.profile_memory = True  # Set to False to disable
-        # ✅ ADD: Setup and validate phase boundaries
-        self.setup_phase_boundaries()
-
         # ================================================================
         # NEW: Geometry-share controller state
         # ================================================================
@@ -2592,11 +2586,51 @@ class HOLD(pl.LightningModule):
                 # Add zero loss to maintain gradient graph consistency
                 loss_output['loss/chamfer'] = 0.0
 
-        # Add to total loss (FIXED variable name)
+        # ============================================================
+        # GEOMETRY-SHARE CONTROLLER (Phase 3 only)
+        # ============================================================
+        phase3_active = (
+                getattr(self, "phase3_enabled", False)
+                and self.global_step >= getattr(self, "phase3_start_iter", 0)
+                and self.global_step < getattr(self, "phase3_end_iter", 999999)
+        )
+
+        if phase3_active and geometric_loss.requires_grad:
+            with torch.no_grad():
+                # Use base (pre-geometry) loss as reference
+                base_scalar = total_loss.detach().abs().clamp_min(1e-8)
+                geom_scalar = geometric_loss.detach().abs()
+
+                # Current share of geometry among (base + geometry)
+                current_share = float(geom_scalar / (base_scalar + geom_scalar))
+
+                # Exponential moving average for stability
+                if self._geom_share_ema == 0.0:
+                    self._geom_share_ema = current_share
+                else:
+                    m = self._geom_share_ema_momentum
+                    self._geom_share_ema = m * self._geom_share_ema + (1.0 - m) * current_share
+
+                # If EMA share is too low, boost geometry scale up to max_geom_scale
+                if self._geom_share_ema < self.target_geom_share:
+                    old_scale = self._geom_scale
+                    self._geom_scale = min(self._geom_scale * self.geom_boost_factor,
+                                           self.max_geom_scale)
+                    logger.info(
+                        f"[Geom-Controller] step={self.global_step} "
+                        f"share={self._geom_share_ema:.4f} < target={self.target_geom_share:.4f} → "
+                        f"scale {old_scale:.3f} → {self._geom_scale:.3f}"
+                    )
+
+        # Apply scale (outside Phase 3, _geom_scale stays at 1.0)
+        geometric_loss = geometric_loss * self._geom_scale
+
+        # Add to total loss and bookkeeping
         total_loss = total_loss + geometric_loss
         loss_output['geometric_loss'] = geometric_loss.item()
-        logger.info(f"[GEOM-DEBUG] After chamfer: {geometric_loss.item()}")
+        loss_components['geometric'] = geometric_loss.item()
 
+        logger.info(f"[GEOM-DEBUG] After chamfer (scaled): {geometric_loss.item()}")
         # ============================================================
         # OBJECT TEMPLATE CHAMFER (New - Step 3A)
         # ============================================================

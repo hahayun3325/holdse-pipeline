@@ -139,5 +139,5 @@ def main():
 if __name__ == "__main__":
     main()
 '''
-python evaluate.py --sd_p logs/694416964/checkpoints/last.ckpt 2>&1 | tee logs/694416964/evaluation_$(date +%Y%m%d_%H%M%S).log
+python evaluate.py --sd_p logs/030726a4f/checkpoints/last.ckpt 2>&1 | tee logs/694416964/evaluation_$(date +%Y%m%d_%H%M%S).log
 '''
