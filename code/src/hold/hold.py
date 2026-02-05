@@ -2301,15 +2301,78 @@ class HOLD(pl.LightningModule):
         # ALWAYS add to total_loss directly, NOT to geometric_loss after line 2353
         # ================================================================
 
+        # Immediately after total_loss is computed:
+        base_loss = total_loss  # define this first
+        base_mult = 1.0  # default, can be overridden by warm-up logic
+
         # Track components for logging
         loss_components = {
-            'base': total_loss.item(),
+            'base_raw': base_loss.item(),  # unscaled HOLD base loss
+            'base': (base_mult * base_loss).item(),  # may be overwritten later after phase logic
             'geometric': 0.0,
             'object_shape': 0.0,
             'sds': 0.0,
             'contact': 0.0,
             'temporal': 0.0
         }
+        # Keep an explicit copy of the base (HOLD) loss
+        base_loss = total_loss
+
+        step = self.global_step
+
+        # Hyperparameters for warm-up (can later be moved to config)
+        geom_warmup_end = getattr(self.opt.training, 'geom_warmup_end', 2000)  # Phase 2.1
+        render_warmup_end = getattr(self.opt.training, 'render_warmup_end', 4000)  # Phase 2.2
+        joint_warmup_end = getattr(self.opt.training, 'joint_warmup_end', 8000)  # Phase 2.3
+
+        # Default multipliers (used after warm-up / existing phases)
+        base_mult = 1.0  # scales base_loss (RGB + masks etc.)
+        geom_mult = 1.0  # scales geometric_loss (normal, depth, chamfer, SDF reg, obj chamfer)
+        sds_mult = 1.0  # scales SDS loss before adding to total
+        contact_mult = 1.0
+        temporal_mult = 1.0
+
+        # Determine warm-up phase and set multipliers
+        if step < geom_warmup_end:
+            # Phase 2.1: GEOMETRY-ONLY warm-up
+            base_mult = 0.0  # ignore RGB/masks for now
+            geom_mult = 1.0  # full geometry
+            sds_mult = 0.0  # no SDS yet
+            contact_mult = 0.0
+            temporal_mult = 0.0
+            phase_tag = "geom_warmup"
+
+        elif step < render_warmup_end:
+            # Phase 2.2: RENDERING-ONLY warm-up
+            base_mult = 1.0  # train RGB/rendering
+            geom_mult = 0.5  # was 0.1 - keep geometry alive, not frozen
+            sds_mult = 0.0  # still no SDS
+            contact_mult = 0.0
+            temporal_mult = 0.0
+            phase_tag = "render_warmup"
+
+        elif step < joint_warmup_end:
+            # Phase 2.3: JOINT warm-up
+            progress = float(step - render_warmup_end) / max(joint_warmup_end - render_warmup_end, 1)
+            base_mult = 1.0
+            geom_mult = 0.5
+            sds_mult = 0.3 * progress  # ramp SDS from 0 → 0.3
+            contact_mult = 0.0
+            temporal_mult = 0.0
+            phase_tag = "joint_warmup"
+        else:
+            phase_tag = "main_training"
+
+        if step % 100 == 0:
+            logger.info(
+                f"[Warmup] step={step} phase={phase_tag} "
+                f"base_mult={base_mult:.3f}, geom_mult={geom_mult:.3f}, "
+                f"sds_mult={sds_mult:.3f}, contact_mult={contact_mult:.3f}, "
+                f"temporal_mult={temporal_mult:.3f}"
+            )
+
+        sds_disabled = (sds_mult == 0.0)
+
         # ================================================================
         # STEP 2: SELF-SUPERVISED GEOMETRIC LOSSES
         # ================================================================
@@ -2597,8 +2660,8 @@ class HOLD(pl.LightningModule):
 
         if phase3_active and geometric_loss.requires_grad:
             with torch.no_grad():
-                # Use base (pre-geometry) loss as reference
-                base_scalar = total_loss.detach().abs().clamp_min(1e-8)
+                # Use base (pre-geometry) loss as reference (unscaled)
+                base_scalar = base_loss.detach().abs().clamp_min(1e-8)
                 geom_scalar = geometric_loss.detach().abs()
 
                 # Current share of geometry among (base + geometry)
@@ -2622,15 +2685,6 @@ class HOLD(pl.LightningModule):
                         f"scale {old_scale:.3f} → {self._geom_scale:.3f}"
                     )
 
-        # Apply scale (outside Phase 3, _geom_scale stays at 1.0)
-        geometric_loss = geometric_loss * self._geom_scale
-
-        # Add to total loss and bookkeeping
-        total_loss = total_loss + geometric_loss
-        loss_output['geometric_loss'] = geometric_loss.item()
-        loss_components['geometric'] = geometric_loss.item()
-
-        logger.info(f"[GEOM-DEBUG] After chamfer (scaled): {geometric_loss.item()}")
         # ============================================================
         # OBJECT TEMPLATE CHAMFER (New - Step 3A)
         # ============================================================
@@ -2860,8 +2914,7 @@ class HOLD(pl.LightningModule):
                                 if hasattr(object_node.server, 'object_model'):
                                     # Check for SDF grid OR vertex representation
                                     if hasattr(object_node.server.object_model, 'sdf_grid'):
-                                        sdf = object_server.object_model.sdf_grid
-
+                                        sdf = object_node.server.object_model.sdf_grid
                                         sdf_std = sdf.std().item()
                                         sdf_min = sdf.min().item()
                                         sdf_max = sdf.max().item()
@@ -2894,7 +2947,6 @@ class HOLD(pl.LightningModule):
                                                 f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
                                                 f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
                                             )
-                                        sdf_is_valid = True
                                     elif hasattr(object_node.server.object_model, 'v3d_cano'):
                                         # Using vertex representation
                                         sdf_is_valid = True
@@ -3100,7 +3152,7 @@ class HOLD(pl.LightningModule):
                                 template_verts_norm.unsqueeze(0)
                             )
 
-                            total_loss = total_loss + obj_chamfer_weight * chamfer_loss
+                            geometric_loss = geometric_loss + obj_chamfer_weight * chamfer_loss
                             loss_output['loss/obj_chamfer'] = chamfer_loss.item()
                     else:
                         # Template not available - generic prior will be used later
@@ -3142,7 +3194,7 @@ class HOLD(pl.LightningModule):
                             generic_weight = getattr(self.opt.loss, 'w_obj_generic', 0.05)
                             generic_loss = generic_weight * (0.5 * smoothness_loss + 0.5 * volume_loss)
 
-                            total_loss = total_loss + generic_loss
+                            geometric_loss = geometric_loss + generic_loss
                             loss_output['loss/obj_generic'] = generic_loss.item()
 
                             if self.global_step % 100 == 0:
@@ -3187,7 +3239,7 @@ class HOLD(pl.LightningModule):
                             # Compute smoothness loss
                             smoothness_loss = get_smoothness_loss(v3d_cano)
                             smoothness_weight = getattr(self.opt.loss, 'w_obj_smoothness', 0.01)
-                            total_loss = total_loss + smoothness_weight * smoothness_loss
+                            geometric_loss = geometric_loss + smoothness_weight * smoothness_loss
 
                             smoothness_added = True
 
@@ -3196,12 +3248,17 @@ class HOLD(pl.LightningModule):
                                 logger.info('loss/object_smoothness', smoothness_loss.item())
 
                                 # Calculate change rate
+                                current_smooth = smoothness_loss.item()
                                 if not hasattr(self, '_prev_smoothness'):
-                                    self._prev_smoothness = smoothness_loss.item()
+                                    self._prev_smoothness = current_smooth
                                     change_rate = 0.0
+                                elif abs(self._prev_smoothness) < 1e-8:
+                                    # Avoid division by zero when previous smoothness is ~0
+                                    change_rate = 0.0
+                                    self._prev_smoothness = current_smooth
                                 else:
-                                    change_rate = (smoothness_loss.item() - self._prev_smoothness) / self._prev_smoothness * 100
-                                    self._prev_smoothness = smoothness_loss.item()
+                                    change_rate = (current_smooth - self._prev_smoothness) / self._prev_smoothness * 100
+                                    self._prev_smoothness = current_smooth
 
                                 logger.info(
                                     f"✅ [Object Smoothness] Step {self.global_step}: "
@@ -3226,7 +3283,7 @@ class HOLD(pl.LightningModule):
 
                     if isinstance(v3d_cano, nn.Parameter):
                         smoothness_loss = get_smoothness_loss(v3d_cano)
-                        total_loss = total_loss + 0.001 * smoothness_loss
+                        geometric_loss = geometric_loss + 0.001 * smoothness_loss
 
                         smoothness_added = True
 
@@ -3256,7 +3313,9 @@ class HOLD(pl.LightningModule):
                         hasattr(object_server.object_model, 'sdf_grid')):
 
                     sdf_grid = object_server.object_model.sdf_grid
-                    w_sdf_reg = getattr(self.opt.loss, 'w_sdf_reg', 1.0)  # NEW hyperparameter
+                    w_sdf_reg = getattr(self.opt.loss, 'w_sdf_reg', 1.0)
+                    w_eikonal = getattr(self.opt.loss, 'w_eikonal', 1.0)
+                    w_smooth = getattr(self.opt.loss, 'w_smooth', 1.0)
 
                     # Only apply if learnable
                     if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
@@ -3266,7 +3325,7 @@ class HOLD(pl.LightningModule):
                         sdf_max = sdf_grid.max()
                         sdf_std = sdf_grid.std()
 
-                        # Coarse sign test
+                        # Coarse sign test: does grid span negative and positive?
                         has_zero = (sdf_min < 0.0) & (sdf_max > 0.0)
 
                         # Approximate zero-crossing count along each axis
@@ -3285,49 +3344,11 @@ class HOLD(pl.LightningModule):
                         min_zc = 10  # tune; 0 clearly means no surface
                         is_degenerate = (zero_cross_count < min_zc) or (sdf_std.item() < 1e-5)
 
-                        # 1. Zero-crossing encouragement (mean ≈ 0)
-                        mean_sdf = sdf_grid.mean()
-                        zero_crossing_loss = torch.abs(mean_sdf) * 0.1
-
-                        # 2. Gradient magnitude (prevent flat fields)
-                        grad_x = sdf_grid[:, 1:, :, :] - sdf_grid[:, :-1, :, :]
-                        grad_y = sdf_grid[:, :, 1:, :] - sdf_grid[:, :, :-1, :]
-                        grad_z = sdf_grid[:, :, :, 1:] - sdf_grid[:, :, :, :-1]
-
-                        gradient_magnitude = (
-                                grad_x.pow(2).mean() +
-                                grad_y.pow(2).mean() +
-                                grad_z.pow(2).mean()
-                        ).sqrt()
-
-                        gradient_loss = torch.nn.functional.relu(0.05 - gradient_magnitude) * 0.1
-
-                        # 3. Eikonal loss (|∇φ| ≈ 1)
-                        eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.01
-
-                        # 4. Range encouragement (span positive/negative)
-                        sdf_min = sdf_grid.min()
-                        sdf_max = sdf_grid.max()
-                        range_loss = (torch.nn.functional.relu(-0.1 - sdf_min) +
-                                      torch.nn.functional.relu(0.1 - sdf_max)) * 0.05
-
-                        # Add to total
-                        sdf_regularization = (zero_crossing_loss + gradient_loss +
-                                              eikonal_loss + range_loss)
-                        # Apply global weight
-                        sdf_regularization = w_sdf_reg * sdf_regularization
-                        total_loss = total_loss + sdf_regularization
-                        # If you have loss_components dict in scope (see LOSS AGGREGATION ORDER block)
-                        if 'loss_components' in locals():
-                            loss_components['object_shape'] += sdf_regularization.item()
-
-                        # Optional: expose a scalar for TensorBoard
-                        loss_output['loss/sdf_regularization'] = sdf_regularization.item()
-                        # --- Degeneracy detection & re-init ---
+                        # --------------------------------------------------------
+                        # Degeneracy counter + optional re-init
+                        # --------------------------------------------------------
                         if not hasattr(self, '_sdf_bad_count'):
                             self._sdf_bad_count = 0
-
-                        # is_degenerate = (not has_zero) or (sdf_std.item() < 1e-5)
 
                         if is_degenerate:
                             self._sdf_bad_count += 1
@@ -3335,19 +3356,68 @@ class HOLD(pl.LightningModule):
                             self._sdf_bad_count = 0
 
                         if self._sdf_bad_count >= 5 and self.global_step > 1000:
-                            logger.error(
-                                f"[SDF COLLAPSE] Step {self.global_step}: "
-                                f"range=[{sdf_min.item():.4f}, {sdf_max.item():.4f}], "
-                                f"std={sdf_std.item():.6e}. "
-                                f"Re-initializing from template."
-                            )
-                            # object_server is already in scope here
-                            self._reinit_object_sdf_from_template(
-                                object_server.object_model, batch
-                            )
-                            self._sdf_bad_count = 0
+                            try:
+                                # You likely already have a helper like this; if not, keep your old re-init code here.
+                                self._reinit_object_sdf_from_template(object_server.object_model, batch)
+                                logger.warning(
+                                    f"[SDF Reg] Reinitialized SDF from template after {self._sdf_bad_count} bad steps."
+                                )
+                            except Exception as e:
+                                logger.error(f"[SDF Reg] SDF re-init failed: {e}")
+                            finally:
+                                self._sdf_bad_count = 0
 
-                        # Log every 100 steps
+                        # --------------------------------------------------------
+                        # 1. Zero-crossing encouragement (mean ≈ 0)
+                        # --------------------------------------------------------
+                        mean_sdf = sdf_grid.mean()
+                        zero_crossing_loss = torch.abs(mean_sdf) * 0.1
+
+                        # --------------------------------------------------------
+                        # 2. Gradient magnitude (prevent flat fields)
+                        # --------------------------------------------------------
+                        grad_x = sdf_grid[:, 1:, :, :] - sdf_grid[:, :-1, :, :]
+                        grad_y = sdf_grid[:, :, 1:, :] - sdf_grid[:, :, :-1, :]
+                        grad_z = sdf_grid[:, :, :, 1:] - sdf_grid[:, :, :, :-1]
+
+                        gradient_magnitude = (
+                            grad_x.pow(2).mean() +
+                            grad_y.pow(2).mean() +
+                            grad_z.pow(2).mean()
+                        ).sqrt()
+
+                        # Encourage gradients not to collapse to 0
+                        gradient_loss = torch.nn.functional.relu(0.05 - gradient_magnitude) * 0.1
+
+                        # --------------------------------------------------------
+                        # 3. Eikonal loss (|∇φ| ≈ 1)
+                        # --------------------------------------------------------
+                        eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.01
+
+                        # --------------------------------------------------------
+                        # 4. Range encouragement (span positive/negative)
+                        #    Push min < -0.1 and max > 0.1, softly
+                        # --------------------------------------------------------
+                        range_loss = (
+                            torch.nn.functional.relu(0.1 + sdf_min) +
+                            torch.nn.functional.relu(0.1 - sdf_max)
+                        ) * 0.05
+
+                        # --------------------------------------------------------
+                        # Combine with configurable weights
+                        # --------------------------------------------------------
+                        sdf_regularization = (
+                            zero_crossing_loss
+                            + w_smooth * gradient_loss
+                            + w_eikonal * eikonal_loss
+                            + range_loss
+                        )
+                        sdf_regularization = w_sdf_reg * sdf_regularization
+
+                        geometric_loss = geometric_loss + sdf_regularization
+                        if 'loss_components' in locals():
+                            loss_components['object_shape'] += sdf_regularization.item()
+                        loss_output['loss/sdf_regularization'] = sdf_regularization.item()
                         if self.global_step % 100 == 0:
                             logger.info('loss/sdf_zero_crossing', zero_crossing_loss.item())
                             logger.info('loss/sdf_gradient', gradient_loss.item())
@@ -3359,12 +3429,17 @@ class HOLD(pl.LightningModule):
                                 f"grad={gradient_loss.item():.6f}, eikonal={eikonal_loss.item():.6f}, "
                                 f"range={range_loss.item():.6f}"
                             )
+
+                        # Degeneracy counter + optional re-init (keep your existing logic here)
+                        # e.g., increment self._sdf_bad_count when is_degenerate and
+                        # call self._reinit_object_sdf_from_template(...) after a few bad steps
+                        # (you already have this code immediately following; no change needed)
                     else:
                         if self.global_step % 500 == 0:
                             logger.warning(
                                 f"[SDF Reg] SDF grid not learnable: "
                                 f"is_param={isinstance(sdf_grid, nn.Parameter)}, "
-                                f"requires_grad={sdf_grid.requires_grad}"
+                                f"requires_grad={getattr(sdf_grid, 'requires_grad', None)}"
                             )
                         # Skip regularization
 
@@ -3394,6 +3469,22 @@ class HOLD(pl.LightningModule):
                                 f"✅ [Vertex spread] step={self.global_step}, "
                                 f"loss={vertex_collapse_loss.item():.6f}, var={vertex_variance.item():.6f}"
                             )
+
+        # Now that ALL geometry terms are in geometric_loss, apply scaling
+        # self._geom_scale: auto controller (Phase 3)
+        # geom_mult: warm-up phase multiplier
+        # Effective geometry weight = self._geom_scale * geom_mult
+        geometric_loss = geometric_loss * self._geom_scale
+
+        # Rebuild total_loss from scaled base + scaled geometry
+        total_loss = base_mult * base_loss + geom_mult * geometric_loss
+
+        loss_output['geometric_loss'] = geometric_loss.item()
+        loss_components['geometric'] = (geom_mult * geometric_loss).item()
+        loss_components['base_raw'] = base_loss.item()
+        loss_components['base'] = (base_mult * base_loss).item()
+
+        logger.info(f"[GEOM-DEBUG] After geometry aggregation (scaled): {geometric_loss.item()}")
 
         # ========================================
         # MANO Joint Supervision (MODIFIED)
@@ -3582,6 +3673,10 @@ class HOLD(pl.LightningModule):
             ghop_info = {"stage": "unknown", "stage_progress": 0.0, "error": None}
             weighted_ghop = torch.tensor(0.0, device=loss_output["loss"].device, requires_grad=True)
 
+            # Force SDS off during geometry & rendering warm-ups
+            if sds_disabled:
+                should_compute_ghop = False
+
             if should_compute_ghop:
                 logger.debug(f"[GHOP] ✅ Computing SDS loss at step {self.global_step}")
                 try:
@@ -3745,6 +3840,14 @@ class HOLD(pl.LightningModule):
                     logger.info(f"[GHOP-DEBUG] SDS loss value: {ghop_losses.get('sds', 'KEY NOT FOUND')}")
                     logger.info(f"[GHOP-DEBUG] Info dict: {ghop_info}")
 
+                    # Simple SDS-collapse warning: very low SDS loss can indicate degenerate geometry
+                    sds_raw = float(ghop_losses.get('sds', 0.0))
+                    if sds_raw < 0.01 and self.global_step > 5000:
+                        logger.warning(
+                            f"[SDS COLLAPSE WARNING] Step {self.global_step}: "
+                            f"SDS loss is very low ({sds_raw:.6f}) – check geometry metrics/meshes for collapse."
+                        )
+
                     # ============================================================
                     # STEP 5: Get SDS weight from scheduler (HIGHEST PRIORITY)
                     # ============================================================
@@ -3774,9 +3877,6 @@ class HOLD(pl.LightningModule):
                         final_sds_weight = current_sds_weight
                         if self.global_step % self.log_sds_weight_every == 0:
                             logger.debug(f"[SDS-WEIGHT] Using scheduler weight only: {final_sds_weight:.4f}")
-
-                    # ✅ INSERT HERE: Amplify SDS to compete with RGB - Test higher SDS weight
-                    final_sds_weight = final_sds_weight * 2.0
 
                     # Apply weight to raw SDS loss
                     if 'sds' in ghop_losses:
@@ -3821,12 +3921,15 @@ class HOLD(pl.LightningModule):
                                      self.global_step >= self.phase5_start_iter)
 
                     # Always detach GHOP loss to ensure consistent graph structure across all phases
-                    total_loss = total_loss + weighted_ghop  # keep gradients
-                    loss_output["loss_sds"] = weighted_ghop  # debug: grad-tracking
+                    scaled_ghop = sds_mult * weighted_ghop
+                    total_loss = total_loss + scaled_ghop  # keep gradients
                     logger.debug(f"[Phase 3] Added GHOP loss WITH GRADIENTS")
+                    loss_output["loss_sds"] = scaled_ghop
+                    loss_output["loss/sds"] = scaled_ghop
+                    loss_components['sds'] = scaled_ghop.item()
                     loss_output['ghop_loss'] = weighted_ghop.detach()  # Detach only for logging
                     logger.warning(f"[DEBUG] Line 1978 executed: ghop_loss = {loss_output['ghop_loss'].item():.6f}")
-                    loss_output["loss/sds"] = weighted_ghop  # ← Match logging convention
+
 
                     # ============================================================
                     # STEP 7: Log GHOP metrics
@@ -3852,6 +3955,7 @@ class HOLD(pl.LightningModule):
                             f"  Stage progress:   {ghop_info.get('stage_progress', 0.0):.3f}\n"
                             f"  Total loss:       {weighted_ghop.item() if isinstance(weighted_ghop, torch.Tensor) else weighted_ghop:.4f}\n"
                             f"  SDS weight:       {sds_weight:.3f}"
+                            f"  SDS weight:       {final_sds_weight:.3f}"
                         )
 
                     logger.debug(f"[Phase 3] ✓ GHOP losses added to total loss")
@@ -4230,13 +4334,19 @@ class HOLD(pl.LightningModule):
                         # Apply pre-calculated effective weight
                         weighted_contact_loss = total_contact_loss * effective_contact_weight
 
-                        # Add to total_loss accumulator
-                        total_loss = total_loss + weighted_contact_loss
-                        loss_output["loss_contact"] = weighted_contact_loss
-                        loss_output['contact_loss'] = weighted_contact_loss.detach()
+                        # Apply warm-up/contact multiplier
+                        scaled_contact = contact_mult * weighted_contact_loss
+
+                        # Add to total loss accumulator
+                        total_loss = total_loss + scaled_contact
+                        loss_output['loss_contact'] = scaled_contact
+                        loss_output['contact_loss'] = scaled_contact.detach()
+
+                        if 'loss_components' in locals():
+                            loss_components['contact'] = scaled_contact.item()
 
                         # Logging
-                        logger.info('phase4/contact_loss', weighted_contact_loss.detach().item(), prog_bar=True)
+                        logger.info('phase4/contact_loss', scaled_contact.detach().item(), prog_bar=True)
                         logger.info('phase4/contact_weight', effective_contact_weight)
                         logger.info('phase4/penetration',
                             contact_metrics_accum['penetration'].detach().item() if isinstance(contact_metrics_accum['penetration'], torch.Tensor)
@@ -4262,7 +4372,7 @@ class HOLD(pl.LightningModule):
                                 f"  Mean distance:    {contact_metrics_accum['dist_mean']:.4f}m\n"
                                 f"  Num contacts:     {int(contact_metrics_accum['num_contacts'])}\n"
                                 f"  Num penetrations: {int(contact_metrics_accum['num_penetrations'])}\n"
-                                f"  Weighted loss:    {weighted_contact_loss:.4f}\n"
+                                f"  Weighted loss:    {scaled_contact:.4f}\n"
                             )
                     else:
                         logger.warning(
@@ -4460,7 +4570,7 @@ class HOLD(pl.LightningModule):
                         logger.warning(f"[DEBUG Phase 5] temporal_loss IS NONE - no loss to log")
                     # Add logging
                     if temporal_loss is not None:
-                        logger.info('phase5/temporal_loss', temporal_loss.detach().item(), prog_bar=True)
+                        logger.info('phase5/temporal_loss_raw', temporal_loss.detach().item(), prog_bar=True)
                         if self.global_step % self.log_phase5_every == 0:
                             logger.info(
                                 f"[Phase 5 - Step {self.global_step}] Temporal loss: {temporal_loss.item():.6f}")
@@ -4480,17 +4590,22 @@ class HOLD(pl.LightningModule):
                         weighted_temporal = temporal_loss * self.w_temporal
                         logger.debug(f"[Phase 5] Using config temporal weight: {self.w_temporal:.4f}")
 
+                    # NEW: apply warm-up temporal multiplier
+                    scaled_temporal = temporal_mult * weighted_temporal
+
                     # =============================================================
                     # Step 7: Add to total loss (OPTION A: with gradients)
                     # =============================================================
                     # OPTION A: Remove detachment for direct gradient optimization
                     # Temporal loss needs to directly optimize hand pose smoothness
                     # Line ~2553 - Use total_loss accumulator
-                    total_loss = total_loss + weighted_temporal                  # keep gradients
-                    loss_output["loss_temporal"] = weighted_temporal             # debug: grad-tracking
-                    loss_output['temporal_loss'] = weighted_temporal.detach()    # logging-only
+                    total_loss = total_loss + scaled_temporal                  # keep gradients
+                    loss_output["loss_temporal"] = scaled_temporal             # debug: grad-tracking
+                    loss_output['temporal_loss'] = scaled_temporal.detach()    # logging-only
+                    if 'loss_components' in locals():
+                        loss_components['temporal'] = scaled_temporal.item()
 
-                    logger.debug(f"[Phase 5] Added temporal loss WITH GRADIENTS: {weighted_temporal.item():.6f}")
+                    logger.debug(f"[Phase 5] Added temporal loss WITH GRADIENTS: {scaled_temporal.item():.6f}")
 
                     # Add gradient monitoring for validation
                     if self.global_step % 100 == 0:
@@ -4500,7 +4615,7 @@ class HOLD(pl.LightningModule):
                     # =============================================================
                     # Step 8: Log temporal metrics
                     # =============================================================
-                    logger.info('phase5/temporal_loss', weighted_temporal.item(), prog_bar=True)
+                    logger.info('phase5/temporal_loss', scaled_temporal.item(), prog_bar=True)
                     v = temporal_metrics.get('velocity', 0.0)
                     logger.info('phase5/velocity_loss', v.detach().item() if isinstance(v, torch.Tensor) else float(v), prog_bar=False)
                     a = temporal_metrics.get('acceleration', 0.0)
