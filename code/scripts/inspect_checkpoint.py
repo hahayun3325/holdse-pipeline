@@ -65,5 +65,5 @@ def inspect_checkpoint(path, name):
 
 
 # Run comparison
-inspect_checkpoint('logs/92ebd6cdc_000020000/checkpoints/last.ckpt', 'HOLDSE step 20000')
+inspect_checkpoint('logs/7dacf8bc6_000036000/checkpoints/last.ckpt', 'HOLDSE step 20000')
 inspect_checkpoint('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 'OFFICIAL HOLD')
