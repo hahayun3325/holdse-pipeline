@@ -1340,6 +1340,15 @@ class HOLD(pl.LightningModule):
         self._geom_scale = 1.0
         self._geom_share_ema = 0.0
         self._geom_share_ema_momentum = 0.9
+        if self._geom_share_ema < self.target_geom_share:
+            old_scale = self._geom_scale
+            self._geom_scale = min(self._geom_scale * self.geom_boost_factor,
+                                   self.max_geom_scale)
+            logger.info(
+                f"[Geom-Controller] step={self.global_step} "
+                f"share={self._geom_share_ema:.4f} < target={self.target_geom_share:.4f} → "
+                f"scale {old_scale:.3f} → {self._geom_scale:.3f}"
+            )
 
         '''
         Object Chamfer Debugging Section Temporary
@@ -3414,6 +3423,31 @@ class HOLD(pl.LightningModule):
                         sdf_min = sdf_grid.min()
                         sdf_max = sdf_grid.max()
                         sdf_std = sdf_grid.std()
+                        with torch.no_grad():
+                            # Simple 1D zero-crossing count along flattened grid
+                            flat = sdf_grid.view(-1)
+                            zero_crossings = ((flat[:-1] * flat[1:]) < 0).sum().item()
+                            zero_cross_ratio = zero_crossings / max(flat.numel() - 1, 1)
+
+                        # Expose for logging / debugging
+                        loss_output['debug/sdf_zero_crossings'] = float(zero_crossings)
+                        loss_output['debug/sdf_zero_cross_ratio'] = float(zero_cross_ratio)
+
+                        if self.global_step % 1000 == 0:
+                            logger.info(
+                                f"[SDF-HEALTH] step={self.global_step} "
+                                f"min={sdf_min.item():.4f}, max={sdf_max.item():.4f}, "
+                                f"std={sdf_std.item():.4f}, "
+                                f"zero_crossings={zero_crossings}, "
+                                f"ratio={zero_cross_ratio:.6f}"
+                            )
+
+                        # Optional: hard safety stop after warm-up
+                        if zero_crossings == 0 and self.global_step > 5000:
+                            logger.error("[SDF-HEALTH] zero-crossings == 0 after warm-up → geometry collapsed")
+                            # Option A: raise to stop training completely
+                            # raise RuntimeError("SDF collapsed: zero-crossings == 0")
+                            # Option B: set a flag / schedule re-init
 
                         # Coarse sign test: does grid span negative and positive?
                         has_zero = (sdf_min < 0.0) & (sdf_max > 0.0)
@@ -5003,6 +5037,7 @@ class HOLD(pl.LightningModule):
             sdf_zero_f = to_float(loss_output.get('loss/sdf_zero_cross', 0.0))
             sdf_grad_f = to_float(loss_output.get('loss/sdf_gradient', 0.0))
             sdf_range_f = to_float(loss_output.get('loss/sdf_range', 0.0))
+            sdf_zero_crossings_f = to_float(loss_output.get('loss/sdf_zero_crossings', 0.0))
 
             # Calculate percentages (avoid division by zero)
             if total_f > 1e-8:
@@ -5053,6 +5088,7 @@ class HOLD(pl.LightningModule):
             logger.info(f"    SDF Zero-cross:    {sdf_zero_f:.6f}")
             logger.info(f"    SDF Gradient:      {sdf_grad_f:.6f}")
             logger.info(f"    SDF Range:         {sdf_range_f:.6f}")
+            logger.info(f"    SDF Zero-crossings:{sdf_zero_crossings_f:.6f}")
             logger.info("-" * 80)
             logger.info(f"  Step 2 - Geometric Regularization:")
             logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")

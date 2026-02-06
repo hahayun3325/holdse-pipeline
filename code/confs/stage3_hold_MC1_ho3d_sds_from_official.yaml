@@ -245,10 +245,10 @@ dataset:
 # LOSS CONFIGURATION (UPDATED FOR STAGE 3)
 # ================================================================
 loss:
-  target_geom_share: 0.08       # try 0.05–0.10
-  max_geom_scale: 5.0           # prevent runaway scaling
+  target_geom_share: 0.10       # try 0.05–0.10
+  max_geom_scale: 8.0           # prevent runaway scaling
   geom_boost_factor: 1.5        # how fast the scale ramps
-  w_sdf_reg: 1.0
+  w_sdf_reg: 2.0
   w_rgb: 1.0                   # was 0.8
   w_rgb_schedule: # NEW: Reduce RGB to let SDS dominate
     enabled: true
@@ -260,7 +260,7 @@ loss:
     interpolation: "linear"
   w_mask: 0.5              # CHANGED: from 0.1
   w_mask_edge: 0.15         # NEW: Add this line
-  w_eikonal: 1.0                # Keep SDF regularization
+  w_eikonal: 2.0                # Keep SDF regularization
   w_smooth: 1.0               # Keep smoothness
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
