@@ -629,6 +629,29 @@ class HOLD(pl.LightningModule):
                         enabled=False
                     )
 
+                # Initialize RGB Weight Scheduler
+                try:
+                    rgb_schedule_cfg = getattr(self.opt, 'loss', {}).get('w_rgb_schedule', None)
+                    if rgb_schedule_cfg and rgb_schedule_cfg.get('enabled', False):
+                        from src.training.sds_weight_scheduler import SDSWeightScheduler  # Reuse same scheduler class
+                        self.rgb_weight_scheduler = SDSWeightScheduler(
+                            schedule={
+                                0: rgb_schedule_cfg.get('step_0', 1.0),
+                                8000: rgb_schedule_cfg.get('step_8000', 0.40),
+                                15000: rgb_schedule_cfg.get('step_15000', 0.40),
+                                25000: rgb_schedule_cfg.get('step_25000', 0.40),
+                                30000: rgb_schedule_cfg.get('step_30000', 1.0),
+                            },
+                            interpolation=rgb_schedule_cfg.get('interpolation', 'linear')
+                        )
+                        logger.info("✓ RGB Weight Scheduler initialized")
+                    else:
+                        self.rgb_weight_scheduler = None
+                        logger.info("RGB Weight Scheduler: Disabled (using fixed w_rgb)")
+                except Exception as e:
+                    logger.warning(f"Failed to create RGB scheduler: {e}")
+                    self.rgb_weight_scheduler = None
+
                 # Initialize SDS loss (weight will be set dynamically in training_step)
                 self.sds_loss = GHOPSDSLoss(
                     vqvae_wrapper=self.vqvae,
@@ -2289,6 +2312,55 @@ class HOLD(pl.LightningModule):
         # ================================================================
         # loss_output = self.loss(batch, model_outputs)
         total_loss = loss_output["loss"]  # base HOLD loss
+        # ================================================================
+        # APPLY DYNAMIC RGB WEIGHT SCHEDULE (NEW)
+        # ================================================================
+        if hasattr(self, 'rgb_weight_scheduler') and self.rgb_weight_scheduler is not None:
+            current_step = self.global_step
+            effective_w_rgb = self.rgb_weight_scheduler.get_weight(current_step)
+            base_w_rgb = self.opt.loss.w_rgb
+
+            # Only adjust if weights differ
+            if abs(effective_w_rgb - base_w_rgb) > 1e-6:
+                # Extract original RGB loss (already weighted by base_w_rgb)
+                original_rgb_loss = loss_output.get('loss/rgb', 0.0)
+
+                if isinstance(original_rgb_loss, torch.Tensor):
+                    original_rgb_loss = original_rgb_loss.item()
+
+                if original_rgb_loss != 0:
+                    # Calculate raw RGB loss (remove base weight)
+                    rgb_loss_raw = original_rgb_loss / base_w_rgb
+
+                    # Calculate new weighted RGB loss
+                    new_rgb_loss = effective_w_rgb * rgb_loss_raw
+
+                    # Adjust total loss: remove old RGB, add new RGB
+                    adjusted_total = loss_output["loss"] - original_rgb_loss + new_rgb_loss
+
+                    # Update loss_output
+                    loss_output["loss"] = adjusted_total
+                    total_loss = adjusted_total  # Update the variable used below
+                    loss_output['loss/rgb'] = new_rgb_loss
+                    loss_output['loss/rgb_raw'] = rgb_loss_raw
+                    loss_output['w_rgb_effective'] = effective_w_rgb
+
+                    # Log for monitoring
+                    if self.global_step % 500 == 0 or self.global_step == 8000 or self.global_step == 30000:
+                        logger.info(f"[RGB WEIGHT] Step {current_step}: "
+                                    f"base_w={base_w_rgb:.4f} -> effective_w={effective_w_rgb:.4f}, "
+                                    f"rgb_loss adjusted: {original_rgb_loss:.6f} -> {new_rgb_loss:.6f}, "
+                                    f"total_loss: {loss_output['loss']:.6f}")
+                else:
+                    loss_output['w_rgb_effective'] = base_w_rgb
+            else:
+                loss_output['w_rgb_effective'] = base_w_rgb
+        else:
+            loss_output['w_rgb_effective'] = self.opt.loss.w_rgb
+        # ================================================================
+        # END DYNAMIC RGB WEIGHT
+        # ================================================================
+
         # After line 2178, ADD COMMENT:
         # ================================================================
         # LOSS AGGREGATION ORDER (DO NOT MODIFY):
@@ -2701,13 +2773,31 @@ class HOLD(pl.LightningModule):
         base_w = getattr(self.opt.loss, 'w_obj_chamfer', 0.2)
         step = self.global_step
 
-        # Simple piecewise schedule
-        if step < 5000:
-            obj_chamfer_weight = base_w
-        elif step < 10000:
-            obj_chamfer_weight = base_w * 2.0  # 0.4
+        # NEW: Check for decay schedule in config
+        decay_cfg = getattr(self.opt.loss, 'w_obj_chamfer_decay', None)
+        if decay_cfg and decay_cfg.get('enabled', False):
+            # Config-driven decay schedule
+            obj_chamfer_weight = base_w  # Default
+
+            # Check each step threshold in order
+            if step >= decay_cfg.get('step_25000', 25000):
+                obj_chamfer_weight = decay_cfg.get('step_25000_weight', base_w * 0.25)
+            elif step >= decay_cfg.get('step_20000', 20000):
+                obj_chamfer_weight = decay_cfg.get('step_20000_weight', base_w * 0.5)
+            elif step >= decay_cfg.get('step_15000', 15000):
+                obj_chamfer_weight = decay_cfg.get('step_15000_weight', base_w * 0.75)
+            elif step >= decay_cfg.get('step_10000', 10000):
+                obj_chamfer_weight = decay_cfg.get('step_10000_weight', base_w * 0.9)
+            else:
+                obj_chamfer_weight = base_w
         else:
-            obj_chamfer_weight = base_w * 4.0  # 0.8
+            # Fallback to hardcoded schedule (original behavior)
+            if step < 5000:
+                obj_chamfer_weight = base_w
+            elif step < 10000:
+                obj_chamfer_weight = base_w * 2.0
+            else:
+                obj_chamfer_weight = base_w * 4.0
 
         if step % 1000 == 0:
             logger.info(f"[Obj Chamfer] Step {step}: weight={obj_chamfer_weight:.4f}")
@@ -3418,6 +3508,11 @@ class HOLD(pl.LightningModule):
                         if 'loss_components' in locals():
                             loss_components['object_shape'] += sdf_regularization.item()
                         loss_output['loss/sdf_regularization'] = sdf_regularization.item()
+                        loss_output['loss/sdf_zero_cross'] = zero_crossing_loss.item()
+                        loss_output['loss/sdf_gradient'] = gradient_loss.item()
+                        loss_output['loss/eikonal'] = eikonal_loss.item()
+                        loss_output['loss/sdf_range'] = range_loss.item()
+
                         if self.global_step % 100 == 0:
                             logger.info('loss/sdf_zero_crossing', zero_crossing_loss.item())
                             logger.info('loss/sdf_gradient', gradient_loss.item())
@@ -4110,6 +4205,37 @@ class HOLD(pl.LightningModule):
 
         if should_profile and self.phase3_enabled:
             self.memory_profiler.checkpoint("after_ghop")
+
+        # ================================================================
+        # GEOMETRY FREEZE CHECK (Prevent Phase 4/5 from eroding object)
+        # ================================================================
+        phase4_cfg = getattr(self.opt, 'phase4', {})
+        freeze_enabled = phase4_cfg.get('freeze_object_geometry', False)
+        freeze_at = phase4_cfg.get('freeze_at_iter', 35000)
+
+        if freeze_enabled and self.global_step == freeze_at:
+            logger.info("=" * 70)
+            logger.info(f"[GEOMETRY FREEZE] Freezing object parameters at step {freeze_at}")
+            logger.info("=" * 70)
+
+            # Freeze v3d_cano
+            if hasattr(self.model.nodes.object.server.object_model, 'v3d_cano'):
+                self.model.nodes.object.server.object_model.v3d_cano.requires_grad = False
+                logger.info("  - v3d_cano: requires_grad = False")
+
+            # Freeze sdf_grid
+            if hasattr(self.model.nodes.object.server.object_model, 'sdf_grid'):
+                self.model.nodes.object.server.object_model.sdf_grid.requires_grad = False
+                logger.info("  - sdf_grid: requires_grad = False")
+
+            # IMPORTANT: Remove from optimizer to prevent gradients from accumulating
+            opt = self.optimizers()
+            for param_group in opt.param_groups:
+                # Filter out frozen params (keep only those with requires_grad=True)
+                param_group['params'] = [p for p in param_group['params'] if p.requires_grad]
+
+            logger.info("  - Removed frozen parameters from optimizer")
+            logger.info("=" * 70)
 
         # ====================================================================
         # PHASE 4: Contact Refinement (OPTIMIZED - Skip if weight=0)
@@ -4874,6 +5000,9 @@ class HOLD(pl.LightningModule):
             sds_weight_f = to_float(loss_output.get('sds_weight', 0.0))
             contact_f = to_float(loss_output.get('contact_loss', 0.0))
             temporal_f = to_float(loss_output.get('temporal_loss', 0.0))
+            sdf_zero_f = to_float(loss_output.get('loss/sdf_zero_cross', 0.0))
+            sdf_grad_f = to_float(loss_output.get('loss/sdf_gradient', 0.0))
+            sdf_range_f = to_float(loss_output.get('loss/sdf_range', 0.0))
 
             # Calculate percentages (avoid division by zero)
             if total_f > 1e-8:
@@ -4921,6 +5050,9 @@ class HOLD(pl.LightningModule):
             logger.info(f"    Mask (semantic):   {mask_f:.6f}")
             logger.info(f"    Mask (binary):     {mask_binary_f:.6f}")
             logger.info(f"    Eikonal:           {eikonal_f:.6f}")
+            logger.info(f"    SDF Zero-cross:    {sdf_zero_f:.6f}")
+            logger.info(f"    SDF Gradient:      {sdf_grad_f:.6f}")
+            logger.info(f"    SDF Range:         {sdf_range_f:.6f}")
             logger.info("-" * 80)
             logger.info(f"  Step 2 - Geometric Regularization:")
             logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")

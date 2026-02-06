@@ -182,16 +182,15 @@ dataset:
 # LOSS CONFIGURATION - Proven Working Losses Only
 # ================================================================
 loss:
-  target_geom_share: 0.05       # try 0.05–0.10
+  target_geom_share: 0.08       # try 0.05–0.10
   max_geom_scale: 5.0           # prevent runaway scaling
   geom_boost_factor: 1.5        # how fast the scale ramps
   w_sdf_reg: 1.0
   w_rgb: 1.0                   # was 0.8
   w_mask: 0.5              # CHANGED: from 0.1
   w_mask_edge: 0.15         # NEW: Add this line
-  w_eikonal: 0.8                # Keep SDF regularization
-  w_smooth: 0.01               # Keep smoothness
-  w_temporal: 1.0               # NEW: Temporal base weight
+  w_eikonal: 1.0                # Keep SDF regularization
+  w_smooth: 1.0               # Keep smoothness
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
   w_normal_consistency: 0.2 # was 0.1, was effectively ~1e-2 from behavior
@@ -199,15 +198,15 @@ loss:
   w_chamfer: 0.05                    # ← CHANGED from w_template_chamfer
   chamfer_start_step: 1000            # was 15000
   # ============================================================
-  # Object Template Chamfer (temporarily disabled)
+  # Object Template Chamfer (late, weak anchor)
   # ============================================================
-  w_obj_chamfer: 0.2          # was 0.1
-  obj_chamfer_start_step: 100  # was disabled
-  w_obj_generic: 0.0          # avoid extra priors while debugging, changed from 0.05
-  w_obj_smoothness: 0.05       # was 0.02
+  w_obj_chamfer: 0.02           # small but non-zero anchor
+  obj_chamfer_start_step: 4000  # keep as-is; weight=0 means no effect
+  w_obj_generic: 0.0            # keep off while debugging
+  w_obj_smoothness: 0.0        # or at most 0.005 for a very weak early smoothness
 
 # ================================================================
-# TRAINING CONFIGURATION - 40 EPOCHS (80K steps)
+# TRAINING CONFIGURATION - 30 EPOCHS
 # ================================================================
 training:
   num_epochs: 30
@@ -215,6 +214,10 @@ training:
   eval_every_epoch: 999
   log_every: 50
   gradient_clip: 1.0
+  # NEW: warm-up phase boundaries (in global_step units)
+  geom_warmup_end: 0         # Phase 2.1 – geometry-only warm-up, was 2000 - eliminate geometry-only phase
+  render_warmup_end: 1500    # Phase 2.2 – rendering-only warm-up, was 2000 - shorten rendering-only phase
+  joint_warmup_end: 3500     # Phase 2.3 – joint warm-up, was 4000 - start joint training earlier
 
 # ================================================================
 # OPTIMIZER CONFIGURATION
