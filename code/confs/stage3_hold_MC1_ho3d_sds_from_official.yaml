@@ -44,17 +44,15 @@ phase3:
   w_sds_schedule:
     enabled: true
     step_0: 0.0
-    step_1500: 0.00              # Keep SDS off during early warm-up
-    step_2000: 0.25              # Gentle start
-    # keep weight modest at the start of Phase 3
-    step_4000: 0.25              # Gentle start
-    step_8000: 0.60              # ↑ Strong SDS (was 0.40)
-    # mid-phase values can stay similar or slightly reduced
-    step_15000: 0.70             # ↑ Peak refinement (was 0.40)
-    step_20000: 0.60             # ↑ Maintain strength (was 0.35)
-    step_25000: 0.50             # ↑ Gradual decay (was 0.30)
-    step_30000: 0.40             # (was 0.25)
-    step_34999: 0.30             # (was 0.20)
+    step_1500: 0.00
+    step_2000: 0.25          # was 0.25
+    step_4000: 0.35          # was 0.25
+    step_8000: 0.50          # was 0.50
+    step_15000: 0.55         # was 0.55
+    step_20000: 0.55         # was 0.50
+    step_25000: 0.45         # was 0.45
+    step_30000: 0.35         # was 0.40
+    step_34999: 0.30         # was 0.30
     interpolation: "linear"
 
   diagnostics:
@@ -245,18 +243,20 @@ dataset:
 # LOSS CONFIGURATION (UPDATED FOR STAGE 3)
 # ================================================================
 loss:
-  target_geom_share: 0.10       # try 0.05–0.10
-  max_geom_scale: 8.0           # prevent runaway scaling
-  geom_boost_factor: 1.5        # how fast the scale ramps
-  w_sdf_reg: 2.0
-  w_rgb: 1.0                   # was 0.8
-  w_rgb_schedule: # NEW: Reduce RGB to let SDS dominate
+  target_geom_share: 0.07        # was 0.15
+  max_geom_scale: 4.0            # was 8.0
+  geom_boost_factor: 1.2         # was 1.5
+  # Stronger SDF regularization
+  w_sdf_reg: 4.0                 # was 2.0
+  w_rgb: 1.0
+  w_rgb_schedule:
     enabled: true
     step_0: 1.0
-    step_8000: 0.40          # Reduce RGB to let SDS dominate
-    step_15000: 0.40         # Keep low during peak SDS
-    step_25000: 0.40         # Keep low during refinement
-    step_30000: 1.0          # Restore RGB after refinement
+    # step_8000: 0.40
+    step_8000: 0.30      # ↓ give more room to geometry + SDS
+    step_15000: 0.30
+    step_25000: 0.30
+    step_30000: 1.0
     interpolation: "linear"
   w_mask: 0.5              # CHANGED: from 0.1
   w_mask_edge: 0.15         # NEW: Add this line
@@ -271,16 +271,18 @@ loss:
   # ============================================================
   # Object Template Chamfer (late, weak anchor)
   # ============================================================
-  w_obj_chamfer: 0.05           # ↑ Stronger early anchor (was 0.02)
+  w_obj_chamfer: 0.03           # ↑ Stronger early anchor (was 0.02)
   obj_chamfer_start_step: 4000
   w_obj_chamfer_decay:
     enabled: true
-    step_10000: 0.05
-    step_15000: 0.03            # Decay after geometry forms
+    step_10000: 0.03            # was 0.05
+    step_15000: 0.02            # Decay after geometry forms
     step_20000: 0.01            # Weaken to allow SDS refinement
     step_25000: 0.005           # Minimal late anchor
   w_obj_generic: 0.0            # keep off while debugging
   w_obj_smoothness: 0.0         # or at most 0.005 for a very weak early smoothness
+  # Encourage SDF zero-level set to match v3d_cano surface
+  w_sdf_on_verts: 2.0            # was 1.0
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
@@ -291,10 +293,12 @@ training:
   eval_every_epoch: 999
   log_every: 50
   gradient_clip: 1.0
-  # NEW: warm-up phase boundaries (in global_step units)
-  geom_warmup_end: 0         # Phase 2.1 – geometry-only warm-up, was 2000 - eliminate geometry-only phase
-  render_warmup_end: 1500    # Phase 2.2 – rendering-only warm-up, was 2000 - shorten rendering-only phase
-  joint_warmup_end: 3500     # Phase 2.3 – joint warm-up, was 4000 - start joint training earlier
+  # Warm-up phase boundaries (in global_step units)
+  geom_warmup_end: 0           # keep 0 if you don't want pure geometry-only phase
+  render_warmup_end: 1500      # as before
+  joint_warmup_end: 3500       # as before
+  # NEW: extend SDF-focused window used in SDF-HEALTH and warm-up logic
+  sdf_warmup_end: 3500         # was implicit default 2000
 
 # ================================================================
 # OPTIMIZER CONFIGURATION (KEEP FROM STAGE 2)

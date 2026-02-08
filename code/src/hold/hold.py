@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from tqdm import tqdm
 from typing import Dict, Optional, List, Tuple, Any  # ✅ ADD THIS LINE
 
@@ -2405,6 +2406,7 @@ class HOLD(pl.LightningModule):
         geom_warmup_end = getattr(self.opt.training, 'geom_warmup_end', 2000)  # Phase 2.1
         render_warmup_end = getattr(self.opt.training, 'render_warmup_end', 4000)  # Phase 2.2
         joint_warmup_end = getattr(self.opt.training, 'joint_warmup_end', 8000)  # Phase 2.3
+        sdf_warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 2000)
 
         # Default multipliers (used after warm-up / existing phases)
         base_mult = 1.0  # scales base_loss (RGB + masks etc.)
@@ -2412,7 +2414,7 @@ class HOLD(pl.LightningModule):
         sds_mult = 1.0  # scales SDS loss before adding to total
         contact_mult = 1.0
         temporal_mult = 1.0
-
+        phase_tag = "main_training"  # default
         # Determine warm-up phase and set multipliers
         if step < geom_warmup_end:
             # Phase 2.1: GEOMETRY-ONLY warm-up
@@ -2422,7 +2424,6 @@ class HOLD(pl.LightningModule):
             contact_mult = 0.0
             temporal_mult = 0.0
             phase_tag = "geom_warmup"
-
         elif step < render_warmup_end:
             # Phase 2.2: RENDERING-ONLY warm-up
             base_mult = 1.0  # train RGB/rendering
@@ -2431,7 +2432,6 @@ class HOLD(pl.LightningModule):
             contact_mult = 0.0
             temporal_mult = 0.0
             phase_tag = "render_warmup"
-
         elif step < joint_warmup_end:
             # Phase 2.3: JOINT warm-up
             progress = float(step - render_warmup_end) / max(joint_warmup_end - render_warmup_end, 1)
@@ -2441,6 +2441,12 @@ class HOLD(pl.LightningModule):
             contact_mult = 0.0
             temporal_mult = 0.0
             phase_tag = "joint_warmup"
+        # NEW: SDF–first window (geometry focus, but still deprioritize RGB/SDS)
+        elif step < sdf_warmup_end:
+            base_mult = 0.2  # let RGB in, but weakly
+            geom_mult = 1.5  # slightly boost geometric (incl. SDF reg)
+            sds_mult = 0.0  # keep SDS off until SDF is healthy
+            phase_tag = "sdf_warmup"
         else:
             phase_tag = "main_training"
 
@@ -2992,140 +2998,125 @@ class HOLD(pl.LightningModule):
                         # ============================================================
                         # VALIDATE SDF BEFORE EXTRACTION
                         # ============================================================
+                        # Before line 2673
+                        if self.global_step % 100 == 0:
+                            logger.info(f"[PRE-VALIDATION] Step {self.global_step}")
+                            logger.info(f"  Has model.nodes: {hasattr(self.model, 'nodes')}")
+                            if hasattr(self.model, 'nodes'):
+                                logger.info(f"  'object' in nodes: {'object' in self.model.nodes}")
+                        # Initialize flag
                         sdf_is_valid = False
 
-                    # Before line 2673
-                    if self.global_step % 100 == 0:
-                        logger.info(f"[PRE-VALIDATION] Step {self.global_step}")
-                        logger.info(f"  Has model.nodes: {hasattr(self.model, 'nodes')}")
-                        if hasattr(self.model, 'nodes'):
-                            logger.info(f"  'object' in nodes: {'object' in self.model.nodes}")
-                    # Initialize flag
-                    sdf_is_valid = False
+                        try:
+                            # ============================================================
+                            # FIX: ModuleDict doesn't support .get(), use 'in' check
+                            # ============================================================
+                            if 'object' in self.model.nodes:
+                                object_node = self.model.nodes['object']
+                                if hasattr(object_node, 'server'):
+                                    if hasattr(object_node.server, 'object_model'):
+                                        # Check for SDF grid OR vertex representation
+                                        if hasattr(object_node.server.object_model, 'sdf_grid'):
+                                            sdf = object_node.server.object_model.sdf_grid
+                                            sdf_std = sdf.std().item()
+                                            sdf_min = sdf.min().item()
+                                            sdf_max = sdf.max().item()
+                                            has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
 
-                    try:
-                        # ============================================================
-                        # FIX: ModuleDict doesn't support .get(), use 'in' check
-                        # ============================================================
-                        if 'object' in self.model.nodes:
-                            object_node = self.model.nodes['object']
-                            if hasattr(object_node, 'server'):
-                                if hasattr(object_node.server, 'object_model'):
-                                    # Check for SDF grid OR vertex representation
-                                    if hasattr(object_node.server.object_model, 'sdf_grid'):
-                                        sdf = object_node.server.object_model.sdf_grid
-                                        sdf_std = sdf.std().item()
-                                        sdf_min = sdf.min().item()
-                                        sdf_max = sdf.max().item()
-                                        has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
+                                            # min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
+                                            # More lenient threshold to allow early learning
+                                            min_std_threshold = 1e-6 if self.global_step < 10000 else 1e-5
+                                            sdf_is_valid = has_zero_crossing and sdf_std > min_std_threshold
 
-                                        # min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
-                                        # More lenient threshold to allow early learning
-                                        min_std_threshold = 1e-6 if self.global_step < 10000 else 1e-5
-                                        sdf_is_valid = has_zero_crossing and sdf_std > min_std_threshold
+                                            # Log SDF stats every 100 steps (more frequent monitoring)
+                                            if self.global_step % 100 == 0:
+                                                logger.info(
+                                                    f"[SDF Stats] Step {self.global_step}: "
+                                                    f"std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
+                                                    f"range=[{sdf_min:.4f}, {sdf_max:.4f}], "
+                                                    f"zero_crossing={has_zero_crossing}, valid={sdf_is_valid}"
+                                                )
 
-                                        # Log SDF stats every 100 steps (more frequent monitoring)
-                                        if self.global_step % 100 == 0:
-                                            logger.info(
-                                                f"[SDF Stats] Step {self.global_step}: "
-                                                f"std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
-                                                f"range=[{sdf_min:.4f}, {sdf_max:.4f}], "
-                                                f"zero_crossing={has_zero_crossing}, valid={sdf_is_valid}"
-                                            )
+                                                # Log to tensorboard for plotting
+                                                logger.info('sdf/std', sdf_std)
+                                                logger.info('sdf/min', sdf_min)
+                                                logger.info('sdf/max', sdf_max)
+                                                logger.info('sdf/has_zero_crossing', float(has_zero_crossing))
+                                                logger.info('sdf/is_valid', float(sdf_is_valid))
 
-                                            # Log to tensorboard for plotting
-                                            logger.info('sdf/std', sdf_std)
-                                            logger.info('sdf/min', sdf_min)
-                                            logger.info('sdf/max', sdf_max)
-                                            logger.info('sdf/has_zero_crossing', float(has_zero_crossing))
-                                            logger.info('sdf/is_valid', float(sdf_is_valid))
+                                            if not sdf_is_valid and self.global_step % 500 == 0:
+                                                logger.warning(
+                                                    f"[Object Chamfer] DEGENERATE SDF at step {self.global_step}:\n"
+                                                    f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
+                                                    f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
+                                                )
+                                        elif hasattr(object_node.server.object_model, 'v3d_cano'):
+                                            # Vertex representation is available (for fallback/use later),
+                                            # but do NOT flip sdf_is_valid here; it is strictly SDF-based.
+                                            pass
+                        except Exception as e:
+                            if self.global_step % 100  == 0:
+                                logger.warning(f"[Object Chamfer] SDF validation error: {e}")
 
-                                        if not sdf_is_valid and self.global_step % 500 == 0:
-                                            logger.warning(
-                                                f"[Object Chamfer] DEGENERATE SDF at step {self.global_step}:\n"
-                                                f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
-                                                f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
-                                            )
-                                    elif hasattr(object_node.server.object_model, 'v3d_cano'):
-                                        # Using vertex representation
-                                        sdf_is_valid = True
-                    except Exception as e:
-                        if self.global_step % 100  == 0:
-                            logger.warning(f"[Object Chamfer] SDF validation error: {e}")
+                        # Only extract mesh if valid
+                        if sdf_is_valid:
+                            # Before extraction
+                                if self.global_step % 100 == 0:
+                                    logger.info(f"[Pre-Extract Debug] Step {self.global_step}")
 
-                    # # BYPASS: Always force True for vertex representation (OUTSIDE try-except)
-                    # if not sdf_is_valid:
-                    #     if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-                    #         obj_node = self.model.nodes['object']
-                    #         if hasattr(obj_node, 'server'):
-                    #             if hasattr(obj_node.server, 'object_model'):
-                    #                 obj_model = obj_node.server.object_model
-                    #                 if hasattr(obj_model, 'v3d_cano'):
-                    #                     sdf_is_valid = True
-                    #                     obj_verts_list = [obj_model.v3d_cano]  # ← ADD THIS LINE
-                    #                     if self.global_step % 100 == 0:
-                    #                         logger.info(
-                    #                             f"[BYPASS] Forced sdf_is_valid=True for vertex-based object at step {self.global_step}")
+                                    if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                                        obj_node = self.model.nodes['object']
+                                        if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
+                                            obj_model = obj_node.server.object_model
 
-                    # Only extract mesh if valid
-                    if not sdf_is_valid:
-                        obj_verts_list = None
-                        obj_faces_list = None
-                    else:
-                        # Before extraction
-                            if self.global_step % 100 == 0:
-                                logger.info(f"[Pre-Extract Debug] Step {self.global_step}")
+                                            logger.info(f"  Has v3d_cano: {hasattr(obj_model, 'v3d_cano')}")
+                                            if hasattr(obj_model, 'v3d_cano'):
+                                                logger.info(f"  v3d_cano shape: {obj_model.v3d_cano.shape}")
+                                                logger.info(
+                                                    f"  v3d_cano range: [{obj_model.v3d_cano.min():.4f}, {obj_model.v3d_cano.max():.4f}]")
 
-                                if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-                                    obj_node = self.model.nodes['object']
-                                    if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
-                                        obj_model = obj_node.server.object_model
+                                            logger.info(f"  Has f3d_cano: {hasattr(obj_model, 'f3d_cano')}")
+                                            if hasattr(obj_model, 'f3d_cano'):
+                                                logger.info(f"  f3d_cano shape: {obj_model.f3d_cano.shape}")
 
-                                        logger.info(f"  Has v3d_cano: {hasattr(obj_model, 'v3d_cano')}")
-                                        if hasattr(obj_model, 'v3d_cano'):
-                                            logger.info(f"  v3d_cano shape: {obj_model.v3d_cano.shape}")
-                                            logger.info(
-                                                f"  v3d_cano range: [{obj_model.v3d_cano.min():.4f}, {obj_model.v3d_cano.max():.4f}]")
+                                            logger.info(f"  Has faces: {hasattr(obj_model, 'faces')}")
+                                            if hasattr(obj_model, 'faces'):
+                                                logger.info(f"  faces shape: {obj_model.faces.shape}")
 
-                                        logger.info(f"  Has f3d_cano: {hasattr(obj_model, 'f3d_cano')}")
-                                        if hasattr(obj_model, 'f3d_cano'):
-                                            logger.info(f"  f3d_cano shape: {obj_model.f3d_cano.shape}")
+                                try:
+                                    obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
+                                except Exception as e:
+                                    logger.error(f"[Mesh Extract EXCEPTION] {e}")
+                                    import traceback
+                                    logger.error(traceback.format_exc())
+                                    obj_verts_list = None
+                                    obj_faces_list = None
 
-                                        logger.info(f"  Has faces: {hasattr(obj_model, 'faces')}")
-                                        if hasattr(obj_model, 'faces'):
-                                            logger.info(f"  faces shape: {obj_model.faces.shape}")
+                                # NEW: Detailed extraction logging
+                                if self.global_step % 100 == 0:
+                                    extraction_success = obj_verts_list is not None and len(obj_verts_list) > 0
 
-                            try:
-                                obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
-                            except Exception as e:
-                                logger.error(f"[Mesh Extract EXCEPTION] {e}")
-                                import traceback
-                                logger.error(traceback.format_exc())
-                                obj_verts_list = None
-                                obj_faces_list = None
+                                    if extraction_success:
+                                        num_verts = obj_verts_list[0].shape[0] if isinstance(obj_verts_list, list) else obj_verts_list.shape[0]
+                                        num_faces = obj_faces_list[0].shape[0] if obj_faces_list and isinstance(obj_faces_list, list) else 0
 
-                            # NEW: Detailed extraction logging
-                            if self.global_step % 100 == 0:
-                                extraction_success = obj_verts_list is not None and len(obj_verts_list) > 0
+                                        logger.info(
+                                            f"✅ [Mesh Extract] Success at step {self.global_step}: "
+                                            f"{num_verts} verts, {num_faces} faces"
+                                        )
 
-                                if extraction_success:
-                                    num_verts = obj_verts_list[0].shape[0] if isinstance(obj_verts_list, list) else obj_verts_list.shape[0]
-                                    num_faces = obj_faces_list[0].shape[0] if obj_faces_list and isinstance(obj_faces_list, list) else 0
-
-                                    logger.info(
-                                        f"✅ [Mesh Extract] Success at step {self.global_step}: "
-                                        f"{num_verts} verts, {num_faces} faces"
-                                    )
-
-                                    logger.info('object/extraction_success', 1.0)
-                                    logger.info('object/num_vertices', float(num_verts))
-                                else:
-                                    logger.warning(
-                                        f"❌ [Mesh Extract] Failed at step {self.global_step}: "
-                                        f"returned {type(obj_verts_list)}"
-                                    )
-                                    logger.info('object/extraction_success', 0.0)
-
+                                        logger.info('object/extraction_success', 1.0)
+                                        logger.info('object/num_vertices', float(num_verts))
+                                    else:
+                                        logger.warning(
+                                            f"❌ [Mesh Extract] Failed at step {self.global_step}: "
+                                            f"returned {type(obj_verts_list)}"
+                                        )
+                                        logger.info('object/extraction_success', 0.0)
+                        else:
+                            # Skip MC but DO NOT assume "no geometry"
+                            obj_verts_list = None
+                            obj_faces_list = None
                     # Check if template exists (correct check!)
                     if obj_category in self.object_templates:
                         # ============================================================
@@ -3212,12 +3203,12 @@ class HOLD(pl.LightningModule):
                         # AFTER (updated):
                         obj_verts_for_chamfer = None
 
-                        if sdf_is_valid and obj_verts_list and len(obj_verts_list) > 0:
+                        if obj_verts_list and len(obj_verts_list) > 0:
                             obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
                             if obj_verts.shape[0] > 0:
                                 obj_verts_for_chamfer = obj_verts
 
-                        # Fallback: use v3d_cano if SDF/MC path failed
+                        # Fallback: use v3d_cano if SDF/MC failed
                         if obj_verts_for_chamfer is None:
                             if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
                                 obj_node = self.model.nodes['object']
@@ -3336,36 +3327,37 @@ class HOLD(pl.LightningModule):
                         # Check if it's a Parameter (learnable)
                         if isinstance(v3d_cano, nn.Parameter):
                             # Compute smoothness loss
-                            smoothness_loss = get_smoothness_loss(v3d_cano)
-                            smoothness_weight = getattr(self.opt.loss, 'w_obj_smoothness', 0.01)
-                            geometric_loss = geometric_loss + smoothness_weight * smoothness_loss
+                            smoothness_weight = getattr(self.opt.loss, 'w_obj_smoothness', 0.0)
+                            if smoothness_weight > 0.0:
+                                # Compute smoothness loss only if non-zero weight
+                                smoothness_loss = get_smoothness_loss(v3d_cano)
+                                geometric_loss = geometric_loss + smoothness_weight * smoothness_loss
+                                smoothness_added = True
 
-                            smoothness_added = True
+                                # Log every 100 steps
+                                if self.global_step % 100 == 0:
+                                    logger.info('loss/object_smoothness', smoothness_loss.item())
 
-                            # Log every 100 steps
-                            if self.global_step % 100 == 0:
-                                logger.info('loss/object_smoothness', smoothness_loss.item())
+                                    # Calculate change rate
+                                    current_smooth = smoothness_loss.item()
+                                    if not hasattr(self, '_prev_smoothness'):
+                                        self._prev_smoothness = current_smooth
+                                        change_rate = 0.0
+                                    elif abs(self._prev_smoothness) < 1e-8:
+                                        # Avoid division by zero when previous smoothness is ~0
+                                        change_rate = 0.0
+                                        self._prev_smoothness = current_smooth
+                                    else:
+                                        change_rate = (current_smooth - self._prev_smoothness) / self._prev_smoothness * 100
+                                        self._prev_smoothness = current_smooth
 
-                                # Calculate change rate
-                                current_smooth = smoothness_loss.item()
-                                if not hasattr(self, '_prev_smoothness'):
-                                    self._prev_smoothness = current_smooth
-                                    change_rate = 0.0
-                                elif abs(self._prev_smoothness) < 1e-8:
-                                    # Avoid division by zero when previous smoothness is ~0
-                                    change_rate = 0.0
-                                    self._prev_smoothness = current_smooth
-                                else:
-                                    change_rate = (current_smooth - self._prev_smoothness) / self._prev_smoothness * 100
-                                    self._prev_smoothness = current_smooth
+                                    logger.info(
+                                        f"✅ [Object Smoothness] Step {self.global_step}: "
+                                        f"loss={smoothness_loss.item():.6f}, "
+                                        f"change={change_rate:+.2f}%"
+                                    )
 
-                                logger.info(
-                                    f"✅ [Object Smoothness] Step {self.global_step}: "
-                                    f"loss={smoothness_loss.item():.6f}, "
-                                    f"change={change_rate:+.2f}%"
-                                )
-
-                                loss_output['object_smoothness'] = smoothness_loss.item()
+                                    loss_output['object_smoothness'] = smoothness_loss.item()
                         else:
                             if self.global_step == 0:
                                 logger.warning("⚠️ v3d_cano exists but is NOT nn.Parameter (still a buffer?)")
@@ -3416,6 +3408,11 @@ class HOLD(pl.LightningModule):
                     w_eikonal = getattr(self.opt.loss, 'w_eikonal', 1.0)
                     w_smooth = getattr(self.opt.loss, 'w_smooth', 1.0)
 
+                    # Stronger SDF early
+                    if self.global_step < sdf_warmup_end:
+                        w_sdf_reg *= 3.0
+                        w_eikonal *= 3.0
+
                     # Only apply if learnable
                     if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
 
@@ -3429,7 +3426,7 @@ class HOLD(pl.LightningModule):
                             zero_crossings = ((flat[:-1] * flat[1:]) < 0).sum().item()
                             zero_cross_ratio = zero_crossings / max(flat.numel() - 1, 1)
 
-                        # Expose for logging / debugging
+                        # Expose for logging / debugging (1D stats)
                         loss_output['debug/sdf_zero_crossings'] = float(zero_crossings)
                         loss_output['debug/sdf_zero_cross_ratio'] = float(zero_cross_ratio)
 
@@ -3445,8 +3442,11 @@ class HOLD(pl.LightningModule):
                         # Optional: hard safety stop after warm-up
                         if zero_crossings == 0 and self.global_step > 5000:
                             logger.error("[SDF-HEALTH] zero-crossings == 0 after warm-up → geometry collapsed")
-                            # Option A: raise to stop training completely
-                            # raise RuntimeError("SDF collapsed: zero-crossings == 0")
+                            # Optional: hard safety stop after warm-up
+                            if zero_crossings == 0 and self.global_step > 5000:
+                                logger.error("[SDF-HEALTH] zero-crossings == 0 after warm-up → geometry collapsed")
+                                raise RuntimeError("SDF collapsed: zero-crossings == 0")
+
                             # Option B: set a flag / schedule re-init
 
                         # Coarse sign test: does grid span negative and positive?
@@ -3457,17 +3457,48 @@ class HOLD(pl.LightningModule):
                         zc_y = ((sdf_grid[:, :, 1:, :] * sdf_grid[:, :, :-1, :]) < 0).sum()
                         zc_z = ((sdf_grid[:, :, :, 1:] * sdf_grid[:, :, :, :-1]) < 0).sum()
                         zero_cross_count = (zc_x + zc_y + zc_z).item()
-                            
+                        # Now safe to log into LOSS BREAKDOWN
+                        loss_output['loss/sdf_zero_crossings'] = float(zero_cross_count)
+
+                        # NEW: choose thresholds for std and zero-cross count
+                        # Use config-driven warm-up boundary
+                        warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 2000)
+                        has_zero = (sdf_min < 0.0) and (sdf_max > 0.0)
+
+                        if self.global_step < warmup_end:
+                            # Early: only require non-trivial std and sign span
+                            std_thresh = 1e-6
+                            is_degenerate = (not has_zero) or (sdf_std.item() < std_thresh)
+                            min_zc = 0  # for loss/penalty only
+                        else:
+                            # Later: add zero-cross count constraint
+                            std_thresh = 1e-5
+                            min_zc = 5
+                            is_degenerate = (
+                                (not has_zero) or
+                                (zero_cross_count < min_zc) or
+                                (sdf_std.item() < std_thresh)
+                            )
+
+                        self._sdf_is_valid = not is_degenerate
+
+                        # NEW: explicit zero-cross count penalty
+                        zero_cross_count_tensor = torch.tensor(
+                            float(zero_cross_count), device=sdf_grid.device
+                        )
+                        zc_target = float(min_zc)          # now min_zc is defined
+                        lambda_zc = 0.1                    # tune: 0.1–1.0
+                        zero_cross_count_loss = lambda_zc * F.relu(zc_target - zero_cross_count_tensor)
+
                         if self.global_step % 100 == 0:
                             logger.info('sdf/min', sdf_min.item())
                             logger.info('sdf/max', sdf_max.item())
                             logger.info('sdf/std', sdf_std.item())
-                            logger.info('sdf/has_zero_crossing', float(has_zero))
+                            logger.info('sdf/has_zero', float(has_zero))
                             logger.info('sdf/zero_cross_count', zero_cross_count)
 
-                        min_zc = 10  # tune; 0 clearly means no surface
-                        is_degenerate = (zero_cross_count < min_zc) or (sdf_std.item() < 1e-5)
-
+                        if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
+                            sds_mult = 0.0
                         # --------------------------------------------------------
                         # Degeneracy counter + optional re-init
                         # --------------------------------------------------------
@@ -3495,7 +3526,10 @@ class HOLD(pl.LightningModule):
                         # 1. Zero-crossing encouragement (mean ≈ 0)
                         # --------------------------------------------------------
                         mean_sdf = sdf_grid.mean()
-                        zero_crossing_loss = torch.abs(mean_sdf) * 0.1
+                        zero_crossing_loss = (
+                                1.0 * torch.abs(mean_sdf) +  # was 0.1
+                                1.0 * F.relu(1e-3 - sdf_std)  # was 0.1
+                        )
 
                         # --------------------------------------------------------
                         # 2. Gradient magnitude (prevent flat fields)
@@ -3511,32 +3545,70 @@ class HOLD(pl.LightningModule):
                         ).sqrt()
 
                         # Encourage gradients not to collapse to 0
-                        gradient_loss = torch.nn.functional.relu(0.05 - gradient_magnitude) * 0.1
+                        gradient_loss = F.relu(0.1 - gradient_magnitude) * 0.5
 
                         # --------------------------------------------------------
                         # 3. Eikonal loss (|∇φ| ≈ 1)
                         # --------------------------------------------------------
-                        eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.01
+                        eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.1
 
                         # --------------------------------------------------------
                         # 4. Range encouragement (span positive/negative)
                         #    Push min < -0.1 and max > 0.1, softly
                         # --------------------------------------------------------
                         range_loss = (
-                            torch.nn.functional.relu(0.1 + sdf_min) +
-                            torch.nn.functional.relu(0.1 - sdf_max)
-                        ) * 0.05
+                            F.relu(0.1 + sdf_min) +
+                            F.relu(0.1 - sdf_max)
+                        ) * 0.5  # was 0.1
+
+                        # --------------------------------------------------------
+                        # 5. SDF–v3d coupling: encourage SDF(v3d_cano) ≈ 0
+                        # --------------------------------------------------------
+                        sdf_on_verts_loss = 0.0
+                        if hasattr(object_server, "object_model") and hasattr(object_server.object_model, "v3d_cano"):
+                            v3d = object_server.object_model.v3d_cano  # (N, 3) canonical vertices
+                            v_std = v3d.std().item()
+
+                            if isinstance(v3d, torch.Tensor) and v3d.numel() > 0:
+                                coords = v3d.unsqueeze(0).unsqueeze(0)
+                                coords = coords[..., [2, 1, 0]]
+                                sdf_samples = torch.nn.functional.grid_sample(
+                                    sdf_grid.unsqueeze(0),
+                                    coords.view(1, 1, -1, 1, 3),
+                                    align_corners=True,
+                                    mode="bilinear",
+                                    padding_mode="border",
+                                )
+                                sdf_on_verts_loss = sdf_samples.abs().mean()
+
+                        w_v2s_base = getattr(self.opt.loss, "w_sdf_on_verts", 5.0)
+                        if self.global_step < sdf_warmup_end:
+                            # Let SDF move more freely vs. noisy v3d at the very beginning
+                            w_v2s = 0.1 * w_v2s_base
+                        else:
+                            # Strong coupling ONCE SDF is at least somewhat healthy
+                            if getattr(self, "_sdf_is_valid", False):
+                                w_v2s = 20.0 * w_v2s_base
+                            else:
+                                w_v2s = 1.0 * w_v2s_base  # light pull even when invalid
+
+                        # Finally, kill coupling if v3d is clearly degenerate
+                        if 'v_std' in locals() and v_std < 0.01:  # was 0.02
+                            w_v2s = 0.0
 
                         # --------------------------------------------------------
                         # Combine with configurable weights
                         # --------------------------------------------------------
                         sdf_regularization = (
-                            zero_crossing_loss
-                            + w_smooth * gradient_loss
-                            + w_eikonal * eikonal_loss
-                            + range_loss
+                                zero_crossing_loss
+                                + zero_cross_count_loss  # ← NEW
+                                + w_smooth * gradient_loss
+                                + w_eikonal * eikonal_loss
+                                + range_loss
+                                + w_v2s * sdf_on_verts_loss
                         )
                         sdf_regularization = w_sdf_reg * sdf_regularization
+
 
                         geometric_loss = geometric_loss + sdf_regularization
                         if 'loss_components' in locals():
@@ -3546,6 +3618,7 @@ class HOLD(pl.LightningModule):
                         loss_output['loss/sdf_gradient'] = gradient_loss.item()
                         loss_output['loss/eikonal'] = eikonal_loss.item()
                         loss_output['loss/sdf_range'] = range_loss.item()
+                        loss_output["loss/sdf_on_verts"] = float(sdf_on_verts_loss)
 
                         if self.global_step % 100 == 0:
                             logger.info('loss/sdf_zero_crossing', zero_crossing_loss.item())
@@ -3589,6 +3662,11 @@ class HOLD(pl.LightningModule):
                         vertex_collapse_loss = torch.nn.functional.relu(min_var - vertex_variance)
 
                         vertex_collapse_weight = 0.1  # start small
+                        if self.global_step < 5000:
+                            vertex_collapse_weight = 0.1
+                        else:
+                            vertex_collapse_weight = 0.02  # relax once basic shape is formed
+
                         total_loss = total_loss + vertex_collapse_weight * vertex_collapse_loss
 
                         if self.global_step % 100 == 0:
@@ -3854,11 +3932,15 @@ class HOLD(pl.LightningModule):
 
                     # Check for degenerate SDF (all zeros)
                     sdf_std = object_sdf.std()
-                    if sdf_std < 1e-6:
+                    std_thresh = 1e-5 if self.global_step < self.opt.training.sdf_warmup_end else 5e-6
+                    if sdf_std < std_thresh:
                         logger.warning(
-                            f"[Phase 3] object_sdf is degenerate (std={sdf_std:.6f}). "
-                            f"This may indicate initialization issues."
+                            f"Phase 3 objectsdf is weak/flat std={sdfstd:.6f} "
+                            f"(thresh={std_thresh:.1e}) – skipping SDS this step."
                         )
+                        # Soft‑skip: set a flag or just return 0 SDS, but DO NOT throw.
+                        return 0.0, {}  # or equivalently: ghoplosses['sds'] = 0
+
 
                     logger.debug(
                         f"[Phase 3] ✓ Object SDF valid: shape={object_sdf.shape}, "
@@ -4252,6 +4334,11 @@ class HOLD(pl.LightningModule):
             logger.info(f"[GEOMETRY FREEZE] Freezing object parameters at step {freeze_at}")
             logger.info("=" * 70)
 
+            if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
+                logger.warning("[GEOMETRY FREEZE] SDF not valid; postponing freeze")
+                # optionally: return without freezing
+                return
+
             # Freeze v3d_cano
             if hasattr(self.model.nodes.object.server.object_model, 'v3d_cano'):
                 self.model.nodes.object.server.object_model.v3d_cano.requires_grad = False
@@ -4349,9 +4436,9 @@ class HOLD(pl.LightningModule):
                 # ============================================================
                 # Validate SDF before proceeding
                 # ============================================================
-                sdf_is_valid = self._validate_sdf_for_extraction()
+                self._sdf_is_valid = self._validate_sdf_for_extraction()
 
-                if not sdf_is_valid:
+                if not self._sdf_is_valid:
                     # Log warning and skip entire Phase 4
                     if self.global_step % 100 == 0:
                         logger.warning(
@@ -5038,6 +5125,7 @@ class HOLD(pl.LightningModule):
             sdf_grad_f = to_float(loss_output.get('loss/sdf_gradient', 0.0))
             sdf_range_f = to_float(loss_output.get('loss/sdf_range', 0.0))
             sdf_zero_crossings_f = to_float(loss_output.get('loss/sdf_zero_crossings', 0.0))
+            sdf_on_verts_f = to_float(loss_output.get('loss/sdf_on_verts', 0.0))
 
             # Calculate percentages (avoid division by zero)
             if total_f > 1e-8:
@@ -5089,6 +5177,7 @@ class HOLD(pl.LightningModule):
             logger.info(f"    SDF Gradient:      {sdf_grad_f:.6f}")
             logger.info(f"    SDF Range:         {sdf_range_f:.6f}")
             logger.info(f"    SDF Zero-crossings:{sdf_zero_crossings_f:.6f}")
+            logger.info(f"    SDF on_verts:      {sdf_on_verts_f:.6f}")
             logger.info("-" * 80)
             logger.info(f"  Step 2 - Geometric Regularization:")
             logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")
@@ -6310,46 +6399,39 @@ class HOLD(pl.LightningModule):
 
         return signed_sdf.unsqueeze(0)  # [1, H, W, D]
 
-    def _validate_sdf_for_extraction(self):
-        """
-        Validate that SDF grid is suitable for mesh extraction.
-        Returns True if SDF has proper zero-crossings and variance.
-        """
+    def _validate_sdf_for_extraction(self) -> bool:
         try:
             # FIX: Use 'in' check instead of .get() for ModuleDict
             if 'object' not in self.model.nodes:
                 return False
-
             object_node = self.model.nodes['object']
             if not hasattr(object_node, 'server'):
                 return False
-
             object_server = object_node.server
             if not hasattr(object_server, 'object_model'):
                 return False
 
-            # Check for SDF representation
-            if hasattr(object_server.object_model, 'sdf_grid'):
-                sdf = object_server.object_model.sdf_grid
+            obj_model = object_server.object_model
 
+            # If we already ran SDF-HEALTH this step, reuse it
+            if hasattr(obj_model, 'sdf_grid'):
+                sdf = obj_model.sdf_grid
                 sdf_std = sdf.std().item()
                 sdf_min = sdf.min().item()
                 sdf_max = sdf.max().item()
                 has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
+                std_thresh = 1e-5  # keep simple here
 
-                is_valid = has_zero_crossing and sdf_std > 1e-4
+                sdf_valid = has_zero_crossing and sdf_std > std_thresh
 
-                if not is_valid and self.global_step % 500 == 0:
-                    logger.warning(
-                        f"[SDF Validation] Degenerate at step {self.global_step}: "
-                        f"std={sdf_std:.6f}, range=[{sdf_min:.4f}, {sdf_max:.4f}], "
-                        f"zero_crossing={has_zero_crossing}"
-                    )
+                # If SDF is bad but v3d exists, still allow extraction via v3d
+                if not sdf_valid and hasattr(obj_model, 'v3d_cano'):
+                    return True
 
-                return is_valid
+                return sdf_valid
 
-            elif hasattr(object_server.object_model, 'v3d_cano'):
-                # Using vertex representation - always valid
+            # No SDF grid – fall back to v3d
+            if hasattr(obj_model, 'v3d_cano'):
                 return True
 
             return False
