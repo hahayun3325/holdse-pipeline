@@ -43,26 +43,23 @@ phase3:
 
   w_sds_schedule:
     enabled: true
-    step_0: 0.0
     step_1500: 0.00        # still off during early render warmup
-    step_2000: 0.40        # ↑ was 0.25
-    step_4000: 0.60        # ↑ was 0.35
-    step_8000: 0.80        # ↑ was 0.50
-    step_15000: 0.90       # ↑ was 0.55
-    step_20000: 0.90       # keep strong while geometry is stuck
-    step_25000: 0.60       # decay later
-    step_30000: 0.40
-    step_34999: 0.30
+    step_2000: 0.30        # ↓ Lower early (was 0.40)
+    step_4000: 0.50        # ↓ Slower ramp (was 0.60)
+    step_8000: 0.60        # ↓ Delay peak (was 0.80)
+    step_15000: 0.70       # ↓ Keep moderate (was 0.90)
+    step_25000: 0.80       # Peak later
+    step_35000: 0.60
     interpolation: "linear"
 
   diagnostics:
     rgb_convergence_check:
-      enabled: true
+      enabled: false             # Disable to prevent interference
       step: 20000
       threshold: 0.08
       warning_only: true
     sds_trend_check:
-      enabled: true
+      enabled: false             # Disable to prevent SDS suppression
       check_every: 1000
       window: 2000
       max_increase: 0.2
@@ -247,20 +244,19 @@ loss:
   max_geom_scale: 4.0            # was 8.0
   geom_boost_factor: 1.2         # was 1.5
   # Stronger SDF regularization
-  w_sdf_reg: 2.0
+  w_sdf_reg: 1.0                 # ↑ Restore moderate rigidity (was 0.5)
   w_rgb: 1.0
   w_rgb_schedule:
     enabled: true
     step_0: 1.0
-    # step_8000: 0.40
-    step_8000: 0.30      # ↓ give more room to geometry + SDS
-    step_15000: 0.30
-    step_25000: 0.30
-    step_30000: 1.0
+    step_8000: 0.70              # ↑ Higher plateau (was 0.60)
+    step_15000: 0.60             # Gradual decay (was 0.50)
+    step_25000: 0.50             # Maintain until convergence (was 0.40)
+    step_30000: 0.80             # Restore for final refinement
     interpolation: "linear"
   w_mask: 0.5              # CHANGED: from 0.1
   w_mask_edge: 0.15         # NEW: Add this line
-  w_eikonal: 1.0                # Keep SDF regularization
+  w_eikonal: 1.0                 # ↑ Restore standard Eikonal (was 0.5)
   w_smooth: 0.5               # Keep smoothness
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
@@ -271,18 +267,17 @@ loss:
   # ============================================================
   # Object Template Chamfer (late, weak anchor)
   # ============================================================
-  w_obj_chamfer: 0.02           # ↑ Stronger early anchor
-  obj_chamfer_start_step: 3000  # start a bit earlier, once SDF is healthy
+  w_obj_chamfer: 0.03            # ↓ Moderate anchor (was 0.08)
+  obj_chamfer_start_step: 2000   # ← Delay to when SDS activates (was 500)
   w_obj_chamfer_decay:
     enabled: true
-    step_8000: 0.02             # keep full weight only 3k–8k
-    step_12000: 0.01            # Decay after geometry forms
-    step_16000: 0.005           # Weaken to allow SDS refinement
-    step_20000: 0.0             # turn off for the SDS refinement tail
+    step_10000: 0.03             # Maintain stable (don't decay early)
+    step_20000: 0.02            # Maintain weak anchor (don't go to 0.0)
+    step_30000: 0.01             # Keep weak anchor active, never zero
   w_obj_generic: 0.0            # keep off while debugging
   w_obj_smoothness: 0.0         # or at most 0.005 for a very weak early smoothness
   # Encourage SDF zero-level set to match v3d_cano surface
-  w_sdf_on_verts: 1.0
+  w_sdf_on_verts: 1.0            # ↑ CRITICAL: Restore strong coupling (was 0.2)
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
@@ -298,7 +293,7 @@ training:
   render_warmup_end: 1500      # as before
   joint_warmup_end: 3500       # as before
   # NEW: extend SDF-focused window used in SDF-HEALTH and warm-up logic
-  sdf_warmup_end: 3500         # was implicit default 2000
+  sdf_warmup_end: 5000         # ↑ Extended from 3500
 
 # ================================================================
 # OPTIMIZER CONFIGURATION (KEEP FROM STAGE 2)

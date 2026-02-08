@@ -21,7 +21,7 @@ from common.torch_utils import reset_all_seeds
 from src.utils import vis_utils
 
 
-def save_normal_image(normal_tensor, save_path, mask=None):
+def save_normal_image(normal_tensor, save_path, mask=None, norm_thresh=0.5):
     """
     Save normal map as RGB image with white background.
     Input: normal_tensor in range [-1, 1], shape [H, W, 3] or [3, H, W]
@@ -40,11 +40,15 @@ def save_normal_image(normal_tensor, save_path, mask=None):
         bg_mask = ~mask.cpu().numpy().astype(bool)
         normal_img[bg_mask] = 1.0  # White background
     else:
-        # Method 2: Detect by near-zero norm (unoccupied space)
-        norm = np.linalg.norm(normal_img * 2 - 1, axis=-1)  # Back to [-1,1] then compute norm
-        # Norm should be ~1.0 for valid normals, near 0 for empty/background
-        bg_mask = norm < 0.1
-        normal_img[bg_mask] = 1.0  # White background
+        # Use SDF-gradient magnitude to define foreground
+        # Convert back to [-1, 1] then compute norm
+        normals_unit = normal_img * 2.0 - 1.0
+        norm = np.linalg.norm(normals_unit, axis=-1)
+
+        # Anything with large gradient is near surface → object
+        fg_mask = norm > norm_thresh
+        bg_mask = ~fg_mask
+        normal_img[bg_mask] = 1.0
 
     # Clip and convert to uint8
     normal_img = (normal_img * 255).clip(0, 255).astype(np.uint8)
@@ -252,11 +256,16 @@ def main():
                     ).squeeze(0).permute(1, 2, 0)  # [H, W, 3]
 
                     # Store in output dictionary for saving
-                    # Delete existing key if present (from drifted implicit network)
+
+                    # Always replace object.normal with SDF-based normals
                     if "object.normal" in out:
                         del out["object.normal"]
                     out["object.normal"] = normal_img.reshape(-1, 3)
-                    out["normal"] = out["object.normal"].clone()
+
+                    # Do NOT set out["normal"] here – this is causing "Key already exists normal"
+                    # If you really need to, you must delete first, but it's cleaner to drive
+                    # visualization from object.normal and the combined block.
+
 
                     logger.info(f"  [EXPERIMENT] Computed normals from stored SDF: shape={out['object.normal'].shape}")
                     logger.info(
@@ -332,7 +341,13 @@ def main():
 
             if isinstance(combined, torch.Tensor):
                 combined_img = reshape_normal(combined, img_size)
-                save_normal_image(combined_img, op.join(combined_dir, f"frame_{idx:04d}.png"))
+                # For combined, also let SDF gradient drive the silhouette
+                save_normal_image(
+                    combined_img,
+                    op.join(combined_dir, f"frame_{idx:04d}.png"),
+                    mask=None,
+                    norm_thresh=0.5
+                )
                 saved_count += 1
 
             # Process hand normal (right.normal)
@@ -350,8 +365,13 @@ def main():
                 normal = reshape_normal(out["object.normal"], img_size)
 
                 # 1. Save standard masked version (existing behavior)
-                save_normal_image(normal, op.join(object_dir, f"frame_{idx:04d}.png"), mask=mask)
-
+                # Use SDF-gradient-based foreground detection
+                save_normal_image(
+                    normal,
+                    op.join(object_dir, f"frame_{idx:04d}.png"),
+                    mask=None,          # << key change
+                    norm_thresh=0.5     # or 0.7–0.95 as needed
+                )
                 # 2. Save raw unmasked version (for hypothesis testing)
                 raw_dir = op.join(output_dir, "object_raw")
                 os.makedirs(raw_dir, exist_ok=True)
@@ -425,8 +445,19 @@ export COMET_API_KEY="4hhuylWTxYQBirmxKwuwGv4Q5"
 export COMET_WORKSPACE="cloudy"
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/4f425897c_000035000/checkpoints/last.ckpt \
+  --load_ckpt logs/cb25c350f_000001000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1
+'''
+
+'''
+3. If you want a thicker, filled‑in silhouette
+If the band is too thin, you can “inflate” it by relaxing the threshold, e.g., norm_thresh = 0.5, or by post‑processing:
+
+After computing fg_mask = norm > norm_thresh, apply a small dilation (e.g., using scipy.ndimage.binary_dilation) before setting background to white.
+
+This will turn the thin band around the zero‑level set into a thicker, more visually apparent silhouette.
+
+If you later want a true camera‑view silhouette, you’ll need to replace the mid‑slice trick with SDF ray‑marching along the camera rays, but the norm‑threshold change above is the minimal modification that uses your already‑correct SDF normals to give a recognizable object outline.
 '''
