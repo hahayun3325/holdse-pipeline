@@ -32,7 +32,7 @@ phase3:
   # SDS Configuration - KEEP FROM STAGE 2
   sds:
     diffusion_steps: 1000
-    guidance_scale: 3.0
+    guidance_scale: 4.0       # was 3.0
     max_step_ratio: 0.98
     min_step_ratio: 0.02
     noise_schedule: linear
@@ -44,15 +44,15 @@ phase3:
   w_sds_schedule:
     enabled: true
     step_0: 0.0
-    step_1500: 0.00
-    step_2000: 0.25          # was 0.25
-    step_4000: 0.35          # was 0.25
-    step_8000: 0.50          # was 0.50
-    step_15000: 0.55         # was 0.55
-    step_20000: 0.55         # was 0.50
-    step_25000: 0.45         # was 0.45
-    step_30000: 0.35         # was 0.40
-    step_34999: 0.30         # was 0.30
+    step_1500: 0.00        # still off during early render warmup
+    step_2000: 0.40        # ↑ was 0.25
+    step_4000: 0.60        # ↑ was 0.35
+    step_8000: 0.80        # ↑ was 0.50
+    step_15000: 0.90       # ↑ was 0.55
+    step_20000: 0.90       # keep strong while geometry is stuck
+    step_25000: 0.60       # decay later
+    step_30000: 0.40
+    step_34999: 0.30
     interpolation: "linear"
 
   diagnostics:
@@ -75,8 +75,8 @@ phase3:
 # ================================================================
 phase4:
   enabled: true
-  freeze_object_geometry: true    # ← NEW
-  freeze_at_iter: 35000           # ← NEW: Lock in best Stage-3 geometry
+  freeze_object_geometry: false    #
+#  freeze_at_iter: 35000           # ← NEW: Lock in best Stage-3 geometry
   # Phase boundaries - 1/3 of training (19,800 steps)
   contact_start_iter: 35000      # ← CHANGED: Start earlier
   contact_end_iter: 59499       # End before Phase 5
@@ -247,7 +247,7 @@ loss:
   max_geom_scale: 4.0            # was 8.0
   geom_boost_factor: 1.2         # was 1.5
   # Stronger SDF regularization
-  w_sdf_reg: 4.0                 # was 2.0
+  w_sdf_reg: 2.0
   w_rgb: 1.0
   w_rgb_schedule:
     enabled: true
@@ -260,29 +260,29 @@ loss:
     interpolation: "linear"
   w_mask: 0.5              # CHANGED: from 0.1
   w_mask_edge: 0.15         # NEW: Add this line
-  w_eikonal: 2.0                # Keep SDF regularization
-  w_smooth: 1.0               # Keep smoothness
+  w_eikonal: 1.0                # Keep SDF regularization
+  w_smooth: 0.5               # Keep smoothness
   rgb_loss_type: "l1"
   # NEW: Self-supervised geometry
-  w_normal_consistency: 0.2 # was 0.1, was effectively ~1e-2 from behavior
-  w_depth_smoothness: 0.2 # was 0.1 increase until geometric_total is ~5–10% of total
-  w_chamfer: 0.05                    # ← CHANGED from w_template_chamfer
+  w_normal_consistency: 0.1
+  w_depth_smoothness: 0.1
+  w_chamfer: 0.03                    # ← CHANGED from w_template_chamfer
   chamfer_start_step: 1000            # was 15000
   # ============================================================
   # Object Template Chamfer (late, weak anchor)
   # ============================================================
-  w_obj_chamfer: 0.03           # ↑ Stronger early anchor (was 0.02)
-  obj_chamfer_start_step: 4000
+  w_obj_chamfer: 0.02           # ↑ Stronger early anchor
+  obj_chamfer_start_step: 3000  # start a bit earlier, once SDF is healthy
   w_obj_chamfer_decay:
     enabled: true
-    step_10000: 0.03            # was 0.05
-    step_15000: 0.02            # Decay after geometry forms
-    step_20000: 0.01            # Weaken to allow SDS refinement
-    step_25000: 0.005           # Minimal late anchor
+    step_8000: 0.02             # keep full weight only 3k–8k
+    step_12000: 0.01            # Decay after geometry forms
+    step_16000: 0.005           # Weaken to allow SDS refinement
+    step_20000: 0.0             # turn off for the SDS refinement tail
   w_obj_generic: 0.0            # keep off while debugging
   w_obj_smoothness: 0.0         # or at most 0.005 for a very weak early smoothness
   # Encourage SDF zero-level set to match v3d_cano surface
-  w_sdf_on_verts: 2.0            # was 1.0
+  w_sdf_on_verts: 1.0
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
@@ -304,7 +304,7 @@ training:
 # OPTIMIZER CONFIGURATION (KEEP FROM STAGE 2)
 # ================================================================
 optimizer:
-  lr: 0.0001                    # Same learning rate as Stage 2
+  lr: 0.00005                    # was 0.0001 Same learning rate as Stage 2
   type: "adam"
   weight_decay: 0.0
   betas: [0.9, 0.999]

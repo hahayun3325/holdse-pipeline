@@ -256,6 +256,7 @@ def main():
                     if "object.normal" in out:
                         del out["object.normal"]
                     out["object.normal"] = normal_img.reshape(-1, 3)
+                    out["normal"] = out["object.normal"].clone()
 
                     logger.info(f"  [EXPERIMENT] Computed normals from stored SDF: shape={out['object.normal'].shape}")
                     logger.info(
@@ -322,21 +323,17 @@ def main():
             # Get image size for reshaping
             img_size = out["img_size"]  # [H, W]
 
-            # Process combined normal
-            if "normal" in out:
-                normal = out["normal"]
-                # Also update the combined normal if it exists
-                if "normal" in out:
-                    # For now, use the object normal as the combined (since object is the main issue)
-                    # A proper implementation would composite hand + object
-                    if "normal" in out:
-                        del out["normal"]
-                    out["normal"] = normal_img.reshape(-1, 3)
+            # Process combined normal: prefer SDF-based object normals if available
+            combined = None
+            if "object.normal" in out:
+                combined = out["object.normal"]        # SDF-based normals you just wrote
+            elif "normal" in out:
+                combined = out["normal"]               # Fallback to whatever the model produced
 
-                if isinstance(normal, torch.Tensor):
-                    normal = reshape_normal(normal, img_size)
-                    save_normal_image(normal, op.join(combined_dir, f"frame_{idx:04d}.png"))
-                    saved_count += 1
+            if isinstance(combined, torch.Tensor):
+                combined_img = reshape_normal(combined, img_size)
+                save_normal_image(combined_img, op.join(combined_dir, f"frame_{idx:04d}.png"))
+                saved_count += 1
 
             # Process hand normal (right.normal)
             if "right.normal" in out:
@@ -428,7 +425,7 @@ export COMET_API_KEY="4hhuylWTxYQBirmxKwuwGv4Q5"
 export COMET_WORKSPACE="cloudy"
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/7d4651137_000020000/checkpoints/last.ckpt \
+  --load_ckpt logs/4f425897c_000035000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1
