@@ -2408,6 +2408,12 @@ class HOLD(pl.LightningModule):
         joint_warmup_end = getattr(self.opt.training, 'joint_warmup_end', 8000)  # Phase 2.3
         sdf_warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 2000)
 
+        # Persistent dynamic multipliers for closed-loop curriculum
+        if not hasattr(self, "dynamic_sds_mult"):
+            self.dynamic_sds_mult = 1.0
+        if not hasattr(self, "dynamic_geom_mult"):
+            self.dynamic_geom_mult = 1.0
+
         # Default multipliers (used after warm-up / existing phases)
         base_mult = 1.0  # scales base_loss (RGB + masks etc.)
         geom_mult = 1.0  # scales geometric_loss (normal, depth, chamfer, SDF reg, obj chamfer)
@@ -2444,11 +2450,15 @@ class HOLD(pl.LightningModule):
         # NEW: SDF–first window (geometry focus, but still deprioritize RGB/SDS)
         elif step < sdf_warmup_end:
             base_mult = 0.2  # let RGB in, but weakly
-            geom_mult = 1.5  # slightly boost geometric (incl. SDF reg)
-            sds_mult = 0.0  # keep SDS off until SDF is healthy
+            geom_mult = 0.5  # was 1.5 – soften early geometric dominance
+            sds_mult = 0.0   # keep SDS off until SDF is healthy
             phase_tag = "sdf_warmup"
         else:
             phase_tag = "main_training"
+
+        # Apply closed-loop dynamic multipliers
+        geom_mult *= self.dynamic_geom_mult
+        sds_mult *= self.dynamic_sds_mult
 
         if step % 100 == 0:
             logger.info(
@@ -2808,17 +2818,20 @@ class HOLD(pl.LightningModule):
         else:
             # Fallback to hardcoded schedule (original behavior)
             if step < 5000:
-                obj_chamfer_weight = base_w
+                obj_chamfer_weight = base_w                # 0–5k: 1.0×
             elif step < 10000:
-                obj_chamfer_weight = base_w * 2.0
+                obj_chamfer_weight = base_w * 0.5          # 5–10k: 0.5× (50% decay)
             else:
-                obj_chamfer_weight = base_w * 4.0
+                obj_chamfer_weight = base_w * 0.1          # ≥10k: 0.1× (90% decay)
 
         if step % 1000 == 0:
             logger.info(f"[Obj Chamfer] Step {step}: weight={obj_chamfer_weight:.4f}")
         obj_chamfer_start = getattr(self.opt.loss, 'obj_chamfer_start_step', 20000)
+        # Check if Chamfer should be temporarily suppressed (e.g., after SDS collapse)
+        suppress_chamfer = hasattr(self, "_obj_chamfer_suppressed_until") and \
+                           (self.global_step < self._obj_chamfer_suppressed_until)
 
-        if obj_chamfer_weight > 0 and self.global_step >= obj_chamfer_start:
+        if obj_chamfer_weight > 0 and self.global_step >= obj_chamfer_start and not suppress_chamfer:
             if len(self.object_templates) == 0:
                 if self.global_step == obj_chamfer_start:
                     logger.warning(
@@ -3498,7 +3511,12 @@ class HOLD(pl.LightningModule):
                             logger.info('sdf/zero_cross_count', zero_cross_count)
 
                         if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
-                            sds_mult = 0.0
+                            old_sds_mult = sds_mult
+                            sds_mult *= 0.5
+                            logger.warning(
+                                f"[SDF-HEALTH] SDF invalid at step {self.global_step}: "
+                                f"scaling sds_mult {old_sds_mult:.3f} → {sds_mult:.3f} (soft gate)"
+                            )
                         # --------------------------------------------------------
                         # Degeneracy counter + optional re-init
                         # --------------------------------------------------------
@@ -3586,11 +3604,11 @@ class HOLD(pl.LightningModule):
                             # Let SDF move more freely vs. noisy v3d at the very beginning
                             w_v2s = 0.1 * w_v2s_base
                         else:
-                            # Strong coupling ONCE SDF is at least somewhat healthy
+                            # Softer coupling once SDF is at least somewhat healthy
                             if getattr(self, "_sdf_is_valid", False):
-                                w_v2s = 20.0 * w_v2s_base
+                                w_v2s = 5.0 * w_v2s_base    # was 20.0
                             else:
-                                w_v2s = 1.0 * w_v2s_base  # light pull even when invalid
+                                w_v2s = 1.0 * w_v2s_base    # light pull even when invalid
 
                         # Finally, kill coupling if v3d is clearly degenerate
                         if 'v_std' in locals() and v_std < 0.01:  # was 0.02
@@ -3842,13 +3860,20 @@ class HOLD(pl.LightningModule):
             logger.info("=" * 70)
         # PHASE 3 & PHASE 5: SDS COMPUTATION WITH MUTUAL EXCLUSIVITY
         if self.phase3_enabled and self.ghop_enabled:
+            # Ensure Phase 3 bounds are initialized and long enough
+            if not hasattr(self, "phase3_start_iter"):
+                self.phase3_start_iter = 5000
+            if not hasattr(self, "phase3_end_iter") or self.phase3_end_iter < 50000:
+                self.phase3_end_iter = 50000
+
             # Log activation status at first step
             if self.global_step == 0:
                 logger.info("="*70)
                 logger.info("[GHOP] Phase 3 Configuration:")
                 logger.info(f"  phase3_enabled: {self.phase3_enabled}")
                 logger.info(f"  ghop_enabled: {self.ghop_enabled}")
-                logger.info(f"  phase3_start_iter: {getattr(self, 'phase3_start_iter', 'NOT SET')}")
+                logger.info(f"  phase3_start_iter: {self.phase3_start_iter}")
+                logger.info(f"  phase3_end_iter: {self.phase3_end_iter}")
                 logger.info(f"  warmup_iters: {getattr(self, 'warmup_iters', 'NOT SET')}")
                 logger.info(f"  w_sds: {getattr(self, 'w_sds', 'NOT SET')}")
                 logger.info(f"  sds_iters: {getattr(self, 'sds_iters', 'NOT SET')}")
@@ -4058,6 +4083,29 @@ class HOLD(pl.LightningModule):
                             f"[SDS COLLAPSE WARNING] Step {self.global_step}: "
                             f"SDS loss is very low ({sds_raw:.6f}) – check geometry metrics/meshes for collapse."
                         )
+
+                        # Reactive curriculum: gently perturb object geometry to escape bad basin
+                        try:
+                            obj_node = self.model.nodes.get("object", None)
+                            if obj_node and hasattr(obj_node, "server") and hasattr(obj_node.server, "object_model"):
+                                obj_model = obj_node.server.object_model
+                                if hasattr(obj_model, "v3d_cano"):
+                                    with torch.no_grad():
+                                        noise_scale = 0.01
+                                        obj_model.v3d_cano.add_(noise_scale * torch.randn_like(obj_model.v3d_cano))
+                                    logger.warning(
+                                        "[CURRICULUM] Injected small noise into v3d_cano due to SDS collapse."
+                                    )
+                        except Exception as e:
+                            logger.error(f"[CURRICULUM] Failed to perturb v3d_cano on SDS collapse: {e}")
+
+                        # Temporarily suppress object template Chamfer to loosen prior
+                        self._obj_chamfer_suppressed_until = self.global_step + 1000
+                        logger.warning(
+                            f"[CURRICULUM] Temporarily suppressing object Chamfer until step "
+                            f"{self._obj_chamfer_suppressed_until}"
+                        )
+
 
                     # ============================================================
                     # STEP 5: Get SDS weight from scheduler (HIGHEST PRIORITY)
@@ -4334,10 +4382,25 @@ class HOLD(pl.LightningModule):
             logger.info(f"[GEOMETRY FREEZE] Freezing object parameters at step {freeze_at}")
             logger.info("=" * 70)
 
+            # 1) Require SDF to be valid
             if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
                 logger.warning("[GEOMETRY FREEZE] SDF not valid; postponing freeze")
-                # optionally: return without freezing
                 return
+
+            # 2) Require object Chamfer to be sufficiently low
+            chamfer_ok = True
+            if hasattr(self, "_last_obj_chamfer"):
+                if self._last_obj_chamfer > 0.05:
+                    chamfer_ok = False
+                    logger.warning(
+                        f"[GEOMETRY FREEZE] Chamfer(obj)={self._last_obj_chamfer:.6f} > 0.05; "
+                        "postponing freeze"
+                    )
+
+            if not chamfer_ok:
+                return
+
+            # If we reach here, both SDF and Chamfer(obj) look good → safe to freeze
 
             # Freeze v3d_cano
             if hasattr(self.model.nodes.object.server.object_model, 'v3d_cano'):
@@ -5116,6 +5179,28 @@ class HOLD(pl.LightningModule):
             chamfer_f = to_float(loss_output.get('loss/chamfer', 0.0))  # ← ADD THIS
             obj_chamfer_f = to_float(loss_output.get('loss/obj_chamfer', 0.0))
             obj_smooth_f = to_float(loss_output.get('object_smoothness', 0.0))
+            # Cache latest object Chamfer for geometry-freeze logic
+            self._last_obj_chamfer = obj_chamfer_f
+
+            # Reactive curriculum: track how long Chamfer(obj) stays high
+            if not hasattr(self, "high_chamfer_steps"):
+                self.high_chamfer_steps = 0
+
+            if obj_chamfer_f > 0.05:
+                self.high_chamfer_steps += 1
+            else:
+                self.high_chamfer_steps = 0
+
+            # If Chamfer(obj) has been >0.05 for a long window, boost SDS
+            if self.high_chamfer_steps >= 2000:
+                old_sds_dyn = self.dynamic_sds_mult
+                self.dynamic_sds_mult = min(self.dynamic_sds_mult * 1.5, 5.0)
+                logger.warning(
+                    f"[CURRICULUM] Chamfer(obj) stuck >0.05 for "
+                    f"{self.high_chamfer_steps} checks – "
+                    f"dynamic_sds_mult {old_sds_dyn:.2f} → {self.dynamic_sds_mult:.2f}"
+                )
+                self.high_chamfer_steps = 0
             sds_raw_f = to_float(loss_output.get('loss/sds_raw', 0.0))
             sds_weighted_f = to_float(loss_output.get('loss/sds_weighted', 0.0))
             sds_weight_f = to_float(loss_output.get('sds_weight', 0.0))
@@ -5211,9 +5296,49 @@ class HOLD(pl.LightningModule):
                 gradient_ratio = sds_weighted_f / rgb_f
                 logger.info(f"  Gradient Balance:    SDS/RGB = {gradient_ratio:.2f}x")
                 if gradient_ratio > 5.0:
-                    logger.warning(f"    ⚠️  SDS dominates - may prevent RGB convergence")
+                    logger.warning("    ⚠️  SDS dominates - may prevent RGB convergence")
                 elif gradient_ratio < 0.2:
-                    logger.warning(f"    ⚠️  RGB dominates - SDS guidance may be weak")
+                    logger.warning("    ⚠️  RGB dominates - SDS guidance may be weak")
+
+                # Track how long RGB dominates (low SDS/RGB)
+                if not hasattr(self, "rgb_dom_steps"):
+                    self.rgb_dom_steps = 0
+
+                if gradient_ratio < 0.3:
+                    self.rgb_dom_steps += 1
+                else:
+                    self.rgb_dom_steps = 0
+
+                if self.rgb_dom_steps >= 1000:
+                    old_geom_dyn = self.dynamic_geom_mult
+                    self.dynamic_geom_mult = max(self.dynamic_geom_mult * 0.7, 0.1)
+                    logger.warning(
+                        f"[CURRICULUM] RGB-dominant regime for {self.rgb_dom_steps} checks "
+                        f"(ratio={gradient_ratio:.2f}) – "
+                        f"dynamic_geom_mult {old_geom_dyn:.2f} → {self.dynamic_geom_mult:.2f}"
+                    )
+                    self.rgb_dom_steps = 0
+
+                # Existing closed-loop SDS boosting: SDS collapse + RGB dominance
+                if (
+                    self.global_step > 5000
+                    and sds_raw_f < 0.01
+                    and gradient_ratio < 0.5
+                ):
+                    old_sds_dyn = self.dynamic_sds_mult
+                    old_geom_dyn = self.dynamic_geom_mult
+
+                    # Boost SDS by ~2–3×, cap at 5×
+                    self.dynamic_sds_mult = min(self.dynamic_sds_mult * 2.0, 5.0)
+                    # Soften geometry by 0.5×, floor at 0.1
+                    self.dynamic_geom_mult = max(self.dynamic_geom_mult * 0.5, 0.1)
+
+                    logger.warning(
+                        f"[SDS-BOOST] Step {self.global_step}: "
+                        f"sds_raw={sds_raw_f:.6f}, ratio={gradient_ratio:.2f} → "
+                        f"dynamic_sds_mult {old_sds_dyn:.2f} → {self.dynamic_sds_mult:.2f}, "
+                        f"dynamic_geom_mult {old_geom_dyn:.2f} → {self.dynamic_geom_mult:.2f}"
+                    )
 
             logger.info("=" * 80)
 
@@ -5646,178 +5771,176 @@ class HOLD(pl.LightningModule):
             grid_flat = grid.reshape(B, -1, 3)
 
             # Step 4: Try multiple SDF extraction methods
-            with torch.no_grad():
-                sdf_values = None
+            sdf_values = None
 
-                # METHOD 1: server.forward_sdf (preferred)
-                if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
-                    try:
-                        idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
-                        if idx.ndim > 1:
-                            idx = idx.squeeze(-1)
+            # METHOD 1: server.forward_sdf (preferred)
+            if hasattr(object_node, "server") and hasattr(object_node.server, "forward_sdf"):
+                try:
+                    idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                    if idx.ndim > 1:
+                        idx = idx.squeeze(-1)
 
-                        # Expand idx to match grid_flat points [B, H³]
-                        num_points = grid_flat.shape[1]
-                        idx_expanded = idx.unsqueeze(1).expand(-1, num_points)  # [B, H³]
+                    # Expand idx to match grid_flat points [B, H³]
+                    num_points = grid_flat.shape[1]
+                    idx_expanded = idx.unsqueeze(1).expand(-1, num_points)  # [B, H³]
 
-                        # Pass both points AND indices
-                        sdf_output = object_node.server.forward_sdf(
-                            grid_flat,  # [B, H³, 3] - spatial coordinates
-                            idx_expanded  # [B, H³] - frame indices for each point
-                        )
+                    # Pass both points AND indices
+                    sdf_output = object_node.server.forward_sdf(
+                        grid_flat,  # [B, H³, 3] - spatial coordinates
+                        idx_expanded  # [B, H³] - frame indices for each point
+                    )
+                    if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
+                        sdf_values = sdf_output['sdf']
+                    elif isinstance(sdf_output, torch.Tensor):
+                        sdf_values = sdf_output
+                    logger.debug(f"[Helper] METHOD 1 SUCCESS: server.forward_sdf: {sdf_values.shape}")
+                except Exception as e:
+                    logger.debug(f"[Helper] METHOD 1 FAILED: server.forward_sdf: {e}")
+
+            # METHOD 2: server.shape_net (alternative)
+            if sdf_values is None and hasattr(object_node, "server") and hasattr(object_node.server, "shape_net"):
+                try:
+                    latent_code = getattr(object_node.server, 'latent_code', None)
+                    if latent_code is not None:
+                        sdf_output = object_node.server.shape_net(grid_flat, latent_code)
                         if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
                             sdf_values = sdf_output['sdf']
                         elif isinstance(sdf_output, torch.Tensor):
                             sdf_values = sdf_output
-                        logger.debug(f"[Helper] METHOD 1 SUCCESS: server.forward_sdf: {sdf_values.shape}")
-                    except Exception as e:
-                        logger.debug(f"[Helper] METHOD 1 FAILED: server.forward_sdf: {e}")
+                        logger.debug(f"[Helper] METHOD 2 SUCCESS: server.shape_net: {sdf_values.shape}")
+                except Exception as e:
+                    logger.debug(f"[Helper] METHOD 2 FAILED: server.shape_net: {e}")
 
-                # METHOD 2: server.shape_net (alternative)
-                if sdf_values is None and hasattr(object_node, "server") and hasattr(object_node.server, "shape_net"):
-                    try:
-                        latent_code = getattr(object_node.server, 'latent_code', None)
-                        if latent_code is not None:
-                            sdf_output = object_node.server.shape_net(grid_flat, latent_code)
-                            if isinstance(sdf_output, dict) and 'sdf' in sdf_output:
-                                sdf_values = sdf_output['sdf']
-                            elif isinstance(sdf_output, torch.Tensor):
-                                sdf_values = sdf_output
-                            logger.debug(f"[Helper] METHOD 2 SUCCESS: server.shape_net: {sdf_values.shape}")
-                    except Exception as e:
-                        logger.debug(f"[Helper] METHOD 2 FAILED: server.shape_net: {e}")
+            # METHOD 3: node.forward (requires proper inputs)
+            if sdf_values is None and hasattr(object_node, "forward"):
+                try:
+                    # Build proper forward call with points
+                    forward_input = {
+                        'points': grid_flat,  # [B, H³, 3]
+                        'indices': batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                    }
 
-                # METHOD 3: node.forward (requires proper inputs)
-                if sdf_values is None and hasattr(object_node, "forward"):
-                    try:
-                        # Build proper forward call with points
-                        forward_input = {
-                            'points': grid_flat,  # [B, H³, 3]
-                            'indices': batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
-                        }
+                    node_output = object_node(**forward_input)
 
-                        node_output = object_node(**forward_input)
+                    if isinstance(node_output, dict):
+                        if 'sdf' in node_output:
+                            sdf_values = node_output['sdf']
+                        elif 'geometry' in node_output:
+                            sdf_values = node_output['geometry']
+                    elif isinstance(node_output, torch.Tensor):
+                        sdf_values = node_output
 
-                        if isinstance(node_output, dict):
-                            if 'sdf' in node_output:
-                                sdf_values = node_output['sdf']
-                            elif 'geometry' in node_output:
-                                sdf_values = node_output['geometry']
-                        elif isinstance(node_output, torch.Tensor):
-                            sdf_values = node_output
+                    if sdf_values is not None:
+                        logger.debug(f"[Helper] METHOD 3 SUCCESS: node.forward: {sdf_values.shape}")
+                except Exception as e:
+                    logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
 
-                        if sdf_values is not None:
-                            logger.debug(f"[Helper] METHOD 3 SUCCESS: node.forward: {sdf_values.shape}")
-                    except Exception as e:
-                        logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
+            # METHOD 4: Query via model's render_core (FIXED)
+            if sdf_values is None and hasattr(object_node, "implicit_network"):
+                try:
+                    logger.debug("[Helper] Attempting METHOD 4: model render_core query")
 
-                # METHOD 4: Query via model's render_core (FIXED)
-                if sdf_values is None and hasattr(object_node, "implicit_network"):
-                    try:
-                        logger.debug("[Helper] Attempting METHOD 4: model render_core query")
+                    # Get batch indices
+                    idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
 
-                        # Get batch indices
-                        idx = batch.get('idx', torch.zeros(B, dtype=torch.long, device=device))
+                    # FIX: Ensure idx is 1D [B] before expand
+                    if idx.ndim > 1:
+                        idx = idx.squeeze()
+                        if idx.ndim == 0:
+                            idx = idx.unsqueeze(0)
 
-                        # FIX: Ensure idx is 1D [B] before expand
-                        if idx.ndim > 1:
-                            idx = idx.squeeze()
-                            if idx.ndim == 0:
-                                idx = idx.unsqueeze(0)
+                    logger.debug(f"[Helper] idx shape after squeeze: {idx.shape}")
 
-                        logger.debug(f"[Helper] idx shape after squeeze: {idx.shape}")
+                    # Now safe to expand
+                    num_points = grid_flat.shape[1]  # H³
+                    idx_expanded = idx.unsqueeze(1).expand(-1, num_points)
 
-                        # Now safe to expand
-                        num_points = grid_flat.shape[1]  # H³
-                        idx_expanded = idx.unsqueeze(1).expand(-1, num_points)
+                    logger.debug(f"[Helper] idx_expanded shape: {idx_expanded.shape}")
 
-                        logger.debug(f"[Helper] idx_expanded shape: {idx_expanded.shape}")
+                    model_input = {
+                        'points': grid_flat,  # [B, H³, 3]
+                        'indices': idx_expanded,  # [B, H³]
+                    }
 
-                        model_input = {
-                            'points': grid_flat,  # [B, H³, 3]
-                            'indices': idx_expanded,  # [B, H³]
-                        }
+                    # Forward through model
+                    if hasattr(object_node, 'implicit_network'):
+                        # Get feature vector for this sample
+                        if hasattr(object_node, 'frame_latent_encoder'):
+                            features = object_node.frame_latent_encoder(idx)  # [B, feature_dim]
+                        elif hasattr(object_node, 'feature_vector'):
+                            features = object_node.feature_vector.weight[idx]  # [B, feature_dim]
+                        else:
+                            features = None
 
-                        # Forward through model
-                        with torch.no_grad():
-                            if hasattr(object_node, 'implicit_network'):
-                                # Get feature vector for this sample
-                                if hasattr(object_node, 'frame_latent_encoder'):
-                                    features = object_node.frame_latent_encoder(idx)  # [B, feature_dim]
-                                elif hasattr(object_node, 'feature_vector'):
-                                    features = object_node.feature_vector.weight[idx]  # [B, feature_dim]
+                        # Query implicit network point-by-point
+                        sdf_list = []
+                        for b in range(B):
+                            points_b = grid_flat[b]  # [H³, 3]
+
+                            if features is not None:
+                                feat_b = features[b].unsqueeze(0).expand(points_b.shape[0], -1)
+                                input_b = torch.cat([points_b, feat_b], dim=-1)
+                            else:
+                                input_b = points_b
+
+                            try:
+                                # ✅ FIX: Create cond dict for implicit_network
+                                # ImplicitNet expects: forward(input, cond) where cond[self.cond] = features
+                                if features is not None:
+                                    # Use 'pose' as the conditioning key (standard for object networks)
+                                    cond = {'pose': feat_b}  # [feature_dim]
                                 else:
-                                    features = None
+                                    # No features - use zeros as fallback
+                                    cond = {'pose': torch.zeros(32, device=device)}
 
-                                # Query implicit network point-by-point
-                                sdf_list = []
-                                for b in range(B):
-                                    points_b = grid_flat[b]  # [H³, 3]
+                                output_b = object_node.implicit_network(points_b.unsqueeze(0), cond)
 
-                                    if features is not None:
-                                        feat_b = features[b].unsqueeze(0).expand(points_b.shape[0], -1)
-                                        input_b = torch.cat([points_b, feat_b], dim=-1)
-                                    else:
-                                        input_b = points_b
+                                if isinstance(output_b, dict):
+                                    sdf_b = output_b.get('sdf', output_b.get('model_out', output_b.get('output')))
+                                else:
+                                    sdf_b = output_b
 
-                                    try:
-                                        # ✅ FIX: Create cond dict for implicit_network
-                                        # ImplicitNet expects: forward(input, cond) where cond[self.cond] = features
-                                        if features is not None:
-                                            # Use 'pose' as the conditioning key (standard for object networks)
-                                            cond = {'pose': feat_b}  # [feature_dim]
-                                        else:
-                                            # No features - use zeros as fallback
-                                            cond = {'pose': torch.zeros(32, device=device)}
-                                        
-                                        output_b = object_node.implicit_network(points_b.unsqueeze(0), cond)
+                                if sdf_b.dim() == 2:
+                                    sdf_b = sdf_b.unsqueeze(-1)
+                                if sdf_b.shape[-1] != 1:
+                                    sdf_b = sdf_b[..., :1]
 
-                                        if isinstance(output_b, dict):
-                                            sdf_b = output_b.get('sdf', output_b.get('model_out', output_b.get('output')))
-                                        else:
-                                            sdf_b = output_b
+                                sdf_list.append(sdf_b)
+                            except Exception as e_inner:
+                                logger.debug(f"[Helper] Batch {b} failed: {e_inner}, using zeros")
+                                sdf_list.append(torch.zeros(1, points_b.shape[0], 1, device=device))
 
-                                        if sdf_b.dim() == 2:
-                                            sdf_b = sdf_b.unsqueeze(-1)
-                                        if sdf_b.shape[-1] != 1:
-                                            sdf_b = sdf_b[..., :1]
+                        if len(sdf_list) == B:
+                            sdf_values = torch.cat(sdf_list, dim=0)
+                            logger.debug(f"[Helper] METHOD 4 SUCCESS: Per-batch query: {sdf_values.shape}")
 
-                                        sdf_list.append(sdf_b)
-                                    except Exception as e_inner:
-                                        logger.debug(f"[Helper] Batch {b} failed: {e_inner}, using zeros")
-                                        sdf_list.append(torch.zeros(1, points_b.shape[0], 1, device=device))
+                except Exception as e:
+                    logger.debug(f"[Helper] METHOD 4 FAILED: render_core: {e}")
+                    import traceback
+                    logger.debug(f"[Helper] Traceback: {traceback.format_exc()}")
 
-                                if len(sdf_list) == B:
-                                    sdf_values = torch.cat(sdf_list, dim=0)
-                                    logger.debug(f"[Helper] METHOD 4 SUCCESS: Per-batch query: {sdf_values.shape}")
+            # FALLBACK: Return zero grid
+            if sdf_values is None:
+                # ADD DETAILED DIAGNOSTICS:
+                logger.error(f"[SDF Debug] All methods failed for node: {object_node.node_id}")
+                logger.error(f"  Has server: {hasattr(object_node, 'server')}")
+                if hasattr(object_node, 'server'):
+                    logger.error(f"  Has forward_sdf: {hasattr(object_node.server, 'forward_sdf')}")
+                    logger.error(f"  Has shape_net: {hasattr(object_node.server, 'shape_net')}")
+                    logger.error(f"  Has object_model: {hasattr(object_node.server, 'object_model')}")
+                logger.error(f"  Has forward: {hasattr(object_node, 'forward')}")
+                logger.error(f"  Has implicit_network: {hasattr(object_node, 'implicit_network')}")
 
-                    except Exception as e:
-                        logger.debug(f"[Helper] METHOD 4 FAILED: render_core: {e}")
-                        import traceback
-                        logger.debug(f"[Helper] Traceback: {traceback.format_exc()}")
+                # ALSO check if all SDF methods returned None
+                logger.warning("[Helper] Listing all node attributes:")
+                logger.warning(f"  {dir(object_node)}")
 
-                # FALLBACK: Return zero grid
-                if sdf_values is None:
-                    # ADD DETAILED DIAGNOSTICS:
-                    logger.error(f"[SDF Debug] All methods failed for node: {object_node.node_id}")
-                    logger.error(f"  Has server: {hasattr(object_node, 'server')}")
-                    if hasattr(object_node, 'server'):
-                        logger.error(f"  Has forward_sdf: {hasattr(object_node.server, 'forward_sdf')}")
-                        logger.error(f"  Has shape_net: {hasattr(object_node.server, 'shape_net')}")
-                        logger.error(f"  Has object_model: {hasattr(object_node.server, 'object_model')}")
-                    logger.error(f"  Has forward: {hasattr(object_node, 'forward')}")
-                    logger.error(f"  Has implicit_network: {hasattr(object_node, 'implicit_network')}")
-
-                    # ALSO check if all SDF methods returned None
-                    logger.warning("[Helper] Listing all node attributes:")
-                    logger.warning(f"  {dir(object_node)}")
-
-                    logger.warning(
-                        "[Helper] All SDF extraction methods failed, using zero grid. "
-                        "This is expected in early training before object geometry is initialized. "
-                        f"Attempted methods: forward_sdf, shape_net, forward, implicit_network on node '{object_node.node_id}'"
-                    )
-                    return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+                logger.warning(
+                    "[Helper] All SDF extraction methods failed, using zero grid. "
+                    "This is expected in early training before object geometry is initialized. "
+                    f"Attempted methods: forward_sdf, shape_net, forward, implicit_network on node '{object_node.node_id}'"
+                )
+                return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
 
             # Step 5: Reshape to (B, 1, H, H, H) format
             if sdf_values.dim() == 2:
@@ -5843,7 +5966,7 @@ class HOLD(pl.LightningModule):
                     f"range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
                 )
 
-            return object_sdf.detach()
+            return object_sdf
 
         finally:  # ✅ CRITICAL: This ALWAYS executes, even on exception
             # Restore gradient mode
@@ -5853,7 +5976,7 @@ class HOLD(pl.LightningModule):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        return object_sdf.detach()
+        return object_sdf
 
     # ====================================================================
     # PHASE 4: Mesh Extraction Helper Methods
@@ -6312,7 +6435,7 @@ class HOLD(pl.LightningModule):
 
         # Extract SDF grid
         resolution = self.mesh_resolution
-        object_sdf = self._extract_sdf_grid_from_nodes(batch, resolution=resolution)
+        object_sdf = self._extract_sdf_grid_from_nodes(batch, resolution=resolution).detach()
 
         batch_size = object_sdf.shape[0]
         obj_verts_list = []
