@@ -154,14 +154,12 @@ def main():
     for idx, batch in enumerate(testset):
         with torch.no_grad():
             batch = thing.thing2dev(batch, device)
-            # Check which SDF source inference_step will actually use
-            obj_model = model.model.nodes['object'].server.object_model
-            print(f"SDF grid attr: {hasattr(obj_model, 'sdf_grid')}")
-            print(f"SDF grid shape: {obj_model.sdf_grid.shape if hasattr(obj_model, 'sdf_grid') else 'N/A'}")
-            print(f"SDF grid range: [{obj_model.sdf_grid.min():.4f}, {obj_model.sdf_grid.max():.4f}]" if hasattr(
-                obj_model, 'sdf_grid') else 'N/A')
-            # Replace the entire EXPERIMENTAL block (lines ~162-283) with:
+
+            # Standard inference - now uses SDF grid internally for object
             out = model.inference_step(batch)
+
+            # Extract image size first!
+            img_size = out["img_size"]  # [H, W]
 
             # The object normals should now come from the fixed inference path
             if "object.normal" in out:
@@ -169,171 +167,18 @@ def main():
                 # Save directly - no need for manual SDF processing
                 save_normal_image(normal, op.join(object_dir, f"frame_{idx:04d}.png"))
 
-            # DEBUG: Check what's available in model structure
-            logger.info(f"  [DEBUG] Checking model structure...")
-            logger.info(f"  [DEBUG] hasattr(model, 'model'): {hasattr(model, 'model')}")
-            if hasattr(model, 'model'):
-                logger.info(f"  [DEBUG] hasattr(model.model, 'nodes'): {hasattr(model.model, 'nodes')}")
-                if hasattr(model.model, 'nodes'):
-                    logger.info(f"  [DEBUG] Number of nodes: {len(model.model.nodes)}")
-                    for node in model.model.nodes.values():
-                        logger.info(f"  [DEBUG] Node ID: {node.node_id}")
-                        if "object" in node.node_id.lower():
-                            logger.info(f"    [DEBUG] Object node found!")
-                            logger.info(f"    [DEBUG] Attributes: {[attr for attr in dir(node) if not attr.startswith('_')]}")
-                            logger.info(f"    [DEBUG] hasattr(node, 'sdf_grid'): {hasattr(node, 'sdf_grid')}")
-                            # Check alternative attribute names
-                            for attr in ['sdf_grid', 'grid', 'sdf', 'sdf_volume', 'volume']:
-                                if hasattr(node, attr):
-                                    logger.info(f"    [DEBUG] Found alternative attribute: {attr}")
-
-            # Compare fresh SDF with checkpoint's stored sdf_grid
-            if hasattr(model, 'model') and hasattr(model.model, 'nodes'):
-                for node in model.model.nodes.values():
-                    if "object" in node.node_id.lower():
-                        # Check the correct path: node.server.object_model.sdf_grid
-                        if hasattr(node, 'server') and hasattr(node.server, 'object_model'):
-                            obj_model = node.server.object_model
-                            if hasattr(obj_model, 'sdf_grid'):
-                                stored_sdf = obj_model.sdf_grid
-                                logger.info(f"  [COMPARISON] Found stored sdf_grid at server.object_model")
-                                logger.info(f"  [COMPARISON] Stored SDF range: [{stored_sdf.min().item():.4f}, {stored_sdf.max().item():.4f}]")
-                                logger.info(f"  [COMPARISON] Stored SDF shape: {stored_sdf.shape}")
-                                logger.info(f"  [COMPARISON] Stored SDF std: {stored_sdf.std().item():.4f}")
-
-                                # Zero-crossings on stored SDF
-                                if stored_sdf.dim() == 4:
-                                    B, H, W, D = stored_sdf.shape
-                                    C = 1
-                                elif stored_sdf.dim() == 5:
-                                    B, C, H, W, D = stored_sdf.shape
-                                flat = stored_sdf.view(-1)
-                                zc = ((flat[:-1] * flat[1:]) < 0).sum().item()
-                                logger.info(f"  [COMPARISON] Stored SDF zero-crossings: {zc}")
-
-                            else:
-                                logger.info(f"  [COMPARISON] server.object_model has no sdf_grid")
-                        else:
-                            logger.info(f"  [COMPARISON] node has no server or server has no object_model")
-
-
-            # Get image size for reshaping
-            img_size = out["img_size"]  # [H, W]
-
-            # Process combined normal: prefer SDF-based object normals if available
-            combined = None
-            if "object.normal" in out:
-                combined = out["object.normal"]        # SDF-based normals you just wrote
-            elif "normal" in out:
-                combined = out["normal"]               # Fallback to whatever the model produced
-
-            if isinstance(combined, torch.Tensor):
-                combined_img = reshape_normal(combined, img_size)
-                # For combined, also let SDF gradient drive the silhouette
-                save_normal_image(
-                    combined_img,
-                    op.join(combined_dir, f"frame_{idx:04d}.png"),
-                    mask=None,
-                    norm_thresh=0.5
-                )
-                saved_count += 1
-
-            # Process hand normal - USE MODEL MASK
+            # Process hand normals
             if "right.normal" in out:
-                normal = out["right.normal"]
-                if isinstance(normal, torch.Tensor):
-                    normal = reshape_normal(normal, img_size)
-                    # Try to get hand-specific mask, fallback to generic mask
-                    hand_mask = out.get("right.mask", out.get("mask", None))
-                    save_normal_image(
-                        normal,
-                        op.join(hand_dir, f"frame_{idx:04d}.png"),
-                        mask=hand_mask,      # Use model mask for hand
-                        norm_thresh=0.3      # Lower threshold as safety
-                    )
+                normal = reshape_normal(out["right.normal"], img_size)
+                hand_mask = out.get("right.mask", out.get("mask", None))
+                save_normal_image(normal, op.join(hand_dir, f"frame_{idx:04d}.png"),
+                                mask=hand_mask, norm_thresh=0.3)
 
-            # Process object normal - USE SDF WITH GRADIENT MASK
-            if "object.normal" in out:
-                # Extract mask ONCE at the beginning for both visualization and logging
-                mask = out.get("mask", None)
-
-                normal = reshape_normal(out["object.normal"], img_size)
-
-                # Recompute gradient magnitude for masking if not already done
-                if 'grad_mag_img' not in locals():
-                    # Fallback: simple magnitude-based mask
-                    object_mask = None
-                    norm_thresh = 0.3  # More permissive for SDF normals
-                else:
-                    object_mask = grad_mag_img > 0.05  # Low threshold since SDF has strong gradients
-
-                save_normal_image(
-                    normal,
-                    op.join(object_dir, f"frame_{idx:04d}.png"),
-                    mask=object_mask,
-                    norm_thresh=0.3
-                )
-
-                # Also save raw for debugging
-                raw_dir = op.join(output_dir, "object_raw")
-                os.makedirs(raw_dir, exist_ok=True)
-                save_normal_image_raw(normal, op.join(raw_dir, f"frame_{idx:04d}.png"))
-
-                # 3. If mask exists, also save mask visualization (now mask is defined!)
-                if mask is not None:
-                    mask_dir = op.join(output_dir, "mask_vis")
-                    os.makedirs(mask_dir, exist_ok=True)
-                    mask_img = (mask.cpu().numpy() * 255).astype(np.uint8)
-                    Image.fromarray(mask_img).save(op.join(mask_dir, f"frame_{idx:04d}.png"))
-
-                # Log information
-                normal = out["object.normal"]
-                logger.info(f"=== Frame {idx} Diagnostics ===")
-                logger.info(f"  object.normal exists: True")
-                logger.info(f"  object.normal shape: {normal.shape}")
-                logger.info(f"  object.normal range: [{normal.min().item():.4f}, {normal.max().item():.4f}]")
-
-                # Compute norms for debugging
-                if normal.dim() == 2:
-                    if normal.shape[0] == 3:
-                        normal_for_norm = normal.permute(1, 0)
-                    else:
-                        normal_for_norm = normal
-                else:
-                    normal_for_norm = normal.view(-1, 3)
-
-                norms = torch.norm(normal_for_norm, dim=-1)
-                logger.info(f"  normal norms: min={norms.min().item():.4f}, max={norms.max().item():.4f}")
-                logger.info(f"  near-zero normals (norm<0.1): {(norms < 0.1).sum().item()}/{norms.numel()}")
-
-                # Log mask info (mask is already defined above)
-                if mask is not None:
-                    logger.info(f"  mask exists: True")
-                    logger.info(f"  mask shape: {mask.shape}")
-                    logger.info(f"  mask range: [{mask.min().item():.4f}, {mask.max().item():.4f}]")
-                    logger.info(f"  mask true count: {mask.sum().item()}/{mask.numel()}")
-                    logger.info(f"  mask false count: {(~mask).sum().item()}/{mask.numel()}")
-                else:
-                    logger.info(f"  mask exists: False (will use norm heuristic)")
-            # Also try vis_utils extraction if raw normals not available
-            if saved_count == 0 and idx == 0:
-                try:
-                    img_size = out["img_size"]
-                    vis_dict = vis_utils.output2images([out], img_size)
-                    logger.info(f"vis_utils extracted keys: {list(vis_dict.keys())}")
-
-                    # Note: vis_utils outputs are already images in [0, 255]
-                    if "normal" in vis_dict:
-                        Image.fromarray(vis_dict["normal"]).save(
-                            op.join(combined_dir, f"frame_{idx:04d}.png")
-                        )
-                        saved_count += 1
-                except Exception as e:
-                    if idx == 0:
-                        logger.info(f"vis_utils extraction failed: {e}")
-
-            if idx % 10 == 0:
-                logger.info(f"Rendered frame {idx}/{len(testset)}, saved {saved_count} so far")
+            # Process combined normals
+            if "normal" in out:
+                combined = reshape_normal(out["normal"], img_size)
+                save_normal_image(combined, op.join(combined_dir, f"frame_{idx:04d}.png"),
+                                mask=None, norm_thresh=0.5)
 
     logger.info(f"\nComplete! Saved {saved_count} normal maps to {output_dir}")
 
@@ -346,7 +191,7 @@ export COMET_API_KEY="4hhuylWTxYQBirmxKwuwGv4Q5"
 export COMET_WORKSPACE="cloudy"
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/a91d56935_000001000/checkpoints/last.ckpt \
+  --load_ckpt logs/5795b54b8_000060000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1

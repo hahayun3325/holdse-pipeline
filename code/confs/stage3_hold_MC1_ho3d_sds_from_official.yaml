@@ -32,7 +32,7 @@ phase3:
   # SDS Configuration - Stronger guidance for refinement (804b0572f)
   sds:
     diffusion_steps: 1000
-    guidance_scale: 4.0          # was 2.5 - stronger SDS (804b0572f)
+    guidance_scale: 3.0          # was 4.0
     max_step_ratio: 0.98
     min_step_ratio: 0.02
     noise_schedule: linear
@@ -44,15 +44,15 @@ phase3:
   # Re-tuned SDS weight schedule
   w_sds_schedule:
     enabled: true
-    step_1500: 0.00              # off during early warmup
+    step_1500: 0.15              # was 0.00
     step_2000: 0.20              # was 0.40 - start strong at 2k (804b0572f)
     step_4000: 0.30              # was 0.60 - reach 0.60 by step 4k
     step_8000: 0.40              # was 0.70 - peak at 0.70 (capped vs 0.90 for safety)
-    step_15000: 0.30             # start taper earlier than 804b0572f (0.90) was 0.6
-    step_20000: 0.20
-    step_25000: 0.10
-    step_30000: 0.05             # was 0.30 - maintain longer
-    step_35000: 0.00
+    step_15000: 0.50             # was 0.30
+    step_20000: 0.50             # was 0.20
+    step_25000: 0.50             # was 0.10
+    step_30000: 0.40             # was 0.05
+    step_34999: 0.20             #
     interpolation: "linear"
 
   diagnostics:
@@ -75,9 +75,9 @@ phase3:
 # ================================================================
 phase4:
   enabled: true
-  freeze_object_geometry: false   # Enable freeze to prevent late collapse
-  freeze_at_iter: 1000            # was 6000 - wait until after SDS refinement
-  freeze_chamfer_threshold: 999.0 # Always freeze at step 1k (was 0.02)
+  freeze_object_geometry: true    # Enable
+  freeze_at_iter: 35000           # Match contact phase start
+  freeze_chamfer_threshold: 0.02  #
 
   # Phase boundaries - 1/3 of training (19,800 steps)
   contact_start_iter: 35000      # ← CHANGED: Start earlier
@@ -121,7 +121,7 @@ phase5:
     finetune_start: 59750       # 250 steps before end
 
   # Temporal weights - conservative
-  w_temporal: 0.01
+  w_temporal: 0.02              # was 0.01
   w_velocity: 0.005
   w_acceleration: 0.005
   w_camera_motion: 0.001
@@ -252,7 +252,7 @@ loss:
 
   # SDF Protection (keep from 9fdbae668 - prevents SDF death)
   w_sdf_reg: 1.0
-  w_eikonal: 0.5                 # was 2.0
+  w_eikonal: 1.0                 # was 0.5
   w_sdf_on_verts: 0.5            # was 1.0
 
   # RGB Schedule
@@ -261,9 +261,10 @@ loss:
     enabled: true
     step_0: 1.0
     step_8000: 0.30              # give room to geometry + SDS
-    step_15000: 0.30
-    step_25000: 0.30
+    step_15000: 0.50             # was 0.3
+    step_25000: 0.80
     step_30000: 1.0              # restore for final refinement
+    step_35000: 1.0
     interpolation: "linear"
 
   w_mask: 0.5
@@ -277,11 +278,11 @@ loss:
 
   # Chamfer Settings (earlier start like 804b0572f)
   w_chamfer: 0.03                # was 0.01 - restore 804b0572f
-  chamfer_start_step: 1000       # was 2000 - 804b0572f style (early anchor)
+  chamfer_start_step: 4000       # was 1000
 
   # Object Template Chamfer (earlier start)
-  w_obj_chamfer: 0.10            # was 0.02 - restore 804b0572f
-  obj_chamfer_start_step: 1000   # was 3000
+  w_obj_chamfer: 0.05            # was 0.10
+  obj_chamfer_start_step: 4000  # Let SDS work first, was 1000
   w_obj_chamfer_decay:
     enabled: false               # Keep steady
     step_8000: 0.02
@@ -303,7 +304,7 @@ training:
   gradient_clip: 1.0
 
   # Warm-up phase boundaries (in global_step units)
-  geom_warmup_end: 1500          # ↑ from 0 – slow geometry ramp
+  geom_warmup_end: 0             # was 3500
   render_warmup_end: 1500
   joint_warmup_end: 3500         # ↑ from 3500 – more joint warm-up
   # Extended SDF-focused window

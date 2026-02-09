@@ -81,14 +81,22 @@ class Node(nn.Module):
                 print(f"  deform_info: {deform_info}")
         else:
             print(f"  ⚠️  deform_info is None or missing!")
-        # compute canonical SDF and features
-        (
-            sdf_output,
-            canonical_points,
-            feature_vectors,
-        ) = volsdf_utils.sdf_func_with_deformer(
+        # In Node.forward, before calling sdf_func_with_deformer:
+        # Choose SDF source based on training mode
+        if (not self.training and
+            hasattr(self, 'server') and
+            hasattr(self.server, 'object_model') and
+            hasattr(self.server.object_model, 'sdf_grid')):
+            # Inference: use optimized SDF grid (bypasses drifted implicit network)
+            sdf_fn = lambda x_c, cond: self.query_sdf_grid(x_c, cond)
+        else:
+            # Training: keep original behavior (implicit network)
+            sdf_fn = self.implicit_network
+
+        # Then call with the selected function:
+        sdf_output, canonical_points, feature_vectors = volsdf_utils.sdf_func_with_deformer(
             self.deformer,
-            self.implicit_network,
+            sdf_fn,  # Use conditional function instead of hard-coded self.implicit_network
             self.training,
             sample_dict["points"].reshape(-1, 3),
             sample_dict["deform_info"],
@@ -166,3 +174,48 @@ class Node(nn.Module):
         # ✅ Check if embedder exists (multires=0 has no embedder)
         if hasattr(self.implicit_network, 'embedder_obj') and self.implicit_network.embedder_obj is not None:
             self.implicit_network.embedder_obj.step()
+
+    def query_sdf_grid(self, x_c, cond):
+        """Query SDF from stored grid using trilinear interpolation."""
+        sdf_grid = self.server.object_model.sdf_grid  # [1, D, H, W] or [D, H, W]
+
+        # Handle shape variations
+        if sdf_grid.dim() == 3:
+            sdf_grid = sdf_grid.unsqueeze(0)  # [1, D, H, W]
+
+        # Store original shape (all dims except the last coordinate dimension)
+        original_shape = x_c.shape[:-1]
+        N = x_c.shape[0] if x_c.dim() == 2 else x_c.shape[0] * x_c.shape[1]
+
+        # Normalize canonical coordinates to [-1, 1] for grid_sample
+        if hasattr(self.server.object_model, 'norm_mat'):
+            # Use the stored normalization matrix
+            x_c_h = torch.cat([x_c, torch.ones(*x_c.shape[:-1], 1, device=x_c.device)], dim=-1)
+            # Use ... to handle both 2D [N, 4] and 3D [B, N, 4] cases
+            x_c_norm = torch.matmul(x_c_h, self.server.object_model.norm_mat.T)[..., :3]
+        else:
+            # Fallback: no normalization
+            x_c_norm = x_c
+
+        # Flatten for grid_sample: need [1, 1, N, 1, 3]
+        x_c_flat = x_c_norm.view(1, 1, N, 1, 3)  # [1, 1, N, 1, 3]
+
+        # Interpolate
+        sdf_vals = torch.nn.functional.grid_sample(
+            sdf_grid.unsqueeze(0),  # [1, 1, D, H, W]
+            x_c_flat,
+            align_corners=True,
+            mode='bilinear',
+            padding_mode='border',
+        )  # Output: [1, 1, 1, 1, N]
+
+        # Reshape to [batch=1, N, 1] to match expected 3D format
+        sdf_vals = sdf_vals.view(1, N, 1)  # [1, N, SDF_dim]
+
+        # Create dummy feature vector
+        feature_dim = self.implicit_network.opt.feature_vector_size
+        features = torch.zeros(1, N, feature_dim, device=x_c.device)
+
+        # Concatenate: [1, N, output_dim]
+        output = torch.cat([sdf_vals, features], dim=-1)
+        return output
