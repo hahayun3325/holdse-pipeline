@@ -75,7 +75,7 @@ phase3:
 # ================================================================
 phase4:
   enabled: true
-  freeze_object_geometry: true    # Enable freeze to prevent late collapse
+  freeze_object_geometry: false   # Enable freeze to prevent late collapse
   freeze_at_iter: 1000            # was 6000 - wait until after SDS refinement
   freeze_chamfer_threshold: 999.0 # Always freeze at step 1k (was 0.02)
 
