@@ -1,10 +1,10 @@
 # ================================================================
-# Stage 3: 30-Epoch Training with OOM Protection
-# Phase Distribution: 2:1 ratio (Phase 3:Phase 4), Phase 5 minimal
+# Stage 3: Optimized Config - 804b0572f Performance with 9fdbae668 Stability
+# Combines aggressive SDS refinement (804b0572f) with protective measures (9fdbae668)
 # ================================================================
 
 # ================================================================
-# PHASE 3: SDS GUIDANCE (39,700 steps = 19.85 epochs)
+# PHASE 3: SDS GUIDANCE (Strong refinement, capped peak to prevent collapse)
 # ================================================================
 phase3:
   enabled: true
@@ -18,21 +18,21 @@ phase3:
     vqvae_checkpoint: /home/fredcui/Projects/ghop/output/joint_3dprior/mix_data/checkpoints/last.ckpt
     unet_use_pretrained: true
     vqvae_use_pretrained: true
-    # ✅ NEW: Use Hugging Face CLIP instead of checkpoint CLIP
+    # Use Hugging Face CLIP instead of checkpoint CLIP
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
   grid_resolution: 64
   spatial_lim: 1.5
 
-  # Phase 3 Boundaries - 2/3 of training (40,000 steps)
-  phase3_start_iter: 1500        # was 0 – now start at beginning of joint warm-up, was 4000 - start SDS when joint warm-up begins
-  phase3_end_iter: 34999         # ← CHANGED: End earlier for longer Phase 4
+  # Phase 3 Boundaries - Earlier start for refinement (804b0572f style)
+  phase3_start_iter: 1500        # was 4000 - start at joint warm-up (804b0572f)
+  phase3_end_iter: 34999
 
-  # SDS Configuration - KEEP FROM STAGE 2
+  # SDS Configuration - Stronger guidance for refinement (804b0572f)
   sds:
     diffusion_steps: 1000
-    guidance_scale: 4.0       # was 3.0
+    guidance_scale: 4.0          # was 2.5 - stronger SDS (804b0572f)
     max_step_ratio: 0.98
     min_step_ratio: 0.02
     noise_schedule: linear
@@ -41,15 +41,18 @@ phase3:
   sds_iters: 1
   use_modular_init: true
 
+  # Re-tuned SDS weight schedule
   w_sds_schedule:
     enabled: true
-    step_1500: 0.00        # still off during early render warmup
-    step_2000: 0.30        # ↓ Lower early (was 0.40)
-    step_4000: 0.50        # ↓ Slower ramp (was 0.60)
-    step_8000: 0.60        # ↓ Delay peak (was 0.80)
-    step_15000: 0.70       # ↓ Keep moderate (was 0.90)
-    step_25000: 0.80       # Peak later
-    step_35000: 0.60
+    step_1500: 0.00              # off during early warmup
+    step_2000: 0.20              # was 0.40 - start strong at 2k (804b0572f)
+    step_4000: 0.30              # was 0.60 - reach 0.60 by step 4k
+    step_8000: 0.40              # was 0.70 - peak at 0.70 (capped vs 0.90 for safety)
+    step_15000: 0.30             # start taper earlier than 804b0572f (0.90) was 0.6
+    step_20000: 0.20
+    step_25000: 0.10
+    step_30000: 0.05             # was 0.30 - maintain longer
+    step_35000: 0.00
     interpolation: "linear"
 
   diagnostics:
@@ -68,12 +71,14 @@ phase3:
   warmup_iters: 0
 
 # ================================================================
-# PHASE 4: CONTACT REFINEMENT (19,500 steps = 9 epochs)
+# PHASE 4: CONTACT REFINEMENT with Late Geometry Freeze
 # ================================================================
 phase4:
   enabled: true
-  freeze_object_geometry: false    #
-#  freeze_at_iter: 35000           # ← NEW: Lock in best Stage-3 geometry
+  freeze_object_geometry: true    # Enable freeze to prevent late collapse
+  freeze_at_iter: 1000            # was 6000 - wait until after SDS refinement
+  freeze_chamfer_threshold: 999.0 # Always freeze at step 1k (was 0.02)
+
   # Phase boundaries - 1/3 of training (19,800 steps)
   contact_start_iter: 35000      # ← CHANGED: Start earlier
   contact_end_iter: 59499       # End before Phase 5
@@ -110,9 +115,9 @@ phase5:
   scheduler:
     total_iterations: 60000
     warmup_iters: 0
-    phase3_start: 1500          # match phase3.phase3_start_iter
-    phase4_start: 35000         # Match contact_start_iter
-    phase5_start: 59500         # Match phase5_start_iter
+    phase3_start: 1500          # match phase3.phase3_start_iter (updated)
+    phase4_start: 35000         # match contact_start_iter
+    phase5_start: 59500         # match phase5_start_iter
     finetune_start: 59750       # 250 steps before end
 
   # Temporal weights - conservative
@@ -237,47 +242,55 @@ dataset:
     enabled: false
 
 # ================================================================
-# LOSS CONFIGURATION (UPDATED FOR STAGE 3)
+# LOSS CONFIGURATION - 804b0572f Performance with 9fdbae668 Protection
 # ================================================================
 loss:
-  target_geom_share: 0.07        # was 0.15
-  max_geom_scale: 4.0            # was 8.0
-  geom_boost_factor: 1.2         # was 1.5
-  # Stronger SDF regularization
-  w_sdf_reg: 1.0                 # ↑ Restore moderate rigidity (was 0.5)
+  # Geometry Controller (804b0572f levels for strong refinement)
+  target_geom_share: 0.07        # was 0.03 - restore 804b0572f level
+  max_geom_scale: 4.0            # was 2.0 - restore 804b0572f level
+  geom_boost_factor: 1.2         # keep 804b0572f value
+
+  # SDF Protection (keep from 9fdbae668 - prevents SDF death)
+  w_sdf_reg: 1.0
+  w_eikonal: 0.5                 # was 2.0
+  w_sdf_on_verts: 0.5            # was 1.0
+
+  # RGB Schedule
   w_rgb: 1.0
   w_rgb_schedule:
     enabled: true
     step_0: 1.0
-    step_8000: 0.70              # ↑ Higher plateau (was 0.60)
-    step_15000: 0.60             # Gradual decay (was 0.50)
-    step_25000: 0.50             # Maintain until convergence (was 0.40)
-    step_30000: 0.80             # Restore for final refinement
+    step_8000: 0.30              # give room to geometry + SDS
+    step_15000: 0.30
+    step_25000: 0.30
+    step_30000: 1.0              # restore for final refinement
     interpolation: "linear"
-  w_mask: 0.5              # CHANGED: from 0.1
-  w_mask_edge: 0.15         # NEW: Add this line
-  w_eikonal: 1.0                 # ↑ Restore standard Eikonal (was 0.5)
-  w_smooth: 0.5               # Keep smoothness
+
+  w_mask: 0.5
+  w_mask_edge: 0.15
+  w_smooth: 0.5
   rgb_loss_type: "l1"
-  # NEW: Self-supervised geometry
+
+  # Self-supervised geometry
   w_normal_consistency: 0.1
   w_depth_smoothness: 0.1
-  w_chamfer: 0.03                    # ← CHANGED from w_template_chamfer
-  chamfer_start_step: 1000            # was 15000
-  # ============================================================
-  # Object Template Chamfer (late, weak anchor)
-  # ============================================================
-  w_obj_chamfer: 0.03            # ↓ Moderate anchor (was 0.08)
-  obj_chamfer_start_step: 2000   # ← Delay to when SDS activates (was 500)
+
+  # Chamfer Settings (earlier start like 804b0572f)
+  w_chamfer: 0.03                # was 0.01 - restore 804b0572f
+  chamfer_start_step: 1000       # was 2000 - 804b0572f style (early anchor)
+
+  # Object Template Chamfer (earlier start)
+  w_obj_chamfer: 0.10            # was 0.02 - restore 804b0572f
+  obj_chamfer_start_step: 1000   # was 3000
   w_obj_chamfer_decay:
-    enabled: true
-    step_10000: 0.03             # Maintain stable (don't decay early)
-    step_20000: 0.02            # Maintain weak anchor (don't go to 0.0)
-    step_30000: 0.01             # Keep weak anchor active, never zero
-  w_obj_generic: 0.0            # keep off while debugging
-  w_obj_smoothness: 0.0         # or at most 0.005 for a very weak early smoothness
-  # Encourage SDF zero-level set to match v3d_cano surface
-  w_sdf_on_verts: 1.0            # ↑ CRITICAL: Restore strong coupling (was 0.2)
+    enabled: false               # Keep steady
+    step_8000: 0.02
+    step_12000: 0.01
+    step_16000: 0.005
+    step_20000: 0.0
+
+  w_obj_generic: 0.0
+  w_obj_smoothness: 0.0
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
@@ -288,18 +301,19 @@ training:
   eval_every_epoch: 999
   log_every: 50
   gradient_clip: 1.0
+
   # Warm-up phase boundaries (in global_step units)
-  geom_warmup_end: 0           # keep 0 if you don't want pure geometry-only phase
-  render_warmup_end: 1500      # as before
-  joint_warmup_end: 3500       # as before
-  # NEW: extend SDF-focused window used in SDF-HEALTH and warm-up logic
-  sdf_warmup_end: 5000         # ↑ Extended from 3500
+  geom_warmup_end: 1500          # ↑ from 0 – slow geometry ramp
+  render_warmup_end: 1500
+  joint_warmup_end: 3500         # ↑ from 3500 – more joint warm-up
+  # Extended SDF-focused window
+  sdf_warmup_end: 3500           # ↑ from 5000
 
 # ================================================================
-# OPTIMIZER CONFIGURATION (KEEP FROM STAGE 2)
+# OPTIMIZER CONFIGURATION (STAGE 3 FINE-TUNE)
 # ================================================================
 optimizer:
-  lr: 0.00005                    # was 0.0001 Same learning rate as Stage 2
+  lr: 0.00005                    # was 0.000025 - restore 804b0572f LR
   type: "adam"
   weight_decay: 0.0
   betas: [0.9, 0.999]
@@ -316,7 +330,7 @@ scheduler:
 # EXPERIMENT CONFIGURATION
 # ================================================================
 experiment:
-  name: 'stage3_30epoch_optimized_2to1_ratio'
+  name: 'stage3_804b0572f_with_safety_rails'
 
 # ================================================================
 # CHECKPOINT

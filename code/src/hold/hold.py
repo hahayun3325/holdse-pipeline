@@ -4414,11 +4414,40 @@ class HOLD(pl.LightningModule):
 
             # IMPORTANT: Remove from optimizer to prevent gradients from accumulating
             opt = self.optimizers()
-            for param_group in opt.param_groups:
-                # Filter out frozen params (keep only those with requires_grad=True)
-                param_group['params'] = [p for p in param_group['params'] if p.requires_grad]
 
-            logger.info("  - Removed frozen parameters from optimizer")
+            # Step 1: Collect IDs of frozen parameters
+            frozen_param_ids = set()
+            if hasattr(self.model.nodes.object.server.object_model, 'v3d_cano'):
+                frozen_param_ids.add(id(self.model.nodes.object.server.object_model.v3d_cano))
+            if hasattr(self.model.nodes.object.server.object_model, 'sdf_grid'):
+                frozen_param_ids.add(id(self.model.nodes.object.server.object_model.sdf_grid))
+
+            # Step 2: Clean optimizer state dict (remove Adam momentum buffers)
+            state_keys_to_remove = []
+
+            for key in list(opt.state.keys()):
+                # In PyTorch, keys can be Tensors or already IDs
+                if isinstance(key, torch.Tensor):
+                    key_id = id(key)
+                else:
+                    key_id = key
+
+                if key_id in frozen_param_ids:
+                    state_keys_to_remove.append(key)
+
+            for key in state_keys_to_remove:
+                del opt.state[key]
+
+            logger.info(f"  - Cleaned {len(state_keys_to_remove)} frozen parameter states from optimizer")
+
+            # Step 3: Clean param_groups (remove frozen params from update list)
+            total_removed = 0
+            for param_group in opt.param_groups:
+                original_count = len(param_group['params'])
+                param_group['params'] = [p for p in param_group['params'] if p.requires_grad]
+                total_removed += original_count - len(param_group['params'])
+
+            logger.info(f"  - Removed {total_removed} frozen parameters from optimizer param_groups")
             logger.info("=" * 70)
 
         # ====================================================================

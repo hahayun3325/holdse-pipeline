@@ -350,34 +350,48 @@ def main():
                 )
                 saved_count += 1
 
-            # Process hand normal (right.normal)
+            # Process hand normal - USE MODEL MASK
             if "right.normal" in out:
                 normal = out["right.normal"]
                 if isinstance(normal, torch.Tensor):
                     normal = reshape_normal(normal, img_size)
-                    save_normal_image(normal, op.join(hand_dir, f"frame_{idx:04d}.png"))
+                    # Try to get hand-specific mask, fallback to generic mask
+                    hand_mask = out.get("right.mask", out.get("mask", None))
+                    save_normal_image(
+                        normal,
+                        op.join(hand_dir, f"frame_{idx:04d}.png"),
+                        mask=hand_mask,      # Use model mask for hand
+                        norm_thresh=0.3      # Lower threshold as safety
+                    )
 
-            # In the render loop, extract mask if available
-            img_size = out["img_size"]
-            mask = out.get("mask", None)  # or "weights", "alpha", "acc_norm"
-
+            # Process object normal - USE SDF WITH GRADIENT MASK
             if "object.normal" in out:
+                # Extract mask ONCE at the beginning for both visualization and logging
+                mask = out.get("mask", None)
+
                 normal = reshape_normal(out["object.normal"], img_size)
 
-                # 1. Save standard masked version (existing behavior)
-                # Use SDF-gradient-based foreground detection
+                # Recompute gradient magnitude for masking if not already done
+                if 'grad_mag_img' not in locals():
+                    # Fallback: simple magnitude-based mask
+                    object_mask = None
+                    norm_thresh = 0.3  # More permissive for SDF normals
+                else:
+                    object_mask = grad_mag_img > 0.05  # Low threshold since SDF has strong gradients
+
                 save_normal_image(
                     normal,
                     op.join(object_dir, f"frame_{idx:04d}.png"),
-                    mask=None,          # << key change
-                    norm_thresh=0.5     # or 0.7–0.95 as needed
+                    mask=object_mask,
+                    norm_thresh=0.3
                 )
-                # 2. Save raw unmasked version (for hypothesis testing)
+
+                # Also save raw for debugging
                 raw_dir = op.join(output_dir, "object_raw")
                 os.makedirs(raw_dir, exist_ok=True)
                 save_normal_image_raw(normal, op.join(raw_dir, f"frame_{idx:04d}.png"))
 
-                # 3. If mask exists, also save mask visualization
+                # 3. If mask exists, also save mask visualization (now mask is defined!)
                 if mask is not None:
                     mask_dir = op.join(output_dir, "mask_vis")
                     os.makedirs(mask_dir, exist_ok=True)
@@ -404,8 +418,7 @@ def main():
                 logger.info(f"  normal norms: min={norms.min().item():.4f}, max={norms.max().item():.4f}")
                 logger.info(f"  near-zero normals (norm<0.1): {(norms < 0.1).sum().item()}/{norms.numel()}")
 
-                # Log mask info
-                mask = out.get("mask", None)
+                # Log mask info (mask is already defined above)
                 if mask is not None:
                     logger.info(f"  mask exists: True")
                     logger.info(f"  mask shape: {mask.shape}")
@@ -445,7 +458,7 @@ export COMET_API_KEY="4hhuylWTxYQBirmxKwuwGv4Q5"
 export COMET_WORKSPACE="cloudy"
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/cb25c350f_000001000/checkpoints/last.ckpt \
+  --load_ckpt logs/abe64eebd_000001000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1
