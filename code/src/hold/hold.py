@@ -3510,6 +3510,18 @@ class HOLD(pl.LightningModule):
                             logger.info('sdf/has_zero', float(has_zero))
                             logger.info('sdf/zero_cross_count', zero_cross_count)
 
+                        #
+                        # Distillation Starts Here
+                        # Distill only when SDF has both signs (i.e., a meaningful surface)
+                        if has_zero:
+                            geometric_loss = self._add_sdf_distillation_loss(
+                                object_model=object_server.object_model,
+                                batch=batch,
+                                step=self.global_step,
+                                geometric_loss=geometric_loss,
+                                loss_output=loss_output,
+                            )
+
                         if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
                             old_sds_mult = sds_mult
                             sds_mult *= 0.5
@@ -5238,8 +5250,13 @@ class HOLD(pl.LightningModule):
             sdf_zero_f = to_float(loss_output.get('loss/sdf_zero_cross', 0.0))
             sdf_grad_f = to_float(loss_output.get('loss/sdf_gradient', 0.0))
             sdf_range_f = to_float(loss_output.get('loss/sdf_range', 0.0))
-            sdf_zero_crossings_f = to_float(loss_output.get('loss/sdf_zero_crossings', 0.0))
             sdf_on_verts_f = to_float(loss_output.get('loss/sdf_on_verts', 0.0))
+            # New: separate teacher vs student zero-cross counts
+            grid_zero_crossings_f = to_float(loss_output.get('loss/sdf_zero_crossings', 0.0))
+            implicit_zero_crossings_f = to_float(
+                loss_output.get('loss/implicit_sdf_zero_crossings', 0.0)
+            )
+
 
             # Calculate percentages (avoid division by zero)
             if total_f > 1e-8:
@@ -5287,11 +5304,12 @@ class HOLD(pl.LightningModule):
             logger.info(f"    Mask (semantic):   {mask_f:.6f}")
             logger.info(f"    Mask (binary):     {mask_binary_f:.6f}")
             logger.info(f"    Eikonal:           {eikonal_f:.6f}")
-            logger.info(f"    SDF Zero-cross:    {sdf_zero_f:.6f}")
-            logger.info(f"    SDF Gradient:      {sdf_grad_f:.6f}")
-            logger.info(f"    SDF Range:         {sdf_range_f:.6f}")
-            logger.info(f"    SDF Zero-crossings:{sdf_zero_crossings_f:.6f}")
-            logger.info(f"    SDF on_verts:      {sdf_on_verts_f:.6f}")
+            logger.info(f"    SDF Zero-cross (loss, grid):  {sdf_zero_f:.6f}")
+            logger.info(f"    SDF Gradient (grid):          {sdf_grad_f:.6f}")
+            logger.info(f"    SDF Range   (grid):           {sdf_range_f:.6f}")
+            logger.info(f"    SDF on_verts (grid):          {sdf_on_verts_f:.6f}")
+            logger.info(f"    Implicit Zero-crossings:      {implicit_zero_crossings_f:.6f}")
+            logger.info(f"    Grid Zero-crossings:          {grid_zero_crossings_f:.6f}")
             logger.info("-" * 80)
             logger.info(f"  Step 2 - Geometric Regularization:")
             logger.info(f"    Geometric Total:   {geometric_f:.6f}  ({geometric_pct:5.1f}%)")
@@ -6006,6 +6024,123 @@ class HOLD(pl.LightningModule):
                 torch.cuda.empty_cache()
 
         return object_sdf
+
+    def _add_sdf_distillation_loss(self, object_model, batch, step, geometric_loss, loss_output):
+        """
+        Distill SDF values from object_model.sdf_grid (teacher) into
+        the object's implicit_network (student). Modifies geometric_loss in-place.
+        """
+        sdf_grid = getattr(object_model, "sdf_grid", None)
+        if sdf_grid is None:
+            return geometric_loss  # ← important: don't return None
+
+        # Find the object node / implicit network
+        nodes = getattr(self.model, "nodes", None)
+        object_node = None
+        if nodes is not None:
+            # nodes is an nn.ModuleDict → use "in" and [] instead of .get()
+            if "object" in nodes:
+                object_node = nodes["object"]
+
+        if object_node is None or not hasattr(object_node, "implicit_network"):
+            return geometric_loss  # ← again, keep geometric_loss unchanged
+
+        device = sdf_grid.device
+
+        # Simple phase-aware weights (tune later or move to config)
+        if step <= getattr(self.opt.training, "geom_warmup_end", 2000):
+            num_samples = 4096
+            w_distill = 1.0
+        elif step <= getattr(self.opt.training, "joint_warmup_end", 8000):
+            num_samples = 4096
+            w_distill = 0.5
+        else:
+            num_samples = 2048
+            w_distill = 0.25
+
+        # ----- 1) Sample canonical points in [-1, 1]^3 -----
+        # Start with simple uniform sampling (can make surface-biased later)
+        x_c = torch.rand(num_samples, 3, device=device) * 2.0 - 1.0  # [N, 3]
+
+        # ----- 2) Teacher: query SDF grid (detached) -----
+        # Reorder coordinates: (x,y,z) → (z,y,x) for grid_sample
+        coords = x_c[..., [2, 1, 0]].unsqueeze(0).unsqueeze(0)  # [1, 1, N, 3]
+
+        sdf_teacher = F.grid_sample(
+            sdf_grid.detach().unsqueeze(0),  # [1, 1, D, H, W]
+            coords.view(1, 1, -1, 1, 3),     # [1, 1, N, 1, 3]
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        ).view(-1, 1)  # [N, 1]
+
+        # ----- 3) Student: query implicit network -----
+        sdf_student = self._query_object_implicit_sdf(object_node, x_c, batch)  # [N, 1]
+
+        # ----- 4) Distillation loss -----
+        loss_distill = F.l1_loss(sdf_student, sdf_teacher)
+
+        # ----- 5) Implicit-network zero-cross diagnostics -----
+        with torch.no_grad():
+            s_min = sdf_student.min()
+            s_max = sdf_student.max()
+            has_zero_student = (s_min < 0.0) & (s_max > 0.0)
+
+            flat_student = sdf_student.view(-1)
+            zero_crossings_student = ((flat_student[:-1] * flat_student[1:]) < 0).sum().item()
+            zero_cross_ratio_student = zero_crossings_student / max(flat_student.numel() - 1, 1)
+
+        # Log implicit (student) SDF diagnostics
+        loss_output['debug/implicit_sdf_min'] = float(s_min)
+        loss_output['debug/implicit_sdf_max'] = float(s_max)
+        loss_output['debug/implicit_sdf_has_zero'] = float(has_zero_student)
+        loss_output['debug/implicit_sdf_zero_crossings'] = float(zero_crossings_student)
+        loss_output['debug/implicit_sdf_zero_cross_ratio'] = float(zero_cross_ratio_student)
+
+        # For breakdown: use a 'loss/...' key, parallel to the grid one
+        loss_output['loss/implicit_sdf_zero_crossings'] = float(zero_crossings_student)
+
+        # Existing logging for distillation loss
+        distill_weight = getattr(self.opt.loss, "w_sdf_distill", 1.0) * w_distill
+        geometric_loss = geometric_loss + distill_weight * loss_distill
+        loss_output["loss/sdf_distill_raw"] = loss_distill
+        loss_output["loss/sdf_distill"] = distill_weight * loss_distill
+
+        # Log for diagnostics
+        loss_output["loss_sdf_distill_raw"] = loss_distill
+        loss_output["loss_sdf_distill"] = distill_weight * loss_distill
+
+        return geometric_loss
+
+    def _query_object_implicit_sdf(self, object_node, x_c, batch):
+        """
+        Query the object's implicit_network at canonical points x_c: [N, 3].
+        For distillation in canonical space, use minimal / zero conditioning.
+        """
+        # x_c: [N, 3] -> [1, N, 3]
+        x_c_batched = x_c.unsqueeze(0)
+
+        # Build cond dict: check what the implicit network expects
+        implicit_net = object_node.implicit_network
+        cond = {}
+
+        # The network's self.cond attribute tells us which key to use
+        if hasattr(implicit_net, "cond") and implicit_net.cond != "none":
+            cond_key = implicit_net.cond  # e.g., "pose"
+
+            # Figure out the conditioning dimension
+            if hasattr(implicit_net, "num_cond"):
+                cond_dim = implicit_net.num_cond
+            else:
+                # Fallback: common pose conditioning is 45 or 48 for MANO
+                cond_dim = 45
+
+            # For canonical space distillation, use zero/identity pose
+            cond[cond_key] = torch.zeros(1, cond_dim, device=x_c.device)
+
+        out = implicit_net(x_c_batched, cond)  # [1, N, C]
+        sdf_student = out[..., :1].squeeze(0)  # [N, 1]
+        return sdf_student
 
     # ====================================================================
     # PHASE 4: Mesh Extraction Helper Methods

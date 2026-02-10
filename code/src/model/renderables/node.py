@@ -93,6 +93,9 @@ class Node(nn.Module):
             # Training: keep original behavior (implicit network)
             sdf_fn = self.implicit_network
 
+        # Simple version: always implicit_network - todo test with the implicitnet after implementing distillation
+        sdf_fn = self.implicit_network
+
         # Then call with the selected function:
         sdf_output, canonical_points, feature_vectors = volsdf_utils.sdf_func_with_deformer(
             self.deformer,
