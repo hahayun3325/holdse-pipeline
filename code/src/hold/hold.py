@@ -3512,15 +3512,19 @@ class HOLD(pl.LightningModule):
 
                         #
                         # Distillation Starts Here
+                        # Hyperparameters (you can move to config)
+                        min_distill_step = getattr(self.opt.training, "distill_start_step", 8000)
+                        min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 5000)
                         # Distill only when SDF has both signs (i.e., a meaningful surface)
-                        if has_zero:
-                            geometric_loss = self._add_sdf_distillation_loss(
-                                object_model=object_server.object_model,
-                                batch=batch,
-                                step=self.global_step,
-                                geometric_loss=geometric_loss,
-                                loss_output=loss_output,
-                            )
+                        if has_zero and self.global_step >= min_distill_step:
+                            if zero_cross_count > min_grid_zero_cross:
+                                geometric_loss = self._add_sdf_distillation_loss(
+                                    object_model=object_server.object_model,
+                                    batch=batch,
+                                    step=self.global_step,
+                                    geometric_loss=geometric_loss,
+                                    loss_output=loss_output,
+                                )
 
                         if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
                             old_sds_mult = sds_mult
@@ -6047,20 +6051,55 @@ class HOLD(pl.LightningModule):
 
         device = sdf_grid.device
 
-        # Simple phase-aware weights (tune later or move to config)
-        if step <= getattr(self.opt.training, "geom_warmup_end", 2000):
+        distill_start_step = getattr(self.opt.training, "distill_start_step", 8000)
+
+        if step < distill_start_step:
+            return geometric_loss  # safety
+
+        # Simple two-stage schedule after start
+        if step < distill_start_step + 2000:
             num_samples = 4096
-            w_distill = 1.0
-        elif step <= getattr(self.opt.training, "joint_warmup_end", 8000):
-            num_samples = 4096
-            w_distill = 0.5
+            w_distill = 0.25   # gentle start
         else:
-            num_samples = 2048
-            w_distill = 0.25
+            num_samples = 4096
+            w_distill = 0.5    # keep meaningful weight during SDS/contact/temporal
+
 
         # ----- 1) Sample canonical points in [-1, 1]^3 -----
         # Start with simple uniform sampling (can make surface-biased later)
-        x_c = torch.rand(num_samples, 3, device=device) * 2.0 - 1.0  # [N, 3]
+        n_uniform = num_samples // 2
+        x_uniform = torch.rand(n_uniform, 3, device=device) * 2.0 - 1.0  # [n_uniform, 3]
+
+        # Surface-biased samples from grid
+        with torch.no_grad():
+            sdf_vals = sdf_grid.detach().view(-1)
+            surface_mask = sdf_vals.abs() < 0.05  # threshold can be tuned
+            surface_idx = surface_mask.nonzero(as_tuple=False).view(-1)
+
+            coords_surface = None
+            if surface_idx.numel() > 0:
+                k = num_samples - n_uniform
+                choose = torch.randint(0, surface_idx.numel(), (k,), device=device)
+                vox_idx = surface_idx[choose]  # [k]
+
+                D, H, W = sdf_grid.shape[1:]
+                z = (vox_idx // (H * W)).float()
+                y = ((vox_idx % (H * W)) // W).float()
+                x = (vox_idx % W).float()
+
+                # Normalize voxel indices to [-1,1] in grid space
+                z_n = (z / (D - 1)) * 2.0 - 1.0
+                y_n = (y / (H - 1)) * 2.0 - 1.0
+                x_n = (x / (W - 1)) * 2.0 - 1.0
+
+                coords_surface = torch.stack([z_n, y_n, x_n], dim=-1)  # [k, 3]
+
+        if coords_surface is not None:
+            # Distill in the same canonical space you already use: [x,y,z] in [-1,1]
+            x_surface = coords_surface[..., [2, 1, 0]]  # back to (x,y,z)
+            x_c = torch.cat([x_uniform, x_surface], dim=0)
+        else:
+            x_c = x_uniform
 
         # ----- 2) Teacher: query SDF grid (detached) -----
         # Reorder coordinates: (x,y,z) → (z,y,x) for grid_sample
@@ -6078,7 +6117,13 @@ class HOLD(pl.LightningModule):
         sdf_student = self._query_object_implicit_sdf(object_node, x_c, batch)  # [N, 1]
 
         # ----- 4) Distillation loss -----
-        loss_distill = F.l1_loss(sdf_student, sdf_teacher)
+        loss_l1 = F.l1_loss(sdf_student, sdf_teacher)
+
+        sign_teacher = torch.tanh(10.0 * sdf_teacher)
+        sign_student = torch.tanh(10.0 * sdf_student)
+        loss_sign = F.mse_loss(sign_student, sign_teacher)
+
+        loss_distill = loss_l1 + 0.2 * loss_sign  # 0.2 is a good starting point
 
         # ----- 5) Implicit-network zero-cross diagnostics -----
         with torch.no_grad():

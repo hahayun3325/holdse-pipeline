@@ -132,14 +132,24 @@ class ObjectModel(nn.Module):
         out["T"] = tf_mats
         return out
 
-    def _initialize_sdf_from_vertices(self, vertices, grid_res=64):
+    def _initialize_sdf_from_vertices(self, vertices, grid_res=64,
+                                      max_verts_for_init: int = 5000,
+                                      gp_chunk: int = 8192,
+                                      v_chunk: int = 4096):
         """
-        Initialize an SDF grid from a vertex point cloud.
+        Initialize an SDF grid from a vertex point cloud in a memory-safe way.
+
         vertices: [N, 3] tensor (CPU or GPU)
         Returns: [grid_res, grid_res, grid_res] float32 tensor on same device.
         """
         device = vertices.device
         verts = vertices.float()
+
+        # Optional: subsample very dense meshes to keep cost reasonable
+        # (64^3 grid doesn't need all ~70k verts to get a decent SDF)
+        if verts.shape[0] > max_verts_for_init:
+            idx = torch.randperm(verts.shape[0], device=device)[:max_verts_for_init]
+            verts = verts[idx]
 
         # Bounding box with small padding
         bbox_min = verts.min(dim=0)[0] - 0.05
@@ -149,12 +159,35 @@ class ObjectModel(nn.Module):
         xs = torch.linspace(bbox_min[0], bbox_max[0], grid_res, device=device)
         ys = torch.linspace(bbox_min[1], bbox_max[1], grid_res, device=device)
         zs = torch.linspace(bbox_min[2], bbox_max[2], grid_res, device=device)
-        grid_x, grid_y, grid_z = torch.meshgrid(xs, ys, zs)
-        grid_points = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)  # [res^3, 3]
 
-        # Unsigned distance to nearest vertex
-        dists = torch.cdist(grid_points, verts)              # [res^3, N_verts]
-        min_dists = dists.min(dim=1)[0].reshape(grid_res, grid_res, grid_res)
+        # Older PyTorch (1.8.x) does not support indexing="ij"
+        # Default behavior is already "ij"-style for multiple 1D inputs.
+        grid_x, grid_y, grid_z = torch.meshgrid(xs, ys, zs)
+
+        grid_points = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)  # [res^3, 3]
+        M = grid_points.shape[0]
+        N = verts.shape[0]
+
+        # Compute unsigned distance to nearest vertex in chunks:
+        #   - chunk over grid_points (gp_chunk)
+        #   - and over verts (v_chunk)
+        min_dists_flat = torch.full((M,), float("inf"), device=device)
+
+        for i in range(0, M, gp_chunk):
+            gp_chunk_pts = grid_points[i:i + gp_chunk]                     # [m, 3]
+            m = gp_chunk_pts.shape[0]
+            chunk_min = torch.full((m,), float("inf"), device=device)
+
+            for j in range(0, N, v_chunk):
+                v_chunk_pts = verts[j:j + v_chunk]                         # [n, 3]
+                # [m, n] distances for this block
+                d_block = torch.cdist(gp_chunk_pts, v_chunk_pts)
+                # Update minimum over vertices seen so far
+                chunk_min = torch.minimum(chunk_min, d_block.min(dim=1)[0])
+
+            min_dists_flat[i:i + m] = chunk_min
+
+        min_dists = min_dists_flat.reshape(grid_res, grid_res, grid_res)
 
         # Simple signed heuristic: negative near object center, positive far away
         center = verts.mean(dim=0, keepdim=True)            # [1, 3]

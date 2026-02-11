@@ -191,7 +191,7 @@ export COMET_API_KEY="4hhuylWTxYQBirmxKwuwGv4Q5"
 export COMET_WORKSPACE="cloudy"
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/3618b7f9f_000020000/checkpoints/last.ckpt \
+  --load_ckpt logs/cb20a1702/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1

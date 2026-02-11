@@ -292,7 +292,7 @@ loss:
 
   w_obj_generic: 0.0
   w_obj_smoothness: 0.0
-
+  w_sdf_distill: 1.0
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
 # ================================================================
@@ -309,7 +309,8 @@ training:
   joint_warmup_end: 3500         # ↑ from 3500 – more joint warm-up
   # Extended SDF-focused window
   sdf_warmup_end: 3500           # ↑ from 5000
-
+  distill_start_step: 8000
+  distill_min_grid_zeros: 5000
 # ================================================================
 # OPTIMIZER CONFIGURATION (STAGE 3 FINE-TUNE)
 # ================================================================
