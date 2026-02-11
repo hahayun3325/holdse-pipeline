@@ -309,8 +309,8 @@ training:
   joint_warmup_end: 3500         # ↑ from 3500 – more joint warm-up
   # Extended SDF-focused window
   sdf_warmup_end: 3500           # ↑ from 5000
-  distill_start_step: 8000
-  distill_min_grid_zeros: 5000
+  distill_start_step: 4000       # was 8000
+  distill_min_grid_zeros: 2000   # was 5000
 # ================================================================
 # OPTIMIZER CONFIGURATION (STAGE 3 FINE-TUNE)
 # ================================================================

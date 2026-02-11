@@ -3513,11 +3513,18 @@ class HOLD(pl.LightningModule):
                         #
                         # Distillation Starts Here
                         # Hyperparameters (you can move to config)
-                        min_distill_step = getattr(self.opt.training, "distill_start_step", 8000)
-                        min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 5000)
+                        min_distill_step = getattr(self.opt.training, "distill_start_step", 4000)
+                        min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 2000)
                         # Distill only when SDF has both signs (i.e., a meaningful surface)
                         if has_zero and self.global_step >= min_distill_step:
                             if zero_cross_count > min_grid_zero_cross:
+                                # Get implicit zero-crossings from previous step if available
+                                implicit_zc = getattr(self, '_last_implicit_zero_crossings', 1000)
+
+                                # Reactive monitoring: boost if implicit surface is collapsing
+                                if implicit_zc < 300 and zero_cross_count > 10000:
+                                    self.sdf_distill_boost_steps = getattr(self, 'sdf_distill_boost_steps', 0) + 500
+
                                 geometric_loss = self._add_sdf_distillation_loss(
                                     object_model=object_server.object_model,
                                     batch=batch,
@@ -5260,7 +5267,8 @@ class HOLD(pl.LightningModule):
             implicit_zero_crossings_f = to_float(
                 loss_output.get('loss/implicit_sdf_zero_crossings', 0.0)
             )
-
+            # Store for reactive monitoring in next step
+            self._last_implicit_zero_crossings = implicit_zero_crossings_f
 
             # Calculate percentages (avoid division by zero)
             if total_f > 1e-8:
@@ -6051,23 +6059,26 @@ class HOLD(pl.LightningModule):
 
         device = sdf_grid.device
 
-        distill_start_step = getattr(self.opt.training, "distill_start_step", 8000)
+        distill_start_step = getattr(self.opt.training, "distill_start_step", 6000)
 
         if step < distill_start_step:
             return geometric_loss  # safety
 
-        # Simple two-stage schedule after start
-        if step < distill_start_step + 2000:
+        # Three-stage schedule: gentle start → strong mid → sustained late
+        if step < distill_start_step + 4000:  # 6k-10k
             num_samples = 4096
-            w_distill = 0.25   # gentle start
+            w_distill = 0.5   # gentle start (was 0.25)
         else:
             num_samples = 4096
-            w_distill = 0.5    # keep meaningful weight during SDS/contact/temporal
+            w_distill = 0.75  # strong anchoring through SDS/contact (was 0.5)
 
+        # Post-freeze: keep non-zero weight so frozen grid still anchors
+        if hasattr(object_model, 'sdf_grid') and not getattr(object_model.sdf_grid, 'requires_grad', True):
+            w_distill = max(w_distill * 0.3, 0.1)  # ~0.1-0.25 floor after freeze
 
         # ----- 1) Sample canonical points in [-1, 1]^3 -----
         # Start with simple uniform sampling (can make surface-biased later)
-        n_uniform = num_samples // 2
+        n_uniform = num_samples // 4
         x_uniform = torch.rand(n_uniform, 3, device=device) * 2.0 - 1.0  # [n_uniform, 3]
 
         # Surface-biased samples from grid
@@ -6144,6 +6155,14 @@ class HOLD(pl.LightningModule):
 
         # For breakdown: use a 'loss/...' key, parallel to the grid one
         loss_output['loss/implicit_sdf_zero_crossings'] = float(zero_crossings_student)
+
+        # Reactive boost from online monitor
+        if hasattr(self, 'sdf_distill_boost_steps') and self.sdf_distill_boost_steps > 0:
+            w_distill *= 2.0
+            self.sdf_distill_boost_steps -= 1
+            # Reduce SDS to avoid competing signal
+            if hasattr(self, 'sds_mult'):
+                self.sds_mult = getattr(self, 'sds_mult', 1.0) * 0.5
 
         # Existing logging for distillation loss
         distill_weight = getattr(self.opt.loss, "w_sdf_distill", 1.0) * w_distill
