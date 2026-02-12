@@ -75,8 +75,8 @@ phase3:
 # ================================================================
 phase4:
   enabled: true
-  freeze_object_geometry: true    # Enable
-  freeze_at_iter: 35000           # Match contact phase start
+  freeze_object_geometry: false  # Must keep trainable to see what SDS learned
+  freeze_at_iter: 999999         # Match contact phase start
   freeze_chamfer_threshold: 0.02  #
 
   # Phase boundaries - 1/3 of training (19,800 steps)
@@ -281,8 +281,8 @@ loss:
   chamfer_start_step: 1000       # was 4000
 
   # Object Template Chamfer (earlier start)
-  w_obj_chamfer: 0.1             # was 0.05
-  obj_chamfer_start_step: 1500  # Let SDS work first, was 4000
+  w_obj_chamfer: 0.0             # disable
+  obj_chamfer_start_step: 999999  # Never activate
   w_obj_chamfer_decay:
     enabled: false               # Keep steady
     step_8000: 0.02
@@ -292,7 +292,7 @@ loss:
 
   w_obj_generic: 0.0
   w_obj_smoothness: 0.0
-  w_sdf_distill: 0.1             # was 1.0
+  w_sdf_distill: 0.0  # Disable distillation
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
 # ================================================================

@@ -2652,7 +2652,7 @@ class HOLD(pl.LightningModule):
                         logger.info(f"[sdf_grid] Has zero-crossing: {has_zero_crossing}")
 
                         if not is_param:
-                            logger.error("❌ CRITICAL: sdf_grid is NOT nn.Parameter!")
+                            logger.info("❌ CRITICAL: sdf_grid is (treated as derived grid).")
                         if not requires_grad:
                             logger.error("❌ CRITICAL: sdf_grid has requires_grad=False!")
                         if not has_zero_crossing:
@@ -2672,9 +2672,9 @@ class HOLD(pl.LightningModule):
                             logger.info(f"    ✓ Found v3d_cano in group '{group_name}'!")  # <-- Changed this line
 
                             # NEW: Log the multiplier being used
-                            expected_lr = base_lr * 1.0  # Should match what we set
+                            expected_lr = self.args.lr * 1.0  # Should match what we set
                             actual_lr = group['lr']
-                            logger.info(f"    Base LR: {base_lr:.2e}, Expected: {expected_lr:.2e}, Actual: {actual_lr:.2e}")
+                            logger.info(f"    Base LR: {self.args.lr:.2e}, Expected: {expected_lr:.2e}, Actual: {actual_lr:.2e}")
 
                             if group['lr'] < 1e-6:
                                 logger.error(
@@ -4492,9 +4492,13 @@ class HOLD(pl.LightningModule):
             weight_source = "scheduler"
         else:
             # Fallback: Manual warmup from config
-            if self.global_step >= self.contact_start_iter:
+            # Ensure attributes exist with safe defaults
+            contact_start = getattr(self, 'contact_start_iter', float('inf'))
+            contact_warmup = getattr(self, 'contact_warmup_iters', 1000)
+
+            if self.global_step >= contact_start:
                 contact_progress = min(
-                    (self.global_step - self.contact_start_iter) / max(self.contact_warmup_iters, 1),
+                    (self.global_step - contact_start) / max(contact_warmup, 1),
                     1.0
                 )
                 effective_contact_weight = self.w_contact * contact_progress

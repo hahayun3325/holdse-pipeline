@@ -7,7 +7,7 @@
 # PHASE 3: SDS GUIDANCE (Strong refinement, capped peak to prevent collapse)
 # ================================================================
 phase3:
-  enabled: true
+  enabled: false
 
   # GHOP Checkpoints
   ghop:
@@ -74,8 +74,8 @@ phase3:
 # PHASE 4: CONTACT REFINEMENT with Late Geometry Freeze
 # ================================================================
 phase4:
-  enabled: true
-  freeze_object_geometry: true    # Enable
+  enabled: false
+  freeze_object_geometry: false  # Allow geometry to refine during contact
   freeze_at_iter: 35000           # Match contact phase start
   freeze_chamfer_threshold: 0.02  #
 
@@ -104,7 +104,7 @@ phase4:
 # PHASE 5: TEMPORAL CONSISTENCY (500 steps = 0.25 epochs, FINAL ONLY)
 # ================================================================
 phase5:
-  enabled: true
+  enabled: false
 
   # Minimal Phase 5 - last 500 steps only
   phase5_start_iter: 59500      # Start at epoch 29.75
