@@ -251,9 +251,9 @@ loss:
   geom_boost_factor: 1.2         # keep 804b0572f value
 
   # SDF Protection (keep from 9fdbae668 - prevents SDF death)
-  w_sdf_reg: 1.0
-  w_eikonal: 1.0                 # was 0.5
-  w_sdf_on_verts: 0.5            # was 1.0
+  w_sdf_reg: 0.5                 # was 1.0
+  w_eikonal: 0.5                 # was 1.0
+  w_sdf_on_verts: 0.3            # was 0.5
 
   # RGB Schedule
   w_rgb: 1.0
@@ -269,7 +269,7 @@ loss:
 
   w_mask: 0.5
   w_mask_edge: 0.15
-  w_smooth: 0.5
+  w_smooth: 0.1                  # was 0.5
   rgb_loss_type: "l1"
 
   # Self-supervised geometry
@@ -277,12 +277,12 @@ loss:
   w_depth_smoothness: 0.1
 
   # Chamfer Settings (earlier start like 804b0572f)
-  w_chamfer: 0.03                # was 0.01 - restore 804b0572f
-  chamfer_start_step: 4000       # was 1000
+  w_chamfer: 0.1                 # was 0.03
+  chamfer_start_step: 1000       # was 4000
 
   # Object Template Chamfer (earlier start)
-  w_obj_chamfer: 0.05            # was 0.10
-  obj_chamfer_start_step: 4000  # Let SDS work first, was 1000
+  w_obj_chamfer: 0.1             # was 0.05
+  obj_chamfer_start_step: 1500  # Let SDS work first, was 4000
   w_obj_chamfer_decay:
     enabled: false               # Keep steady
     step_8000: 0.02
@@ -292,7 +292,7 @@ loss:
 
   w_obj_generic: 0.0
   w_obj_smoothness: 0.0
-  w_sdf_distill: 1.0
+  w_sdf_distill: 0.1             # was 1.0
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
 # ================================================================

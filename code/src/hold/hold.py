@@ -2433,7 +2433,7 @@ class HOLD(pl.LightningModule):
         elif step < render_warmup_end:
             # Phase 2.2: RENDERING-ONLY warm-up
             base_mult = 1.0  # train RGB/rendering
-            geom_mult = 0.5  # was 0.1 - keep geometry alive, not frozen
+            geom_mult = 1.0  # was 0.5 - keep geometry alive, not frozen
             sds_mult = 0.0  # still no SDS
             contact_mult = 0.0
             temporal_mult = 0.0
@@ -2442,7 +2442,7 @@ class HOLD(pl.LightningModule):
             # Phase 2.3: JOINT warm-up
             progress = float(step - render_warmup_end) / max(joint_warmup_end - render_warmup_end, 1)
             base_mult = 1.0
-            geom_mult = 0.5
+            geom_mult = 1.0
             sds_mult = 0.3 * progress  # ramp SDS from 0 → 0.3
             contact_mult = 0.0
             temporal_mult = 0.0
@@ -2455,6 +2455,7 @@ class HOLD(pl.LightningModule):
             phase_tag = "sdf_warmup"
         else:
             phase_tag = "main_training"
+            geom_mult = 1.0
 
         # Apply closed-loop dynamic multipliers
         geom_mult *= self.dynamic_geom_mult
@@ -3423,8 +3424,15 @@ class HOLD(pl.LightningModule):
 
                     # Stronger SDF early
                     if self.global_step < sdf_warmup_end:
+                        # Strong SDF only in early warmup
                         w_sdf_reg *= 3.0
                         w_eikonal *= 3.0
+                    elif getattr(self, "_sdf_is_valid", False):
+                        # After warmup + valid SDF: decay SDF terms
+                        decay = 0.2  # e.g. 20% of base strength
+                        w_sdf_reg *= decay
+                        w_eikonal *= decay
+                        w_smooth *= decay
 
                     # Only apply if learnable
                     if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
@@ -4624,7 +4632,7 @@ class HOLD(pl.LightningModule):
                             contact_zones = None
 
                     # ============================================================
-                    # Contact Refinement Computation
+                    # Contact Refinement Computationf
                     # ============================================================
                     batch_size = hand_verts.shape[0]
                     total_contact_loss = torch.tensor(0.0, device=self.device)
@@ -5370,7 +5378,7 @@ class HOLD(pl.LightningModule):
 
                 if self.rgb_dom_steps >= 1000:
                     old_geom_dyn = self.dynamic_geom_mult
-                    self.dynamic_geom_mult = max(self.dynamic_geom_mult * 0.7, 0.1)
+                    self.dynamic_geom_mult = max(self.dynamic_geom_mult * 0.9, 0.5)
                     logger.warning(
                         f"[CURRICULUM] RGB-dominant regime for {self.rgb_dom_steps} checks "
                         f"(ratio={gradient_ratio:.2f}) – "
@@ -5390,7 +5398,7 @@ class HOLD(pl.LightningModule):
                     # Boost SDS by ~2–3×, cap at 5×
                     self.dynamic_sds_mult = min(self.dynamic_sds_mult * 2.0, 5.0)
                     # Soften geometry by 0.5×, floor at 0.1
-                    self.dynamic_geom_mult = max(self.dynamic_geom_mult * 0.5, 0.1)
+                    self.dynamic_geom_mult = max(self.dynamic_geom_mult * 0.5, 0.5)
 
                     logger.warning(
                         f"[SDS-BOOST] Step {self.global_step}: "
@@ -6072,19 +6080,39 @@ class HOLD(pl.LightningModule):
             num_samples = 4096
             w_distill = 0.75  # strong anchoring through SDS/contact (was 0.5)
 
+        # After computing w_distill (0.5 / 0.75) and before distill_weight:
+        last_obj = getattr(self, "last_obj_chamfer", None)
+
+        if last_obj is not None:
+            # If geometry is bad (high Chamfer), strengthen pull to teacher surface
+            if last_obj > 0.05:
+                w_distill *= 1.5  # or 2.0
+            # If geometry is already good (low Chamfer), back off to avoid overconstraining
+            elif last_obj < 0.02:
+                w_distill *= 0.5
+
         # Post-freeze: keep non-zero weight so frozen grid still anchors
         if hasattr(object_model, 'sdf_grid') and not getattr(object_model.sdf_grid, 'requires_grad', True):
             w_distill = max(w_distill * 0.3, 0.1)  # ~0.1-0.25 floor after freeze
 
+        # Reactive boost from online monitor
+        if hasattr(self, "sdf_distill_boost_steps") and self.sdf_distill_boost_steps > 0:
+            w_distill *= 2.0
+            self.sdf_distill_boost_steps -= 1
+            # Reduce SDS to avoid competing signal
+            if hasattr(self, "sds_mult"):
+                self.sds_mult = getattr(self, "sds_mult", 1.0) * 0.5
+
         # ----- 1) Sample canonical points in [-1, 1]^3 -----
-        # Start with simple uniform sampling (can make surface-biased later)
-        n_uniform = num_samples // 4
+        # Make surface samples dominant: ~10% uniform, 90% near surface
+        n_uniform = max(num_samples // 10, 1)  # 10% uniform
         x_uniform = torch.rand(n_uniform, 3, device=device) * 2.0 - 1.0  # [n_uniform, 3]
 
         # Surface-biased samples from grid
         with torch.no_grad():
             sdf_vals = sdf_grid.detach().view(-1)
-            surface_mask = sdf_vals.abs() < 0.05  # threshold can be tuned
+            # Narrower band for sharper geometry
+            surface_mask = sdf_vals.abs() < 0.02
             surface_idx = surface_mask.nonzero(as_tuple=False).view(-1)
 
             coords_surface = None
@@ -6135,6 +6163,43 @@ class HOLD(pl.LightningModule):
         loss_sign = F.mse_loss(sign_student, sign_teacher)
 
         loss_distill = loss_l1 + 0.2 * loss_sign  # 0.2 is a good starting point
+
+        # ----- 4b) On-mesh surface + normal alignment (teacher mesh) -----
+        verts_t, normals_t = self._get_teacher_mesh_from_grid(object_model)
+        if verts_t is not None and normals_t is not None:
+            # Sample a small subset for efficiency
+            k_mesh = min(1024, verts_t.shape[0])
+            idx = torch.randint(0, verts_t.shape[0], (k_mesh,), device=verts_t.device)
+            pts_surface = verts_t[idx].clone().detach().requires_grad_(True)  # [k,3]
+            n_surface = normals_t[idx]  # [k,3]
+
+            # Student SDF on teacher surface
+            sdf_surface = self._query_object_implicit_sdf(object_node, pts_surface, batch)  # [k,1]
+
+            # Enforce SDF ≈ 0 on teacher surface
+            loss_surf_val = torch.mean(torch.abs(sdf_surface))
+
+            # Approximate normals of student via SDF gradient
+            grad_pts = torch.autograd.grad(
+                outputs=sdf_surface.sum(),
+                inputs=pts_surface,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+            )[0]  # [k,3]
+            n_student = F.normalize(grad_pts, dim=-1)
+            n_teacher = F.normalize(n_surface, dim=-1)
+            cos_sim = (n_student * n_teacher).sum(dim=-1).clamp(-1.0, 1.0)
+            loss_surf_norm = torch.mean(1.0 - cos_sim)
+
+            # Blend into total distillation loss
+            # loss_distill = loss_distill + 0.5 * loss_surf_val + 0.2 * loss_surf_norm
+            # Stronger surface anchoring
+            loss_distill = (
+                    loss_distill
+                    + 1.0 * loss_surf_val  # was 0.5
+                    + 0.5 * loss_surf_norm  # was 0.2
+            )
 
         # ----- 5) Implicit-network zero-cross diagnostics -----
         with torch.no_grad():
@@ -6656,6 +6721,55 @@ class HOLD(pl.LightningModule):
         # DON'T call .detach() - we need gradients to flow back to MANO params
 
         return hand_verts  # [B, 778, 3] with requires_grad=True
+
+    def _get_teacher_mesh_from_grid(self, object_model, max_verts=50000):
+        """
+        Extract (and cache) a low-res mesh from the teacher SDF grid using marching cubes.
+        Used only for distillation; no gradients needed.
+        """
+        import numpy as np
+        from skimage import measure
+
+        if not hasattr(object_model, "sdf_grid"):
+            return None, None
+
+        # Cache so we don't run marching cubes every step
+        if hasattr(object_model, "_distill_teacher_verts") and hasattr(object_model, "_distill_teacher_normals"):
+            return object_model._distill_teacher_verts, object_model._distill_teacher_normals
+
+        sdf_grid = object_model.sdf_grid.detach().cpu().numpy()  # [1, D, H, W] or [D,H,W]
+        if sdf_grid.ndim == 4:
+            sdf_grid = sdf_grid[0, 0]  # assume [1,1,D,H,W]
+
+        try:
+            verts, faces, normals, values = measure.marching_cubes(
+                sdf_grid, level=0.0,
+            )
+        except Exception:
+            return None, None
+
+        # Normalize verts from voxel index space [0, D/H/W) to [-1,1]^3
+        D, H, W = sdf_grid.shape
+        z = verts[:, 0] / (D - 1) * 2.0 - 1.0
+        y = verts[:, 1] / (H - 1) * 2.0 - 1.0
+        x = verts[:, 2] / (W - 1) * 2.0 - 1.0
+        verts_n = np.stack([x, y, z], axis=-1)  # [N,3] in [-1,1]
+
+        # Optional subsample for efficiency
+        if verts_n.shape[0] > max_verts:
+            idx = np.random.choice(verts_n.shape[0], max_verts, replace=False)
+            verts_n = verts_n[idx]
+            normals = normals[idx]
+
+        device = object_model.sdf_grid.device
+        verts_t = torch.from_numpy(verts_n).to(device=device, dtype=torch.float32)
+        normals_t = torch.from_numpy(normals).to(device=device, dtype=torch.float32)
+
+        # Cache
+        object_model._distill_teacher_verts = verts_t
+        object_model._distill_teacher_normals = normals_t
+
+        return verts_t, normals_t
 
     def _extract_object_mesh_from_sdf(self, batch):
         """Extract object mesh from implicit SDF via Marching Cubes."""

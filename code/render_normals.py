@@ -195,6 +195,12 @@ python render_normals.py \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1
+python render_normals.py \
+  --case hold_MC1_ho3d \
+  --load_ckpt logs/7e83a1f92_000035000/checkpoints/last.ckpt \
+  --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
+  --mute \
+  --agent_id -1
 '''
 
 '''
