@@ -2,19 +2,41 @@ import torch
 import torch.nn.functional as F
 
 
-def normal_consistency_loss(sdf_grid):
-    """Encourages smooth surfaces by penalizing SDF gradient variance."""
-    # supports [D,H,W] or [B,D,H,W]
-    if sdf_grid.dim() == 4:
-      sdf = sdf_grid  # [B,D,H,W]
+def normal_consistency_loss(sdf_grid: torch.Tensor) -> torch.Tensor:
+    """
+    Encourage smooth SDF normals by penalizing gradient variation.
+
+    Accepts:
+      - [B, 1, D, H, W]  (preferred: volumetric SDF grid)
+      - [B, D, H, W]
+      - [D, H, W]
+    Always treats the last three dims as spatial (D, H, W).
+    """
+    # Normalize shape to [B, 1, D, H, W]
+    if sdf_grid.dim() == 5:
+        # e.g., [B, 1, D, H, W] or [B, C, D, H, W]
+        sdf = sdf_grid
+    elif sdf_grid.dim() == 4:
+        # assume [B, D, H, W] → add channel dim
+        sdf = sdf_grid.unsqueeze(1)
+    elif sdf_grid.dim() == 3:
+        # [D, H, W] → add batch and channel dims
+        sdf = sdf_grid.unsqueeze(0).unsqueeze(0)
     else:
-      sdf = sdf_grid.unsqueeze(0)  # [1,D,H,W]
+        raise ValueError(f"normal_consistency_loss: unsupported sdf_grid shape {sdf_grid.shape}")
 
-    normals_x = sdf[..., 1:, :, :] - sdf[..., :-1, :, :]
-    normals_y = sdf[..., :, 1:, :] - sdf[..., :, :-1, :]
-    normals_z = sdf[..., :, :, 1:] - sdf[..., :, :, :-1]
+    # Finite-difference gradients along D, H, W
+    grad_z = sdf[:, :, 1:, :, :] - sdf[:, :, :-1, :, :]   # [B, 1, D-1, H,   W  ]
+    grad_y = sdf[:, :, :, 1:, :] - sdf[:, :, :, :-1, :]   # [B, 1, D,   H-1, W  ]
+    grad_x = sdf[:, :, :, :, 1:] - sdf[:, :, :, :, :-1]   # [B, 1, D,   H,   W-1]
 
-    loss = (normals_x.var() + normals_y.var() + normals_z.var()) / 3.0
+    # Simple consistency: penalize gradient energy (smooth SDF → stable normals)
+    loss = (
+        grad_x.pow(2).mean() +
+        grad_y.pow(2).mean() +
+        grad_z.pow(2).mean()
+    ) / 3.0
+
     return loss
 
 

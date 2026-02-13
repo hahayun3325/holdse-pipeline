@@ -2499,33 +2499,43 @@ class HOLD(pl.LightningModule):
         # 1. Normal Consistency
         # Model uses 'nodes', not 'servers' - confirmed via diagnostics
         logger.info(f"[GEOM-DEBUG] Before normal consistency: {geometric_loss.item()}")
-        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-            object_node = self.model.nodes['object']
 
-            # nodes contain server objects
-            if hasattr(object_node, 'server'):
-                object_server = object_node.server
+        w_nc = getattr(self.opt.loss, "w_normal_consistency", 0.0)
+        if w_nc > 0.0:
+            try:
+                # Reuse the same SDF extraction used for SDS / meshing
+                sdf_grid_nc = self._extract_sdf_grid_from_nodes(
+                    batch,
+                    resolution=self.grid_resolution,
+                )  # [B, 1, H, H, H]
 
-                if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'sdf_grid'):
-                    normal_loss = normal_consistency_loss(object_server.object_model.sdf_grid)
-                    if not torch.isfinite(normal_loss).all():
-                        logger.warning(
-                            f"[Normal Consistency] Step {self.global_step}: non-finite value "
-                            f"(min={torch.nan_to_num(normal_loss).min().item():.4e}, "
-                            f"max={torch.nan_to_num(normal_loss).max().item():.4e}); skipping term."
-                        )
-                    else:
-                        geometric_loss = geometric_loss + self.opt.loss.w_normal_consistency * normal_loss
+                if sdf_grid_nc is None or sdf_grid_nc.numel() == 0:
+                    raise ValueError("Normal-consistency SDF extraction returned empty tensor")
+
+                normal_loss = normal_consistency_loss(sdf_grid_nc)
+
+                if not torch.isfinite(normal_loss).all():
+                    logger.warning(
+                        f"[Normal Consistency] Step {self.global_step}: non-finite value "
+                        f"(min={torch.nan_to_num(normal_loss).min().item():.4e}, "
+                        f"max={torch.nan_to_num(normal_loss).max().item():.4e}); skipping term."
+                    )
+                else:
+                    geometric_loss = geometric_loss + w_nc * normal_loss
+
                     if self.global_step % 100 == 0:
                         logger.info(f"[Normal Consistency] Step {self.global_step}: {normal_loss.item():.6f}")
+                        logger.info("loss/normal_consistency", normal_loss.item())
 
-                    logger.info('loss/normal_consistency', normal_loss.item())
-                elif self.global_step == 0:
-                    logger.warning("⚠️ Object server has no 'sdf_grid' - skipping normal consistency")
-            elif self.global_step == 0:
-                logger.warning("⚠️ Object node has no 'server' - skipping normal consistency")
-        elif self.global_step == 0:
-            logger.warning("⚠️ Model has no 'nodes' or no 'object' node - Normal Consistency DISABLED")
+                    loss_output["loss/normal_consistency"] = float(normal_loss.item())
+
+            except Exception as e:
+                if self.global_step == 0 or self.global_step % 1000 == 0:
+                    logger.warning(f"⚠️ Normal Consistency disabled this step due to error: {e}")
+        else:
+            if self.global_step == 0:
+                logger.info("Normal Consistency weight is zero; term disabled in config.")
+
         logger.info(f"[GEOM-DEBUG] After normal consistency: {geometric_loss.item()}")
 
         # 2. Depth Smoothness (edge-aware) - UNCHANGED
