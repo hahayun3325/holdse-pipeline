@@ -39,7 +39,8 @@ from src.utils.memory_profiler import MemoryProfiler
 import subprocess
 from src.hold.loss_terms import get_smoothness_loss
 from src.hold.geometric_losses import normal_consistency_loss, depth_smoothness_loss
-
+from pytorch3d.structures import Meshes
+from pytorch3d.loss import mesh_normal_consistency
 # ========================================================================
 # PHASE 2: GHOP VALIDATION FUNCTION
 # ========================================================================
@@ -3293,7 +3294,6 @@ class HOLD(pl.LightningModule):
 
                         if obj_verts.shape[0] > 10 and obj_faces is not None and obj_faces.shape[0] > 0:
                             from pytorch3d.loss import mesh_laplacian_smoothing
-                            from pytorch3d.structures import Meshes
 
                             obj_mesh = Meshes(verts=[obj_verts], faces=[obj_faces])
 
@@ -3644,10 +3644,41 @@ class HOLD(pl.LightningModule):
             # VERTEX-BASED REGULARIZATION (for v3d_cano approach)
             # ================================================================
             if hasattr(object_server, 'object_model') and hasattr(object_server.object_model, 'v3d_cano'):
-                v3d_cano = object_server.object_model.v3d_cano
+                obj_model = object_server.object_model
+                v3d_cano = obj_model.v3d_cano
 
+                # ------------------------------------------------------------
+                # NEW: Object geometry freeze / unfreeze schedule
+                # ------------------------------------------------------------
+                # Config:
+                #   training.object_freeze_at:    step to start freezing v3d_cano
+                #   training.object_unfreeze_at:  step to re-enable gradients (optional)
+                training_cfg = getattr(self.opt, 'training', {})
+                freeze_at = training_cfg.get('object_freeze_at', None)
+                unfreeze_at = training_cfg.get('object_unfreeze_at', None)
+
+                if isinstance(v3d_cano, nn.Parameter):
+                    should_require_grad = True
+
+                    if freeze_at is not None and self.global_step >= freeze_at:
+                        # Within the freeze window until optional unfreeze_at
+                        if unfreeze_at is None or self.global_step < unfreeze_at:
+                            should_require_grad = False
+
+                    if v3d_cano.requires_grad != should_require_grad:
+                        v3d_cano.requires_grad = should_require_grad
+                        state = "FROZEN" if not should_require_grad else "UNFROZEN"
+                        logger.info(
+                            f"[Object Freeze] Step {self.global_step}: "
+                            f"set v3d_cano.requires_grad = {should_require_grad} ({state})"
+                        )
+
+                # Only apply vertex-based regularization when v3d_cano is trainable
                 if isinstance(v3d_cano, nn.Parameter) and v3d_cano.requires_grad:
                     if v3d_cano.shape[0] > 100:  # Only for dense meshes
+                        # --------------------------------------------------------
+                        # Existing: vertex spread / anti-collapse regularization
+                        # --------------------------------------------------------
                         # Average variance over XYZ
                         vertex_variance = v3d_cano.var(dim=0).mean()
 
@@ -3671,6 +3702,51 @@ class HOLD(pl.LightningModule):
                                 f"✅ [Vertex spread] step={self.global_step}, "
                                 f"loss={vertex_collapse_loss.item():.6f}, var={vertex_variance.item():.6f}"
                             )
+
+                        # --------------------------------------------------------
+                        # NEW: Vertex normal prior (template-aligned normals)
+                        # --------------------------------------------------------
+                        w_vn = getattr(self.opt.loss, "w_vertex_normal_prior", 0.0)
+                        faces = getattr(obj_model, "faces", None)
+                        template_normals = getattr(obj_model, "template_normals", None)
+
+                        if (
+                            w_vn > 0.0
+                            and faces is not None
+                            and template_normals is not None
+                            and faces.numel() > 0
+                        ):
+                            try:
+                                # Build a single-batch mesh and compute vertex normals
+                                mesh = Meshes(verts=[v3d_cano], faces=[faces])
+                                current_normals = mesh.verts_normals_padded()[0]  # [V, 3]
+
+                                # Ensure shapes match; truncate to the minimum length
+                                num_verts_current = current_normals.shape[0]
+                                num_verts_template = template_normals.shape[0]
+                                n = min(num_verts_current, num_verts_template)
+
+                                current = current_normals[:n]
+                                target = template_normals[:n].to(current.device)
+
+                                cos_sim = torch.nn.functional.cosine_similarity(
+                                    current, target, dim=-1, eps=1e-6
+                                ).clamp(-1.0, 1.0)
+                                normal_prior_loss = 1.0 - cos_sim.mean()
+
+                                total_loss = total_loss + w_vn * normal_prior_loss
+                                loss_output["loss/vertex_normal_prior"] = float(normal_prior_loss.item())
+
+                                if self.global_step % 100 == 0:
+                                    logger.info(
+                                        f"[Vertex Normal Prior] step={self.global_step}, "
+                                        f"loss={normal_prior_loss.item():.6f}, w={w_vn:.3f}"
+                                    )
+
+                            except Exception as e:
+                                # Fail-safe: log but do not break training
+                                if self.global_step % 500 == 0:
+                                    logger.warning(f"[Vertex Normal Prior] Failed at step {self.global_step}: {e}")
 
         # Now that ALL geometry terms are in geometric_loss, apply scaling
         # self._geom_scale: auto controller (Phase 3)
@@ -6743,7 +6819,8 @@ class HOLD(pl.LightningModule):
         return verts_t, normals_t
 
     def _extract_object_mesh_from_sdf(self, batch):
-        """Extract object mesh from implicit SDF via Marching Cubes."""
+        """Extract object mesh from implicit SDF via Marching Cubes and
+        remove small disconnected floaters by keeping only the largest component."""
         from skimage import measure
 
         # Extract SDF grid
@@ -6755,28 +6832,98 @@ class HOLD(pl.LightningModule):
         obj_faces_list = []
 
         for b in range(batch_size):
-            sdf_grid = object_sdf[b, 0].cpu().numpy().copy()  # ✅ FIX: Ensure contiguous memory  # [H, H, H]
-            logger.debug(f"[Stride Debug] sdf_grid strides: {sdf_grid.strides}, negative: {any(s < 0 for s in sdf_grid.strides)}")
+            # [H, H, H] grid for this batch element
+            sdf_grid = object_sdf[b, 0].cpu().numpy().copy()
+            logger.debug(
+                f"[Stride Debug] sdf_grid strides: {sdf_grid.strides}, "
+                f"negative: {any(s < 0 for s in sdf_grid.strides)}"
+            )
 
             try:
                 # Apply Marching Cubes
                 verts, faces, normals, values = measure.marching_cubes(
                     sdf_grid,
                     level=0.0,
-                    spacing=(3.0 / resolution, 3.0 / resolution, 3.0 / resolution)
+                    spacing=(3.0 / resolution, 3.0 / resolution, 3.0 / resolution),
                 )
-                # Debug: Check verts strides immediately after marching_cubes
-                logger.debug(f"[MC Debug] verts shape: {verts.shape}, strides: {verts.strides}, negative: {any(s < 0 for s in verts.strides)}")
+                logger.debug(
+                    f"[MC Debug] verts shape: {verts.shape}, strides: {verts.strides}, "
+                    f"negative: {any(s < 0 for s in verts.strides)}"
+                )
                 logger.debug(f"[MC Debug] faces shape: {faces.shape}, strides: {faces.strides}")
+
+                # ------------------------------------------------------------------
+                # Compactness / anti-floater: keep only largest connected component
+                # ------------------------------------------------------------------
+                num_verts = verts.shape[0]
+                num_faces = faces.shape[0]
+
+                if num_verts > 0 and num_faces > 0:
+                    # Build vertex adjacency from faces
+                    neighbors = [[] for _ in range(num_verts)]
+                    for f in faces:
+                        i, j, k = int(f[0]), int(f[1]), int(f[2])
+                        neighbors[i].append(j); neighbors[j].append(i)
+                        neighbors[j].append(k); neighbors[k].append(j)
+                        neighbors[k].append(i); neighbors[i].append(k)
+
+                    labels = -np.ones(num_verts, dtype=np.int32)
+                    comp_id = 0
+
+                    for v in range(num_verts):
+                        if labels[v] != -1:
+                            continue
+                        # BFS/DFS to label this component
+                        stack = [v]
+                        labels[v] = comp_id
+                        while stack:
+                            curr = stack.pop()
+                            for nb in neighbors[curr]:
+                                if labels[nb] == -1:
+                                    labels[nb] = comp_id
+                                    stack.append(nb)
+                        comp_id += 1
+
+                    if comp_id > 1:
+                        comp_sizes = np.bincount(labels)
+                        main_comp = int(comp_sizes.argmax())
+                        keep_mask = (labels == main_comp)
+                        kept_indices = np.nonzero(keep_mask)[0]
+
+                        # Map old vertex indices to new compact indices
+                        new_index = -np.ones(num_verts, dtype=np.int64)
+                        new_index[kept_indices] = np.arange(kept_indices.shape[0], dtype=np.int64)
+
+                        # Keep only faces fully inside the main component
+                        face_keep_mask = keep_mask[faces].all(axis=1)
+                        faces_main = faces[face_keep_mask]
+                        faces_main = new_index[faces_main]
+
+                        verts_main = verts[kept_indices]
+
+                        logger.debug(
+                            f"[Compactness] Batch {b}: {comp_id} components, "
+                            f"keeping {verts_main.shape[0]} verts / {faces_main.shape[0]} faces "
+                            f"(dropped {num_verts - verts_main.shape[0]} floater verts)."
+                        )
+
+                        verts = verts_main
+                        faces = faces_main
+                    else:
+                        logger.debug(f"[Compactness] Batch {b}: single component, no floater removal.")
+                else:
+                    logger.debug(f"[Compactness] Batch {b}: empty mesh from marching cubes.")
 
                 # Shift to [-1.5, 1.5] coordinate system
                 verts = verts - 1.5
 
-                # Convert to tensors
+                # Convert to tensors on the original device
                 obj_verts_list.append(torch.from_numpy(verts.copy()).float().to(object_sdf.device))
-                obj_faces_list.append(torch.from_numpy(faces.copy()).long().to(object_sdf.device))  # ✅ FIX: faces has negative strides
+                obj_faces_list.append(torch.from_numpy(faces.copy()).long().to(object_sdf.device))
 
-                logger.debug(f"[Phase 4] Extracted object mesh {b}: {verts.shape[0]} verts, {faces.shape[0]} faces")
+                logger.debug(
+                    f"[Phase 4] Extracted object mesh {b}: {verts.shape[0]} verts, {faces.shape[0]} faces"
+                )
 
             except Exception as e:
                 logger.warning(f"[Phase 4] Marching Cubes failed for batch {b}: {e}")
