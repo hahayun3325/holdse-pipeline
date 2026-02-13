@@ -2652,11 +2652,11 @@ class HOLD(pl.LightningModule):
                         logger.info(f"[sdf_grid] Has zero-crossing: {has_zero_crossing}")
 
                         if not is_param:
-                            logger.info("❌ CRITICAL: sdf_grid is (treated as derived grid).")
+                            logger.info("[sdf_grid] Not an nn.Parameter (treated as derived/cached grid).")
                         if not requires_grad:
-                            logger.error("❌ CRITICAL: sdf_grid has requires_grad=False!")
+                            logger.info("[sdf_grid] requires_grad=False (OK for derived grid).")
                         if not has_zero_crossing:
-                            logger.warning("⚠️  WARNING: sdf_grid has no zero-crossing at initialization!")
+                            logger.warning("⚠️ [sdf_grid] No zero-crossing at initialization!")
 
             # Check optimizer groups
             logger.info("\n[OPTIMIZER] Learning rates:")
@@ -2869,30 +2869,31 @@ class HOLD(pl.LightningModule):
 
                                 # ALWAYS initialize at activation step (removed degenerate check)
                                 logger.info(
-                                    f"[SDF INIT] Initializing SDF from template '{init_category}' "
+                                    f"[SDF INIT] Initializing SDF teacher grid from template '{init_category}' "
                                     f"(current std={sdf_std:.6f})..."
                                 )
 
                                 # Only initialize if degenerate
                                 template_verts = self.object_templates[init_category]
 
-                                # Initialize SDF from template
+                                # Build a volumetric teacher grid from the template mesh
                                 initialized_sdf = self._mesh_to_sdf_grid(
                                     template_verts,
                                     grid_resolution=sdf_grid.shape[-1],
-                                    padding=0.1
+                                    padding=0.1,
                                 )
 
-                                with torch.no_grad():
-                                    sdf_grid.data = initialized_sdf.to(sdf_grid.device)
+                                if initialized_sdf is not None:
+                                    with torch.no_grad():
+                                        # Treat as derived teacher: write detached values
+                                        sdf_grid.data = initialized_sdf.to(sdf_grid.device).detach()
 
-                                logger.info(
-                                    f"✅ [SDF INIT] Success! New stats: "
-                                    f"mean={sdf_grid.mean().item():.4f}, "
-                                    f"std={sdf_grid.std().item():.4f}, "
-                                    f"range=[{sdf_grid.min().item():.4f}, "
-                                    f"{sdf_grid.max().item():.4f}]"
-                                )
+                                    logger.info(
+                                        f"✅ [SDF INIT] Success! New stats: "
+                                        f"mean={sdf_grid.mean().item():.4f}, "
+                                        f"std={sdf_grid.std().item():.4f}, "
+                                        f"range=[{sdf_grid.min().item():.4f}, {sdf_grid.max().item():.4f}]"
+                                    )
                     except Exception as e:
                         logger.error(f"[SDF INIT] Failed: {e}")
 
@@ -3408,19 +3409,17 @@ class HOLD(pl.LightningModule):
         # ================================================================
         # SDF VALIDITY REGULARIZATION (Forces proper zero-crossings)
         # ================================================================
-        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-            object_node = self.model.nodes['object']
+        if hasattr(self.model, "nodes") and "object" in self.model.nodes:
+            object_node = self.model.nodes["object"]
 
-            if hasattr(object_node, 'server'):
+            if hasattr(object_node, "server"):
                 object_server = object_node.server
 
-                if (hasattr(object_server, 'object_model') and
-                        hasattr(object_server.object_model, 'sdf_grid')):
-
+                if hasattr(object_server, "object_model") and hasattr(object_server.object_model, "sdf_grid"):
                     sdf_grid = object_server.object_model.sdf_grid
-                    w_sdf_reg = getattr(self.opt.loss, 'w_sdf_reg', 1.0)
-                    w_eikonal = getattr(self.opt.loss, 'w_eikonal', 1.0)
-                    w_smooth = getattr(self.opt.loss, 'w_smooth', 1.0)
+                    w_sdf_reg = getattr(self.opt.loss, "w_sdf_reg", 1.0)
+                    w_eikonal = getattr(self.opt.loss, "w_eikonal", 1.0)
+                    w_smooth = getattr(self.opt.loss, "w_smooth", 1.0)
 
                     # Stronger SDF early
                     if self.global_step < sdf_warmup_end:
@@ -3434,232 +3433,175 @@ class HOLD(pl.LightningModule):
                         w_eikonal *= decay
                         w_smooth *= decay
 
-                    # Only apply if learnable
-                    if isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad:
+                    # ---------- 1) HEALTH + DIAGNOSTICS (ALWAYS) ----------
+                    sdf_min = sdf_grid.min()
+                    sdf_max = sdf_grid.max()
+                    sdf_std = sdf_grid.std()
+                    with torch.no_grad():
+                        # Simple 1D zero-crossing count along flattened grid
+                        flat = sdf_grid.view(-1)
+                        zero_crossings = ((flat[:-1] * flat[1:]) < 0).sum().item()
+                        zero_cross_ratio = zero_crossings / max(flat.numel() - 1, 1)
 
-                        # --- SDF health statistics ---
-                        sdf_min = sdf_grid.min()
-                        sdf_max = sdf_grid.max()
-                        sdf_std = sdf_grid.std()
-                        with torch.no_grad():
-                            # Simple 1D zero-crossing count along flattened grid
-                            flat = sdf_grid.view(-1)
-                            zero_crossings = ((flat[:-1] * flat[1:]) < 0).sum().item()
-                            zero_cross_ratio = zero_crossings / max(flat.numel() - 1, 1)
+                    loss_output["debug/sdf_zero_crossings"] = float(zero_crossings)
+                    loss_output["debug/sdf_zero_cross_ratio"] = float(zero_cross_ratio)
 
-                        # Expose for logging / debugging (1D stats)
-                        loss_output['debug/sdf_zero_crossings'] = float(zero_crossings)
-                        loss_output['debug/sdf_zero_cross_ratio'] = float(zero_cross_ratio)
+                    zc_x = ((sdf_grid[:, 1:, :, :] * sdf_grid[:, :-1, :, :]) < 0).sum()
+                    zc_y = ((sdf_grid[:, :, 1:, :] * sdf_grid[:, :, :-1, :]) < 0).sum()
+                    zc_z = ((sdf_grid[:, :, :, 1:] * sdf_grid[:, :, :, :-1]) < 0).sum()
+                    zero_cross_count = (zc_x + zc_y + zc_z).item()
+                    # Now safe to log into LOSS BREAKDOWN
+                    loss_output["loss/sdf_zero_crossings"] = float(zero_cross_count)
 
-                        if self.global_step % 1000 == 0:
-                            logger.info(
-                                f"[SDF-HEALTH] step={self.global_step} "
-                                f"min={sdf_min.item():.4f}, max={sdf_max.item():.4f}, "
-                                f"std={sdf_std.item():.4f}, "
-                                f"zero_crossings={zero_crossings}, "
-                                f"ratio={zero_cross_ratio:.6f}"
-                            )
+                    # NEW: choose thresholds for std and zero-cross count
+                    # Use config-driven warm-up boundary
+                    warmup_end = getattr(self.opt.training, "sdf_warmup_end", 2000)
+                    has_zero = (sdf_min < 0.0) and (sdf_max > 0.0)
 
-                        # Optional: hard safety stop after warm-up
-                        if zero_crossings == 0 and self.global_step > 5000:
-                            logger.error("[SDF-HEALTH] zero-crossings == 0 after warm-up → geometry collapsed")
-                            # Optional: hard safety stop after warm-up
-                            if zero_crossings == 0 and self.global_step > 5000:
-                                logger.error("[SDF-HEALTH] zero-crossings == 0 after warm-up → geometry collapsed")
-                                raise RuntimeError("SDF collapsed: zero-crossings == 0")
-
-                            # Option B: set a flag / schedule re-init
-
-                        # Coarse sign test: does grid span negative and positive?
-                        has_zero = (sdf_min < 0.0) & (sdf_max > 0.0)
-
-                        # Approximate zero-crossing count along each axis
-                        zc_x = ((sdf_grid[:, 1:, :, :] * sdf_grid[:, :-1, :, :]) < 0).sum()
-                        zc_y = ((sdf_grid[:, :, 1:, :] * sdf_grid[:, :, :-1, :]) < 0).sum()
-                        zc_z = ((sdf_grid[:, :, :, 1:] * sdf_grid[:, :, :, :-1]) < 0).sum()
-                        zero_cross_count = (zc_x + zc_y + zc_z).item()
-                        # Now safe to log into LOSS BREAKDOWN
-                        loss_output['loss/sdf_zero_crossings'] = float(zero_cross_count)
-
-                        # NEW: choose thresholds for std and zero-cross count
-                        # Use config-driven warm-up boundary
-                        warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 2000)
-                        has_zero = (sdf_min < 0.0) and (sdf_max > 0.0)
-
-                        if self.global_step < warmup_end:
-                            # Early: only require non-trivial std and sign span
-                            std_thresh = 1e-6
-                            is_degenerate = (not has_zero) or (sdf_std.item() < std_thresh)
-                            min_zc = 0  # for loss/penalty only
-                        else:
-                            # Later: add zero-cross count constraint
-                            std_thresh = 1e-5
-                            min_zc = 5
-                            is_degenerate = (
-                                (not has_zero) or
-                                (zero_cross_count < min_zc) or
-                                (sdf_std.item() < std_thresh)
-                            )
-
-                        self._sdf_is_valid = not is_degenerate
-
-                        # NEW: explicit zero-cross count penalty
-                        zero_cross_count_tensor = torch.tensor(
-                            float(zero_cross_count), device=sdf_grid.device
+                    if self.global_step < warmup_end:
+                        # Early: only require non-trivial std and sign span
+                        std_thresh = 1e-6
+                        is_degenerate = (not has_zero) or (sdf_std.item() < std_thresh)
+                        min_zc = 0  # for loss/penalty only
+                    else:
+                        # Later: add zero-cross count constraint
+                        std_thresh = 1e-5
+                        min_zc = 5
+                        is_degenerate = (
+                                (not has_zero)
+                                or (zero_cross_count < min_zc)
+                                or (sdf_std.item() < std_thresh)
                         )
-                        zc_target = float(min_zc)          # now min_zc is defined
-                        lambda_zc = 0.1                    # tune: 0.1–1.0
-                        zero_cross_count_loss = lambda_zc * F.relu(zc_target - zero_cross_count_tensor)
 
-                        if self.global_step % 100 == 0:
-                            logger.info('sdf/min', sdf_min.item())
-                            logger.info('sdf/max', sdf_max.item())
-                            logger.info('sdf/std', sdf_std.item())
-                            logger.info('sdf/has_zero', float(has_zero))
-                            logger.info('sdf/zero_cross_count', zero_cross_count)
+                    self._sdf_is_valid = not is_degenerate
 
-                        #
-                        # Distillation Starts Here
-                        # Hyperparameters (you can move to config)
-                        min_distill_step = getattr(self.opt.training, "distill_start_step", 4000)
-                        min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 2000)
-                        # Distill only when SDF has both signs (i.e., a meaningful surface)
-                        if has_zero and self.global_step >= min_distill_step:
-                            if zero_cross_count > min_grid_zero_cross:
-                                # Get implicit zero-crossings from previous step if available
-                                implicit_zc = getattr(self, '_last_implicit_zero_crossings', 1000)
+                    zero_cross_count_tensor = torch.tensor(float(zero_cross_count), device=sdf_grid.device)
+                    zc_target = float(min_zc)
+                    lambda_zc = 0.1
+                    zero_cross_count_loss = lambda_zc * F.relu(zc_target - zero_cross_count_tensor)
 
-                                # Reactive monitoring: boost if implicit surface is collapsing
-                                if implicit_zc < 300 and zero_cross_count > 10000:
-                                    self.sdf_distill_boost_steps = getattr(self, 'sdf_distill_boost_steps', 0) + 500
+                    if self.global_step % 100 == 0:
+                        logger.info("sdf/min", sdf_min.item())
+                        logger.info("sdf/max", sdf_max.item())
+                        logger.info("sdf/std", sdf_std.item())
+                        logger.info("sdf/has_zero", float(has_zero))
+                        logger.info("sdf/zero_cross_count", zero_cross_count)
 
-                                geometric_loss = self._add_sdf_distillation_loss(
-                                    object_model=object_server.object_model,
-                                    batch=batch,
-                                    step=self.global_step,
-                                    geometric_loss=geometric_loss,
-                                    loss_output=loss_output,
-                                )
+                    # Distillation from SDF grid into implicit network
+                    min_distill_step = getattr(self.opt.training, "distill_start_step", 4000)
+                    min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 2000)
+                    if has_zero and self.global_step >= min_distill_step and zero_cross_count > min_grid_zero_cross:
+                        implicit_zc = getattr(self, "_last_implicit_zero_crossings", 1000)
+                        if implicit_zc < 300 and zero_cross_count > 10000:
+                            self.sdf_distill_boost_steps = getattr(self, "sdf_distill_boost_steps", 0) + 500
 
-                        if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
-                            old_sds_mult = sds_mult
-                            sds_mult *= 0.5
+                        geometric_loss = self._add_sdf_distillation_loss(
+                            object_model=object_server.object_model,
+                            batch=batch,
+                            step=self.global_step,
+                            geometric_loss=geometric_loss,
+                            loss_output=loss_output,
+                        )
+
+                    # SDS soft gate and degeneracy counter / re-init
+                    if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
+                        old_sds_mult = sds_mult
+                        sds_mult *= 0.5
+                        logger.warning(
+                            f"[SDF-HEALTH] SDF invalid at step {self.global_step}: "
+                            f"scaling sds_mult {old_sds_mult:.3f} → {sds_mult:.3f} (soft gate)"
+                        )
+
+                    if not hasattr(self, "_sdf_bad_count"):
+                        self._sdf_bad_count = 0
+                    self._sdf_bad_count = self._sdf_bad_count + 1 if is_degenerate else 0
+
+                    if self._sdf_bad_count >= 5 and self.global_step > 1000:
+                        try:
+                            # You likely already have a helper like this; if not, keep your old re-init code here.
+                            self._reinit_object_sdf_from_template(object_server.object_model, batch)
                             logger.warning(
-                                f"[SDF-HEALTH] SDF invalid at step {self.global_step}: "
-                                f"scaling sds_mult {old_sds_mult:.3f} → {sds_mult:.3f} (soft gate)"
+                                f"[SDF Reg] Reinitialized SDF from template after {self._sdf_bad_count} bad steps."
                             )
-                        # --------------------------------------------------------
-                        # Degeneracy counter + optional re-init
-                        # --------------------------------------------------------
-                        if not hasattr(self, '_sdf_bad_count'):
+                        except Exception as e:
+                            logger.error(f"[SDF Reg] SDF re-init failed: {e}")
+                        finally:
                             self._sdf_bad_count = 0
 
-                        if is_degenerate:
-                            self._sdf_bad_count += 1
-                        else:
-                            self._sdf_bad_count = 0
+                    # --------------------------------------------------------
+                    # 1. Zero-crossing encouragement (mean ≈ 0)
+                    # --------------------------------------------------------
+                    mean_sdf = sdf_grid.mean()
+                    zero_crossing_loss = torch.abs(mean_sdf) + F.relu(1e-3 - sdf_std)
 
-                        if self._sdf_bad_count >= 5 and self.global_step > 1000:
-                            try:
-                                # You likely already have a helper like this; if not, keep your old re-init code here.
-                                self._reinit_object_sdf_from_template(object_server.object_model, batch)
-                                logger.warning(
-                                    f"[SDF Reg] Reinitialized SDF from template after {self._sdf_bad_count} bad steps."
-                                )
-                            except Exception as e:
-                                logger.error(f"[SDF Reg] SDF re-init failed: {e}")
-                            finally:
-                                self._sdf_bad_count = 0
+                    # 2. Gradient magnitude / eikonal / range
+                    grad_x = sdf_grid[:, 1:, :, :] - sdf_grid[:, :-1, :, :]
+                    grad_y = sdf_grid[:, :, 1:, :] - sdf_grid[:, :, :-1, :]
+                    grad_z = sdf_grid[:, :, :, 1:] - sdf_grid[:, :, :, :-1]
+                    gradient_magnitude = (grad_x.pow(2).mean() + grad_y.pow(2).mean() + grad_z.pow(2).mean()).sqrt()
+                    gradient_loss = F.relu(0.1 - gradient_magnitude) * 0.5
+                    smoothness_loss = gradient_magnitude  # NEW: define smoothness_loss for SDF block
 
-                        # --------------------------------------------------------
-                        # 1. Zero-crossing encouragement (mean ≈ 0)
-                        # --------------------------------------------------------
-                        mean_sdf = sdf_grid.mean()
-                        zero_crossing_loss = (
-                                1.0 * torch.abs(mean_sdf) +  # was 0.1
-                                1.0 * F.relu(1e-3 - sdf_std)  # was 0.1
-                        )
+                    # --------------------------------------------------------
+                    # 3. Eikonal loss (|∇φ| ≈ 1)
+                    # --------------------------------------------------------
+                    eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.1
 
-                        # --------------------------------------------------------
-                        # 2. Gradient magnitude (prevent flat fields)
-                        # --------------------------------------------------------
-                        grad_x = sdf_grid[:, 1:, :, :] - sdf_grid[:, :-1, :, :]
-                        grad_y = sdf_grid[:, :, 1:, :] - sdf_grid[:, :, :-1, :]
-                        grad_z = sdf_grid[:, :, :, 1:] - sdf_grid[:, :, :, :-1]
+                    # --------------------------------------------------------
+                    # 4. Range encouragement (span positive/negative)
+                    #    Push min < -0.1 and max > 0.1, softly
+                    # --------------------------------------------------------
+                    range_loss = (F.relu(0.1 + sdf_min) + F.relu(0.1 - sdf_max)) * 0.5
 
-                        gradient_magnitude = (
-                            grad_x.pow(2).mean() +
-                            grad_y.pow(2).mean() +
-                            grad_z.pow(2).mean()
-                        ).sqrt()
-
-                        # Encourage gradients not to collapse to 0
-                        gradient_loss = F.relu(0.1 - gradient_magnitude) * 0.5
-
-                        # --------------------------------------------------------
-                        # 3. Eikonal loss (|∇φ| ≈ 1)
-                        # --------------------------------------------------------
-                        eikonal_loss = (gradient_magnitude - 1.0).pow(2) * 0.1
-
-                        # --------------------------------------------------------
-                        # 4. Range encouragement (span positive/negative)
-                        #    Push min < -0.1 and max > 0.1, softly
-                        # --------------------------------------------------------
-                        range_loss = (
-                            F.relu(0.1 + sdf_min) +
-                            F.relu(0.1 - sdf_max)
-                        ) * 0.5  # was 0.1
-
-                        # --------------------------------------------------------
-                        # 5. SDF–v3d coupling: encourage SDF(v3d_cano) ≈ 0
-                        # --------------------------------------------------------
-                        sdf_on_verts_loss = 0.0
-                        if hasattr(object_server, "object_model") and hasattr(object_server.object_model, "v3d_cano"):
-                            v3d = object_server.object_model.v3d_cano  # (N, 3) canonical vertices
+                # --------------------------------------------------------
+                    # 5. SDF–v3d coupling: encourage SDF(v3d_cano) ≈ 0
+                    # --------------------------------------------------------
+                    sdf_on_verts_loss = 0.0
+                    v_std = None
+                    if hasattr(object_server, "object_model") and hasattr(object_server.object_model, "v3d_cano"):
+                        v3d = object_server.object_model.v3d_cano
+                        if isinstance(v3d, torch.Tensor) and v3d.numel() > 0:
                             v_std = v3d.std().item()
+                            coords = v3d.unsqueeze(0).unsqueeze(0)[..., [2, 1, 0]]
+                            sdf_samples = F.grid_sample(
+                                sdf_grid.unsqueeze(0),
+                                coords.view(1, 1, -1, 1, 3),
+                                align_corners=True,
+                                mode="bilinear",
+                                padding_mode="border",
+                            )
+                            sdf_on_verts_loss = sdf_samples.abs().mean()
 
-                            if isinstance(v3d, torch.Tensor) and v3d.numel() > 0:
-                                coords = v3d.unsqueeze(0).unsqueeze(0)
-                                coords = coords[..., [2, 1, 0]]
-                                sdf_samples = torch.nn.functional.grid_sample(
-                                    sdf_grid.unsqueeze(0),
-                                    coords.view(1, 1, -1, 1, 3),
-                                    align_corners=True,
-                                    mode="bilinear",
-                                    padding_mode="border",
-                                )
-                                sdf_on_verts_loss = sdf_samples.abs().mean()
-
-                        w_v2s_base = getattr(self.opt.loss, "w_sdf_on_verts", 5.0)
-                        if self.global_step < sdf_warmup_end:
-                            # Let SDF move more freely vs. noisy v3d at the very beginning
-                            w_v2s = 0.1 * w_v2s_base
+                    w_v2s_base = getattr(self.opt.loss, "w_sdf_on_verts", 5.0)
+                    if self.global_step < sdf_warmup_end:
+                        # Let SDF move more freely vs. noisy v3d at the very beginning
+                        w_v2s = 0.1 * w_v2s_base
+                    else:
+                        # Softer coupling once SDF is at least somewhat healthy
+                        if getattr(self, "_sdf_is_valid", False):
+                            w_v2s = 5.0 * w_v2s_base    # was 20.0
                         else:
-                            # Softer coupling once SDF is at least somewhat healthy
-                            if getattr(self, "_sdf_is_valid", False):
-                                w_v2s = 5.0 * w_v2s_base    # was 20.0
-                            else:
-                                w_v2s = 1.0 * w_v2s_base    # light pull even when invalid
+                            w_v2s = 1.0 * w_v2s_base    # light pull even when invalid
 
-                        # Finally, kill coupling if v3d is clearly degenerate
-                        if 'v_std' in locals() and v_std < 0.01:  # was 0.02
-                            w_v2s = 0.0
+                    # Finally, kill coupling if v3d is clearly degenerate
+                    if v_std is not None and v_std < 0.01:  # was 0.02
+                        w_v2s = 0.0
 
-                        # --------------------------------------------------------
-                        # Combine with configurable weights
-                        # --------------------------------------------------------
+                    # --------------------------------------------------------
+                    # Combine with configurable weights
+                    # --------------------------------------------------------
+                    # ---------- 2) DECIDE IF WE BACKPROP THROUGH sdf_grid ----------
+                    can_reg = isinstance(sdf_grid, nn.Parameter) and sdf_grid.requires_grad
+
+                    if can_reg:
+                        # zero_cross_count_loss, gradient_loss, eikonal_loss, range_loss, v2s coupling
                         sdf_regularization = (
-                                zero_crossing_loss
-                                + zero_cross_count_loss  # ← NEW
-                                + w_smooth * gradient_loss
-                                + w_eikonal * eikonal_loss
-                                + range_loss
-                                + w_v2s * sdf_on_verts_loss
+                                w_sdf_reg * (zero_cross_count_loss + range_loss) +
+                                w_eikonal * eikonal_loss +
+                                w_smooth * smoothness_loss
                         )
-                        sdf_regularization = w_sdf_reg * sdf_regularization
-
-
                         geometric_loss = geometric_loss + sdf_regularization
+
                         if 'loss_components' in locals():
                             loss_components['object_shape'] += sdf_regularization.item()
                         loss_output['loss/sdf_regularization'] = sdf_regularization.item()
@@ -3675,25 +3617,19 @@ class HOLD(pl.LightningModule):
                             logger.info('loss/sdf_eikonal', eikonal_loss.item())
                             logger.info('loss/sdf_range', range_loss.item())
 
-                            logger.info(
-                                f"✅ SDF Regularization: zero_cross={zero_crossing_loss.item():.6f}, "
-                                f"grad={gradient_loss.item():.6f}, eikonal={eikonal_loss.item():.6f}, "
-                                f"range={range_loss.item():.6f}"
-                            )
-
-                        # Degeneracy counter + optional re-init (keep your existing logic here)
-                        # e.g., increment self._sdf_bad_count when is_degenerate and
-                        # call self._reinit_object_sdf_from_template(...) after a few bad steps
-                        # (you already have this code immediately following; no change needed)
                     else:
+                        # Non-learnable / derived SDF: only use as diagnostic, no gradients
                         if self.global_step % 500 == 0:
-                            logger.warning(
-                                f"[SDF Reg] SDF grid not learnable: "
-                                f"is_param={isinstance(sdf_grid, nn.Parameter)}, "
-                                f"requires_grad={getattr(sdf_grid, 'requires_grad', None)}"
+                            logger.info(
+                                "[SDF Reg] Skipping SDF regularization; sdf_grid is treated as "
+                                f"derived/cached (is_param={can_reg})."
                             )
                         # Skip regularization
-
+                    # B) Vertex coupling that should still move v3d_cano even if sdf_grid is derived
+                    if sdf_on_verts_loss != 0.0 and w_v2s > 0.0:
+                        v2s_term = w_v2s * sdf_on_verts_loss
+                        geometric_loss = geometric_loss + v2s_term
+                        loss_output["loss/sdf_on_verts"] = float(v2s_term.item())
             # ================================================================
             # VERTEX-BASED REGULARIZATION (for v3d_cano approach)
             # ================================================================
@@ -5764,20 +5700,28 @@ class HOLD(pl.LightningModule):
             return
 
         if not hasattr(object_model, 'sdf_grid'):
-            logger.error("[SDF REINIT] object_model has no sdf_grid attribute.")
+            # In mesh-first mode we may not have a persistent grid; just warn and return.
+            logger.warning("[SDF REINIT] object_model has no sdf_grid attribute; "
+                           "skipping SDF teacher reinit.")
             return
 
         sdf_grid = object_model.sdf_grid
         template_verts = self.object_templates[init_category]
 
+        # Build a fresh volumetric teacher grid from the template mesh
         initialized_sdf = self._mesh_to_sdf_grid(
             template_verts,
             grid_resolution=sdf_grid.shape[-1],
-            padding=0.1
+            padding=0.1,
         )
 
+        if initialized_sdf is None:
+            logger.error(f"[SDF REINIT] mesh_to_sdf_grid failed for '{init_category}'.")
+            return
+
         with torch.no_grad():
-            sdf_grid.data = initialized_sdf.to(sdf_grid.device)
+            # Treat sdf_grid as a derived / teacher field
+            sdf_grid.data = initialized_sdf.to(sdf_grid.device).detach()
 
         logger.info(
             f"[SDF REINIT] Success for '{init_category}'. "
@@ -5838,6 +5782,28 @@ class HOLD(pl.LightningModule):
             if object_node is None:
                 logger.warning("[Helper] No object node found, returning zero SDF")
                 return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+
+            # >>> NEW STEP 3.5: mesh → SDF from v3d_cano <<<
+            obj_model = getattr(getattr(object_node, "server", None), "object_model", None)
+            if obj_model is not None and hasattr(obj_model, "v3d_cano"):
+                verts = obj_model.v3d_cano
+                if isinstance(verts, torch.Tensor) and verts.numel() > 0:
+                    sdf = self._mesh_to_sdf_grid(
+                        verts,
+                        grid_resolution=resolution,
+                        padding=0.1,
+                    )  # returns [1, D, H, W] or [D,H,W]
+
+                    if sdf is not None:
+                        # Normalize shape to [1,1,D,H,W]
+                        if sdf.dim() == 3:
+                            sdf = sdf.unsqueeze(0).unsqueeze(0)  # [1,1,D,H,W]
+                        elif sdf.dim() == 4:
+                            sdf = sdf.unsqueeze(0)              # [1,1,D,H,W]
+
+                        object_sdf = sdf.expand(B, -1, -1, -1, -1).contiguous()
+                        return object_sdf
+                # if verts empty or mesh_to_sdf_grid failed, fall through to old SDF methods
 
             grid_flat = grid.reshape(B, -1, 3)
 
@@ -6051,12 +6017,16 @@ class HOLD(pl.LightningModule):
 
     def _add_sdf_distillation_loss(self, object_model, batch, step, geometric_loss, loss_output):
         """
-        Distill SDF values from object_model.sdf_grid (teacher) into
-        the object's implicit_network (student). Modifies geometric_loss in-place.
+        Distill SDF values from object_model.sdf_grid (teacher, derived / non-learnable)
+        into the object's implicit_network (student). Modifies geometric_loss in-place.
         """
         sdf_grid = getattr(object_model, "sdf_grid", None)
         if sdf_grid is None:
             return geometric_loss  # ← important: don't return None
+
+        # Treat sdf_grid as a fixed teacher field (no gradients into it)
+        # Keep a separate local tensor so later code doesn't accidentally use the original
+        sdf_grid_teacher = sdf_grid.detach()
 
         # Find the object node / implicit network
         nodes = getattr(self.model, "nodes", None)
@@ -6069,10 +6039,9 @@ class HOLD(pl.LightningModule):
         if object_node is None or not hasattr(object_node, "implicit_network"):
             return geometric_loss  # ← again, keep geometric_loss unchanged
 
-        device = sdf_grid.device
+        device = sdf_grid_teacher.device
 
         distill_start_step = getattr(self.opt.training, "distill_start_step", 6000)
-
         if step < distill_start_step:
             return geometric_loss  # safety
 
@@ -6084,9 +6053,8 @@ class HOLD(pl.LightningModule):
             num_samples = 4096
             w_distill = 0.75  # strong anchoring through SDS/contact (was 0.5)
 
-        # After computing w_distill (0.5 / 0.75) and before distill_weight:
+        # Modulate by last object Chamfer
         last_obj = getattr(self, "last_obj_chamfer", None)
-
         if last_obj is not None:
             # If geometry is bad (high Chamfer), strengthen pull to teacher surface
             if last_obj > 0.05:
@@ -6095,9 +6063,9 @@ class HOLD(pl.LightningModule):
             elif last_obj < 0.02:
                 w_distill *= 0.5
 
-        # Post-freeze: keep non-zero weight so frozen grid still anchors
-        if hasattr(object_model, 'sdf_grid') and not getattr(object_model.sdf_grid, 'requires_grad', True):
-            w_distill = max(w_distill * 0.3, 0.1)  # ~0.1-0.25 floor after freeze
+        # Post-freeze: even if sdf_grid is non-learnable, keep some distillation weight
+        if not getattr(object_model.sdf_grid, 'requires_grad', True):
+            w_distill = max(w_distill * 0.3, 0.1)  # ~0.1-0.25 floor after freeze / derived grid
 
         # Reactive boost from online monitor
         if hasattr(self, "sdf_distill_boost_steps") and self.sdf_distill_boost_steps > 0:
@@ -6114,9 +6082,8 @@ class HOLD(pl.LightningModule):
 
         # Surface-biased samples from grid
         with torch.no_grad():
-            sdf_vals = sdf_grid.detach().view(-1)
-            # Narrower band for sharper geometry
-            surface_mask = sdf_vals.abs() < 0.02
+            sdf_vals = sdf_grid_teacher.view(-1)
+            surface_mask = sdf_vals.abs() < 0.02   # narrow band
             surface_idx = surface_mask.nonzero(as_tuple=False).view(-1)
 
             coords_surface = None
@@ -6125,7 +6092,7 @@ class HOLD(pl.LightningModule):
                 choose = torch.randint(0, surface_idx.numel(), (k,), device=device)
                 vox_idx = surface_idx[choose]  # [k]
 
-                D, H, W = sdf_grid.shape[1:]
+                D, H, W = sdf_grid_teacher.shape[1:]
                 z = (vox_idx // (H * W)).float()
                 y = ((vox_idx % (H * W)) // W).float()
                 x = (vox_idx % W).float()
@@ -6140,17 +6107,17 @@ class HOLD(pl.LightningModule):
         if coords_surface is not None:
             # Distill in the same canonical space you already use: [x,y,z] in [-1,1]
             x_surface = coords_surface[..., [2, 1, 0]]  # back to (x,y,z)
-            x_c = torch.cat([x_uniform, x_surface], dim=0)
+            x_c = torch.cat([x_uniform, x_surface], dim=0)  # [N,3]
         else:
-            x_c = x_uniform
+            x_c = x_uniform  # fallback: uniform only
 
         # ----- 2) Teacher: query SDF grid (detached) -----
         # Reorder coordinates: (x,y,z) → (z,y,x) for grid_sample
         coords = x_c[..., [2, 1, 0]].unsqueeze(0).unsqueeze(0)  # [1, 1, N, 3]
 
         sdf_teacher = F.grid_sample(
-            sdf_grid.detach().unsqueeze(0),  # [1, 1, D, H, W]
-            coords.view(1, 1, -1, 1, 3),     # [1, 1, N, 1, 3]
+            sdf_grid_teacher.unsqueeze(0),          # [1, 1, D, H, W]
+            coords.view(1, 1, -1, 1, 3),            # [1, 1, N, 1, 3]
             mode="bilinear",
             padding_mode="border",
             align_corners=True,
@@ -6159,16 +6126,16 @@ class HOLD(pl.LightningModule):
         # ----- 3) Student: query implicit network -----
         sdf_student = self._query_object_implicit_sdf(object_node, x_c, batch)  # [N, 1]
 
-        # ----- 4) Distillation loss -----
+        # ----- 4) Distillation losses -----
         loss_l1 = F.l1_loss(sdf_student, sdf_teacher)
 
         sign_teacher = torch.tanh(10.0 * sdf_teacher)
         sign_student = torch.tanh(10.0 * sdf_student)
         loss_sign = F.mse_loss(sign_student, sign_teacher)
 
-        loss_distill = loss_l1 + 0.2 * loss_sign  # 0.2 is a good starting point
+        loss_distill = loss_l1 + 0.2 * loss_sign
 
-        # ----- 4b) On-mesh surface + normal alignment (teacher mesh) -----
+        # ----- 4b) On-mesh surface + normal alignment (teacher mesh from grid) -----
         verts_t, normals_t = self._get_teacher_mesh_from_grid(object_model)
         if verts_t is not None and normals_t is not None:
             # Sample a small subset for efficiency
@@ -6200,12 +6167,12 @@ class HOLD(pl.LightningModule):
             # loss_distill = loss_distill + 0.5 * loss_surf_val + 0.2 * loss_surf_norm
             # Stronger surface anchoring
             loss_distill = (
-                    loss_distill
-                    + 1.0 * loss_surf_val  # was 0.5
-                    + 0.5 * loss_surf_norm  # was 0.2
+                loss_distill
+                + 1.0 * loss_surf_val   # stronger surface anchoring
+                + 0.5 * loss_surf_norm
             )
 
-        # ----- 5) Implicit-network zero-cross diagnostics -----
+        # ----- 5) Student SDF diagnostics -----
         with torch.no_grad():
             s_min = sdf_student.min()
             s_max = sdf_student.max()
@@ -6225,21 +6192,11 @@ class HOLD(pl.LightningModule):
         # For breakdown: use a 'loss/...' key, parallel to the grid one
         loss_output['loss/implicit_sdf_zero_crossings'] = float(zero_crossings_student)
 
-        # Reactive boost from online monitor
-        if hasattr(self, 'sdf_distill_boost_steps') and self.sdf_distill_boost_steps > 0:
-            w_distill *= 2.0
-            self.sdf_distill_boost_steps -= 1
-            # Reduce SDS to avoid competing signal
-            if hasattr(self, 'sds_mult'):
-                self.sds_mult = getattr(self, 'sds_mult', 1.0) * 0.5
-
-        # Existing logging for distillation loss
+        # Final weight and aggregation
         distill_weight = getattr(self.opt.loss, "w_sdf_distill", 1.0) * w_distill
         geometric_loss = geometric_loss + distill_weight * loss_distill
         loss_output["loss/sdf_distill_raw"] = loss_distill
         loss_output["loss/sdf_distill"] = distill_weight * loss_distill
-
-        # Log for diagnostics
         loss_output["loss_sdf_distill_raw"] = loss_distill
         loss_output["loss_sdf_distill"] = distill_weight * loss_distill
 
