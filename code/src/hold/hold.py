@@ -2403,60 +2403,66 @@ class HOLD(pl.LightningModule):
 
         step = self.global_step
 
-        # Hyperparameters for warm-up (can later be moved to config)
-        geom_warmup_end = getattr(self.opt.training, 'geom_warmup_end', 2000)  # Phase 2.1
+        # Hyperparameters for warm-up (can be overridden in config)
+        geom_warmup_end = getattr(self.opt.training, 'geom_warmup_end', 2000)   # Phase 2.1
         render_warmup_end = getattr(self.opt.training, 'render_warmup_end', 4000)  # Phase 2.2
-        joint_warmup_end = getattr(self.opt.training, 'joint_warmup_end', 8000)  # Phase 2.3
+        joint_warmup_end = getattr(self.opt.training, 'joint_warmup_end', 8000)    # Phase 2.3
         sdf_warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 2000)
 
-        # Persistent dynamic multipliers for closed-loop curriculum
+        # Persistent dynamic multipliers for closed-loop curriculum (INIT IF MISSING)
         if not hasattr(self, "dynamic_sds_mult"):
             self.dynamic_sds_mult = 1.0
         if not hasattr(self, "dynamic_geom_mult"):
             self.dynamic_geom_mult = 1.0
 
-        # Default multipliers (used after warm-up / existing phases)
-        base_mult = 1.0  # scales base_loss (RGB + masks etc.)
-        geom_mult = 1.0  # scales geometric_loss (normal, depth, chamfer, SDF reg, obj chamfer)
-        sds_mult = 1.0  # scales SDS loss before adding to total
+        # Optional: read freeze schedule to down-weight geometry after shape solidifies
+        training_cfg = getattr(self.opt, 'training', None)
+        freeze_at = getattr(training_cfg, 'object_freeze_at', None) if training_cfg is not None else None
+        unfreeze_at = getattr(training_cfg, 'object_unfreeze_at', None) if training_cfg is not None else None
+
+        # Default multipliers
+        base_mult = 1.0   # scales base_loss (RGB + masks etc.)
+        geom_mult = 1.0   # scales geometric_loss (normal, depth, chamfer, SDF reg, obj chamfer)
+        sds_mult = 1.0    # scales SDS loss before adding to total
         contact_mult = 1.0
         temporal_mult = 1.0
-        phase_tag = "main_training"  # default
+        phase_tag = "main_training"
+
         # Determine warm-up phase and set multipliers
         if step < geom_warmup_end:
-            # Phase 2.1: GEOMETRY-ONLY warm-up
-            base_mult = 0.0  # ignore RGB/masks for now
-            geom_mult = 1.0  # full geometry
-            sds_mult = 0.0  # no SDS yet
+            # Phase 2.1: GEOMETRY-ONLY warm-up (build block shape)
+            base_mult = 0.0
+            geom_mult = 1.0
+            sds_mult = 0.0
             contact_mult = 0.0
-            temporal_mult = 0.0
             phase_tag = "geom_warmup"
         elif step < render_warmup_end:
-            # Phase 2.2: RENDERING-ONLY warm-up
-            base_mult = 1.0  # train RGB/rendering
-            geom_mult = 1.0  # was 0.5 - keep geometry alive, not frozen
-            sds_mult = 0.0  # still no SDS
-            contact_mult = 0.0
-            temporal_mult = 0.0
-            phase_tag = "render_warmup"
-        elif step < joint_warmup_end:
-            # Phase 2.3: JOINT warm-up
-            progress = float(step - render_warmup_end) / max(joint_warmup_end - render_warmup_end, 1)
+            # Phase 2.2: Add RGB, still no SDS/contact
             base_mult = 1.0
             geom_mult = 1.0
-            sds_mult = 0.3 * progress  # ramp SDS from 0 → 0.3
+            sds_mult = 0.0
             contact_mult = 0.0
-            temporal_mult = 0.0
-            phase_tag = "joint_warmup"
-        # NEW: SDF–first window (geometry focus, but still deprioritize RGB/SDS)
-        elif step < sdf_warmup_end:
-            base_mult = 0.2  # let RGB in, but weakly
-            geom_mult = 0.5  # was 1.5 – soften early geometric dominance
-            sds_mult = 0.0   # keep SDS off until SDF is healthy
-            phase_tag = "sdf_warmup"
-        else:
-            phase_tag = "main_training"
+            phase_tag = "rgb_geom"
+        elif step < joint_warmup_end:
+            # Phase 2.3: Turn on SDS and start contact early to anchor pose
+            base_mult = 1.0
             geom_mult = 1.0
+            sds_mult = 1.0
+            contact_mult = 1.0   # earlier, stronger contact
+            phase_tag = "rgb_geom_sds_contact"
+        else:
+            # Main training: all terms active
+            base_mult = 1.0
+            geom_mult = 1.0
+            sds_mult = 1.0
+            contact_mult = 1.0
+            phase_tag = "main_training"
+        # After object is frozen, de-emphasize geometry and let contact/SDS fine-tune pose.
+        # If object_unfreeze_at is set, restore full weights after that step.
+        if freeze_at is not None and step >= freeze_at:
+            if unfreeze_at is None or step < unfreeze_at:
+                geom_mult *= 0.3     # geometry still present but reduced
+                contact_mult *= 1.5  # let contact dominate pose refinement
 
         # Apply closed-loop dynamic multipliers
         geom_mult *= self.dynamic_geom_mult
@@ -2504,35 +2510,45 @@ class HOLD(pl.LightningModule):
         w_nc = getattr(self.opt.loss, "w_normal_consistency", 0.0)
         if w_nc > 0.0:
             try:
-                # Reuse the same SDF extraction used for SDS / meshing
-                sdf_grid_nc = self._extract_sdf_grid_from_nodes(
-                    batch,
-                    resolution=self.grid_resolution,
-                )  # [B, 1, H, H, H]
+                # FIX: Use mesh-based normal consistency instead of SDF gradients
+                object_server = self.model.nodes['object'].server
+                obj_model = object_server.object_model
 
-                if sdf_grid_nc is None or sdf_grid_nc.numel() == 0:
-                    raise ValueError("Normal-consistency SDF extraction returned empty tensor")
+                if hasattr(obj_model, 'v3d_cano') and hasattr(obj_model, 'faces'):
+                    # Create mesh from canonical vertices and faces
+                    mesh = Meshes(
+                        verts=[obj_model.v3d_cano],
+                        faces=[obj_model.faces]
+                    )
+                    normal_loss = mesh_normal_consistency(mesh)
 
-                normal_loss = normal_consistency_loss(sdf_grid_nc)
-
-                if not torch.isfinite(normal_loss).all():
-                    logger.warning(
-                        f"[Normal Consistency] Step {self.global_step}: non-finite value "
-                        f"(min={torch.nan_to_num(normal_loss).min().item():.4e}, "
-                        f"max={torch.nan_to_num(normal_loss).max().item():.4e}); skipping term."
+                    # CRITICAL DIAGNOSTIC: Verify non-zero loss
+                    logger.info(
+                        f"[NORMAL DEBUG] Step {self.global_step}: mesh_normal_consistency = "
+                        f"{normal_loss.item():.6f}, verts={obj_model.v3d_cano.shape}, "
+                        f"faces={obj_model.faces.shape}"
                     )
                 else:
+                    # Fallback: Skip if mesh not available (don't use dead SDF gradient loss)
+                    logger.warning(
+                        f"[Normal Consistency] Step {self.global_step}: v3d_cano/faces not available, "
+                        f"skipping normal consistency."
+                    )
+                    normal_loss = None
+
+                if normal_loss is not None and torch.isfinite(normal_loss).all():
                     geometric_loss = geometric_loss + w_nc * normal_loss
-
-                    if self.global_step % 100 == 0:
-                        logger.info(f"[Normal Consistency] Step {self.global_step}: {normal_loss.item():.6f}")
-                        logger.info("loss/normal_consistency", normal_loss.item())
-
-                    loss_output["loss/normal_consistency"] = float(normal_loss.item())
+                elif normal_loss is not None:
+                    logger.warning(
+                        f"[Normal Consistency] Step {self.global_step}: non-finite value "
+                        f"{normal_loss.item():.4e}; skipping term."
+                    )
 
             except Exception as e:
-                if self.global_step == 0 or self.global_step % 1000 == 0:
-                    logger.warning(f"⚠️ Normal Consistency disabled this step due to error: {e}")
+                logger.warning(
+                    f"[Normal Consistency] Step {self.global_step}: failed with {str(e)}"
+                )
+
         else:
             if self.global_step == 0:
                 logger.info("Normal Consistency weight is zero; term disabled in config.")
@@ -2916,371 +2932,375 @@ class HOLD(pl.LightningModule):
                 obj_faces_list = None
                 obj_category = None
 
-                try:
-                    # ============================================================
-                    # STEP 1: Extract Object Category
-                    # ============================================================
+                # ============================================================
+                # STEP 1: Extract Object Category
+                # ============================================================
 
-                    obj_category = None
+                obj_category = None
 
-                    # Try multiple possible keys (dataset-dependent)
-                    category_keys = ['object_category', 'category', 'obj_name', 'object_name']
-                    for key in category_keys:
-                        if key in batch:
-                            obj_category = batch[key]
-                            break
+                # Try multiple possible keys (dataset-dependent)
+                category_keys = ['object_category', 'category', 'obj_name', 'object_name']
+                for key in category_keys:
+                    if key in batch:
+                        obj_category = batch[key]
+                        break
 
-                    # ============================================================
-                    # UNWRAP NESTED TUPLES/LISTS RECURSIVELY (FIX)
-                    # ============================================================
-                    # Dataset may return:
-                    # - ('cheez-it box',)           → single-element tuple
-                    # - [('cheez-it box',)]         → list of tuples
-                    # - [[('cheez-it box',)]]       → nested list
-                    # We need to unwrap ALL layers until we get a string
+                # ============================================================
+                # UNWRAP NESTED TUPLES/LISTS RECURSIVELY (FIX)
+                # ============================================================
+                # Dataset may return:
+                # - ('cheez-it box',)           → single-element tuple
+                # - [('cheez-it box',)]         → list of tuples
+                # - [[('cheez-it box',)]]       → nested list
+                # We need to unwrap ALL layers until we get a string
 
-                    while isinstance(obj_category, (list, tuple)) and len(obj_category) > 0:
-                        obj_category = obj_category[0]
+                while isinstance(obj_category, (list, tuple)) and len(obj_category) > 0:
+                    obj_category = obj_category[0]
 
-                    # Handle tensor
-                    if isinstance(obj_category, torch.Tensor):
-                        obj_category = obj_category.item() if obj_category.numel() == 1 else obj_category[0].item()
+                # Handle tensor
+                if isinstance(obj_category, torch.Tensor):
+                    obj_category = obj_category.item() if obj_category.numel() == 1 else obj_category[0].item()
 
-                    # NOW convert to string (after unwrapping)
-                    if obj_category is not None:
-                        # At this point obj_category should be a plain string like 'cheez-it box'
-                        # or 'Cheez-It Box' (with capitals)
-                        obj_category = str(obj_category).strip().lower()
+                # NOW convert to string (after unwrapping)
+                if obj_category is not None:
+                    # At this point obj_category should be a plain string like 'cheez-it box'
+                    # or 'Cheez-It Box' (with capitals)
+                    obj_category = str(obj_category).strip().lower()
 
-                        # Remove any lingering tuple artifacts (paranoid check)
-                        # "('cheez-it box',)" → "cheez-it box"
-                        obj_category = obj_category.strip("()\"' ")
+                    # Remove any lingering tuple artifacts (paranoid check)
+                    # "('cheez-it box',)" → "cheez-it box"
+                    obj_category = obj_category.strip("()\"' ")
 
-                        if self.global_step == obj_chamfer_start:
-                            logger.info(f"[Object Chamfer] Cleaned category: '{obj_category}'")
-
-                        # ============================================================
-                        # FUZZY CATEGORY NORMALIZATION
-                        # ============================================================
-                        category_to_template = {
-                            # Boxes
-                            'cheez-it box': 'cracker_box',
-                            'cheez-it cracker box': 'cracker_box',
-                            'cracker box': 'cracker_box',
-
-                            # Fruits
-                            'banana': 'banana',
-
-                            # Tools
-                            'power drill': 'power_drill',
-                            'drill': 'power_drill',
-
-                            # Bottles
-                            "french's mustard bottle": 'mustard_bottle',
-                            'mustard bottle': 'mustard_bottle',
-                            'mustard': 'mustard_bottle',
-
-                            # Generic boxes (map to gelatin_box as closest match)
-                            'game/media box': 'gelatin_box',
-                            'game/product box': 'gelatin_box',
-                            'game box': 'gelatin_box',
-                            'product box': 'gelatin_box',
-                            'small rectangular object': 'gelatin_box',
-                            'package box': 'gelatin_box',
-
-                            # Additional objects
-                            'chips can': 'chips_can',
-                            'pringles': 'chips_can',
-                            'tomato soup can': 'tomato_soup_can',
-                            'soup can': 'tomato_soup_can',
-                            'scissors': 'scissors',
-                            'hammer': 'hammer',
-                            'foam brick': 'foam_brick',
-                            'pear': 'pear',
-                            'strawberry': 'strawberry',
-                            'tennis ball': 'tennis_ball',
-                        }
-
-                        original_category = obj_category
-                        if obj_category in category_to_template:
-                            obj_category = category_to_template[obj_category]
-                            if self.global_step % 1000 == 0:
-                                logger.debug(f"[Object Chamfer] Mapped '{original_category}' → '{obj_category}'")
-
-                    # ============================================================
-                    # STEP 3: Check Template Availability & Compute Chamfer
-                    # ============================================================
-
-                    # Debugging at first step
                     if self.global_step == obj_chamfer_start:
-                        logger.info(f"[Object Chamfer] Checking template for: '{obj_category}'")
-                        logger.info(f"[Object Chamfer] Available: {list(self.object_templates.keys())}")
-                        if obj_category in self.object_templates:
-                            logger.info(f"[Object Chamfer] ✅ Template FOUND for '{obj_category}'")
-                        else:
-                            logger.warning(f"[Object Chamfer] ⚠️  Template NOT FOUND for '{obj_category}'")
+                        logger.info(f"[Object Chamfer] Cleaned category: '{obj_category}'")
 
+                    # ============================================================
+                    # FUZZY CATEGORY NORMALIZATION
+                    # ============================================================
+                    category_to_template = {
+                        # Boxes
+                        'cheez-it box': 'cracker_box',
+                        'cheez-it cracker box': 'cracker_box',
+                        'cracker box': 'cracker_box',
+
+                        # Fruits
+                        'banana': 'banana',
+
+                        # Tools
+                        'power drill': 'power_drill',
+                        'drill': 'power_drill',
+
+                        # Bottles
+                        "french's mustard bottle": 'mustard_bottle',
+                        'mustard bottle': 'mustard_bottle',
+                        'mustard': 'mustard_bottle',
+
+                        # Generic boxes (map to gelatin_box as closest match)
+                        'game/media box': 'gelatin_box',
+                        'game/product box': 'gelatin_box',
+                        'game box': 'gelatin_box',
+                        'product box': 'gelatin_box',
+                        'small rectangular object': 'gelatin_box',
+                        'package box': 'gelatin_box',
+
+                        # Additional objects
+                        'chips can': 'chips_can',
+                        'pringles': 'chips_can',
+                        'tomato soup can': 'tomato_soup_can',
+                        'soup can': 'tomato_soup_can',
+                        'scissors': 'scissors',
+                        'hammer': 'hammer',
+                        'foam brick': 'foam_brick',
+                        'pear': 'pear',
+                        'strawberry': 'strawberry',
+                        'tennis ball': 'tennis_ball',
+                    }
+
+                    original_category = obj_category
+                    if obj_category in category_to_template:
+                        obj_category = category_to_template[obj_category]
+                        if self.global_step % 1000 == 0:
+                            logger.debug(f"[Object Chamfer] Mapped '{original_category}' → '{obj_category}'")
+
+                # ============================================================
+                # STEP 3: Check Template Availability & Compute Chamfer
+                # ============================================================
+
+                # Debugging at first step
+                if self.global_step == obj_chamfer_start:
+                    logger.info(f"[Object Chamfer] Checking template for: '{obj_category}'")
+                    logger.info(f"[Object Chamfer] Available: {list(self.object_templates.keys())}")
                     if obj_category in self.object_templates:
+                        logger.info(f"[Object Chamfer] ✅ Template FOUND for '{obj_category}'")
+                    else:
+                        logger.warning(f"[Object Chamfer] ⚠️  Template NOT FOUND for '{obj_category}'")
+
+                if obj_category in self.object_templates:
+                    # ============================================================
+                    # VALIDATE SDF BEFORE EXTRACTION
+                    # ============================================================
+                    # Before line 2673
+                    if self.global_step % 100 == 0:
+                        logger.info(f"[PRE-VALIDATION] Step {self.global_step}")
+                        logger.info(f"  Has model.nodes: {hasattr(self.model, 'nodes')}")
+                        if hasattr(self.model, 'nodes'):
+                            logger.info(f"  'object' in nodes: {'object' in self.model.nodes}")
+                    # Initialize flag
+                    sdf_is_valid = False
+
+                    try:
                         # ============================================================
-                        # VALIDATE SDF BEFORE EXTRACTION
+                        # FIX: ModuleDict doesn't support .get(), use 'in' check
                         # ============================================================
-                        # Before line 2673
-                        if self.global_step % 100 == 0:
-                            logger.info(f"[PRE-VALIDATION] Step {self.global_step}")
-                            logger.info(f"  Has model.nodes: {hasattr(self.model, 'nodes')}")
-                            if hasattr(self.model, 'nodes'):
-                                logger.info(f"  'object' in nodes: {'object' in self.model.nodes}")
-                        # Initialize flag
-                        sdf_is_valid = False
+                        if 'object' in self.model.nodes:
+                            object_node = self.model.nodes['object']
+                            if hasattr(object_node, 'server'):
+                                if hasattr(object_node.server, 'object_model'):
+                                    # Check for SDF grid OR vertex representation
+                                    if hasattr(object_node.server.object_model, 'sdf_grid'):
+                                        sdf = object_node.server.object_model.sdf_grid
+                                        sdf_std = sdf.std().item()
+                                        sdf_min = sdf.min().item()
+                                        sdf_max = sdf.max().item()
+                                        has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
 
-                        try:
-                            # ============================================================
-                            # FIX: ModuleDict doesn't support .get(), use 'in' check
-                            # ============================================================
-                            if 'object' in self.model.nodes:
-                                object_node = self.model.nodes['object']
-                                if hasattr(object_node, 'server'):
-                                    if hasattr(object_node.server, 'object_model'):
-                                        # Check for SDF grid OR vertex representation
-                                        if hasattr(object_node.server.object_model, 'sdf_grid'):
-                                            sdf = object_node.server.object_model.sdf_grid
-                                            sdf_std = sdf.std().item()
-                                            sdf_min = sdf.min().item()
-                                            sdf_max = sdf.max().item()
-                                            has_zero_crossing = (sdf_min < 0.0) and (sdf_max > 0.0)
+                                        # min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
+                                        # More lenient threshold to allow early learning
+                                        min_std_threshold = 1e-6 if self.global_step < 10000 else 1e-5
+                                        sdf_is_valid = has_zero_crossing and sdf_std > min_std_threshold
 
-                                            # min_std_threshold = 1e-5 if self.global_step < 10000 else 1e-4
-                                            # More lenient threshold to allow early learning
-                                            min_std_threshold = 1e-6 if self.global_step < 10000 else 1e-5
-                                            sdf_is_valid = has_zero_crossing and sdf_std > min_std_threshold
-
-                                            # Log SDF stats every 100 steps (more frequent monitoring)
-                                            if self.global_step % 100 == 0:
-                                                logger.info(
-                                                    f"[SDF Stats] Step {self.global_step}: "
-                                                    f"std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
-                                                    f"range=[{sdf_min:.4f}, {sdf_max:.4f}], "
-                                                    f"zero_crossing={has_zero_crossing}, valid={sdf_is_valid}"
-                                                )
-
-                                                # Log to tensorboard for plotting
-                                                logger.info('sdf/std', sdf_std)
-                                                logger.info('sdf/min', sdf_min)
-                                                logger.info('sdf/max', sdf_max)
-                                                logger.info('sdf/has_zero_crossing', float(has_zero_crossing))
-                                                logger.info('sdf/is_valid', float(sdf_is_valid))
-
-                                            if not sdf_is_valid and self.global_step % 500 == 0:
-                                                logger.warning(
-                                                    f"[Object Chamfer] DEGENERATE SDF at step {self.global_step}:\n"
-                                                    f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
-                                                    f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
-                                                )
-                                        elif hasattr(object_node.server.object_model, 'v3d_cano'):
-                                            # Vertex representation is available (for fallback/use later),
-                                            # but do NOT flip sdf_is_valid here; it is strictly SDF-based.
-                                            pass
-                        except Exception as e:
-                            if self.global_step % 100  == 0:
-                                logger.warning(f"[Object Chamfer] SDF validation error: {e}")
-
-                        # Only extract mesh if valid
-                        if sdf_is_valid:
-                            # Before extraction
-                                if self.global_step % 100 == 0:
-                                    logger.info(f"[Pre-Extract Debug] Step {self.global_step}")
-
-                                    if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-                                        obj_node = self.model.nodes['object']
-                                        if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
-                                            obj_model = obj_node.server.object_model
-
-                                            logger.info(f"  Has v3d_cano: {hasattr(obj_model, 'v3d_cano')}")
-                                            if hasattr(obj_model, 'v3d_cano'):
-                                                logger.info(f"  v3d_cano shape: {obj_model.v3d_cano.shape}")
-                                                logger.info(
-                                                    f"  v3d_cano range: [{obj_model.v3d_cano.min():.4f}, {obj_model.v3d_cano.max():.4f}]")
-
-                                            logger.info(f"  Has f3d_cano: {hasattr(obj_model, 'f3d_cano')}")
-                                            if hasattr(obj_model, 'f3d_cano'):
-                                                logger.info(f"  f3d_cano shape: {obj_model.f3d_cano.shape}")
-
-                                            logger.info(f"  Has faces: {hasattr(obj_model, 'faces')}")
-                                            if hasattr(obj_model, 'faces'):
-                                                logger.info(f"  faces shape: {obj_model.faces.shape}")
-
-                                try:
-                                    obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
-                                except Exception as e:
-                                    logger.error(f"[Mesh Extract EXCEPTION] {e}")
-                                    import traceback
-                                    logger.error(traceback.format_exc())
-                                    obj_verts_list = None
-                                    obj_faces_list = None
-
-                                # NEW: Detailed extraction logging
-                                if self.global_step % 100 == 0:
-                                    extraction_success = obj_verts_list is not None and len(obj_verts_list) > 0
-
-                                    if extraction_success:
-                                        num_verts = obj_verts_list[0].shape[0] if isinstance(obj_verts_list, list) else obj_verts_list.shape[0]
-                                        num_faces = obj_faces_list[0].shape[0] if obj_faces_list and isinstance(obj_faces_list, list) else 0
-
-                                        logger.info(
-                                            f"✅ [Mesh Extract] Success at step {self.global_step}: "
-                                            f"{num_verts} verts, {num_faces} faces"
-                                        )
-
-                                        logger.info('object/extraction_success', 1.0)
-                                        logger.info('object/num_vertices', float(num_verts))
-                                    else:
-                                        logger.warning(
-                                            f"❌ [Mesh Extract] Failed at step {self.global_step}: "
-                                            f"returned {type(obj_verts_list)}"
-                                        )
-                                        logger.info('object/extraction_success', 0.0)
-                        else:
-                            # Skip MC but DO NOT assume "no geometry"
-                            obj_verts_list = None
-                            obj_faces_list = None
-                    # Check if template exists (correct check!)
-                    if obj_category in self.object_templates:
-                        # ============================================================
-                        # STEP 4: Extract Object Mesh
-                        # ============================================================
-                        if sdf_is_valid and obj_verts_list and len(obj_verts_list) > 0:
-                            obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
-                            if obj_verts.shape[0] > 0:
-                                # ============================================================
-                                # STEP 5: Compute Template Chamfer Distance
-                                # ============================================================
-                                template_verts = self.object_templates[obj_category]
-
-                                # Normalize current mesh
-                                obj_verts_centered = obj_verts - obj_verts.mean(dim=0, keepdim=True)
-                                max_dist = obj_verts_centered.abs().max()
-
-                                if max_dist > 1e-6:
-                                    obj_verts_norm = obj_verts_centered / max_dist
-
-                                    # FIX: Ensure same device as template
-                                    template_verts = self.object_templates[obj_category]
-                                    obj_verts_norm = obj_verts_norm.to(template_verts.device)  # ← ADD THIS
-
-                                    from pytorch3d.loss import chamfer_distance
-                                    obj_chamfer_loss, _ = chamfer_distance(
-                                        obj_verts_norm.unsqueeze(0),
-                                        template_verts.unsqueeze(0),
-                                        point_reduction='mean',
-                                        batch_reduction='mean'
-                                    )
-
-                                    # ============================================================
-                                    # ADD TO LOSS (Critical!)
-                                    # ============================================================
-                                    geometric_loss = geometric_loss + obj_chamfer_weight * obj_chamfer_loss
-                                    loss_output['loss/obj_chamfer'] = obj_chamfer_loss.item()
-                                    loss_output['geometric_loss'] = geometric_loss.item()
-                                    if self.global_step % 500 == 0:
-                                        logger.info(
-                                            f"[Object Chamfer] Step {self.global_step}: "
-                                            f"loss={obj_chamfer_loss.item():.4f}, "
-                                            f"weight={obj_chamfer_weight:.3f}"
-                                        )
-                                    template_applied = True
-
-                                    # Log every 100 steps
-                                    if self.global_step % 100 == 0:
-                                        logger.info(
-                                            f"✅ [Object Chamfer] Step {self.global_step}: "
-                                            f"loss={obj_chamfer_loss.item():.6f}, "
-                                            f"category={obj_category}, "
-                                            f"pred_verts={obj_verts.shape[0]}, "
-                                            f"template_verts={template_verts.shape[0]}"
-                                        )
-
-                                        # Add tensorboard logging
-                                        logger.info('loss/obj_chamfer', obj_chamfer_loss.item())
-
-                                        # Track distance statistics
-                                        with torch.no_grad():
-                                            # Compute one-way nearest-neighbor distance (obj → template)
-                                            dist_matrix = torch.cdist(obj_verts, template_verts)  # [N_obj, N_template]
-                                            nn_dists, _ = dist_matrix.min(dim=1)  # [N_obj]
-                                            mean_dist = nn_dists.mean().item()
-                                            max_dist = nn_dists.max().item()
-
+                                        # Log SDF stats every 100 steps (more frequent monitoring)
+                                        if self.global_step % 100 == 0:
                                             logger.info(
-                                                f"[Object Chamfer Details] mean_dist={mean_dist:.4f}mm, "
-                                                f"max_dist={max_dist:.4f}mm"
+                                                f"[SDF Stats] Step {self.global_step}: "
+                                                f"std={sdf_std:.6f} (threshold={min_std_threshold:.6f}), "
+                                                f"range=[{sdf_min:.4f}, {sdf_max:.4f}], "
+                                                f"zero_crossing={has_zero_crossing}, valid={sdf_is_valid}"
                                             )
 
-                                            logger.info('object/chamfer_mean_dist', mean_dist)
-                                            logger.info('object/chamfer_max_dist', max_dist)
+                                            # Log to tensorboard for plotting
+                                            logger.info('sdf/std', sdf_std)
+                                            logger.info('sdf/min', sdf_min)
+                                            logger.info('sdf/max', sdf_max)
+                                            logger.info('sdf/has_zero_crossing', float(has_zero_crossing))
+                                            logger.info('sdf/is_valid', float(sdf_is_valid))
+
+                                        if not sdf_is_valid and self.global_step % 500 == 0:
+                                            logger.warning(
+                                                f"[Object Chamfer] DEGENERATE SDF at step {self.global_step}:\n"
+                                                f"  std={sdf_std:.6f} (need >1e-4), range=[{sdf_min:.4f}, {sdf_max:.4f}]\n"
+                                                f"  zero_crossing={has_zero_crossing} → Skipping mesh extraction"
+                                            )
+                                    elif hasattr(object_node.server.object_model, 'v3d_cano'):
+                                        # Vertex representation is available (for fallback/use later),
+                                        # but do NOT flip sdf_is_valid here; it is strictly SDF-based.
+                                        pass
+                    except Exception as e:
+                        if self.global_step % 100  == 0:
+                            logger.warning(f"[Object Chamfer] SDF validation error: {e}")
+
+                    # Only extract mesh if valid
+                    if sdf_is_valid:
+                        # Before extraction
+                            if self.global_step % 100 == 0:
+                                logger.info(f"[Pre-Extract Debug] Step {self.global_step}")
+
+                                if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                                    obj_node = self.model.nodes['object']
+                                    if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
+                                        obj_model = obj_node.server.object_model
+
+                                        logger.info(f"  Has v3d_cano: {hasattr(obj_model, 'v3d_cano')}")
+                                        if hasattr(obj_model, 'v3d_cano'):
+                                            logger.info(f"  v3d_cano shape: {obj_model.v3d_cano.shape}")
+                                            logger.info(
+                                                f"  v3d_cano range: [{obj_model.v3d_cano.min():.4f}, {obj_model.v3d_cano.max():.4f}]")
+
+                                        logger.info(f"  Has f3d_cano: {hasattr(obj_model, 'f3d_cano')}")
+                                        if hasattr(obj_model, 'f3d_cano'):
+                                            logger.info(f"  f3d_cano shape: {obj_model.f3d_cano.shape}")
+
+                                        logger.info(f"  Has faces: {hasattr(obj_model, 'faces')}")
+                                        if hasattr(obj_model, 'faces'):
+                                            logger.info(f"  faces shape: {obj_model.faces.shape}")
+
+                            # Try to extract object mesh from SDF (largest component only)
+                            try:
+                                obj_verts_list, obj_faces_list = self._extract_object_mesh_from_sdf(batch)
+                            except Exception as e:
+                                logger.error(f"[Mesh Extract EXCEPTION] {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                                obj_verts_list = None
+                                obj_faces_list = None
+
+                            # NEW: Detailed extraction logging
+                            if self.global_step % 100 == 0:
+                                extraction_success = (
+                                    isinstance(obj_verts_list, list)
+                                    and len(obj_verts_list) > 0
+                                    and obj_verts_list[0] is not None
+                                    and obj_verts_list[0].numel() > 0
+                                )
+                                logger.info(
+                                    f"[Object Mesh Extract] step={self.global_step}, "
+                                    f"success={extraction_success}"
+                                )
+
+                            # ============================================================
+                            # NEW: Object compactness loss (anti-floater / tight block)
+                            # Uses extracted verts to encourage a single, compact block.
+                            # ============================================================
+                            w_obj_compact = getattr(self.opt.loss, "w_obj_compactness", 0.0)
+
+                            if (
+                                w_obj_compact > 0.0
+                                and isinstance(obj_verts_list, list)
+                                and len(obj_verts_list) > 0
+                                and obj_verts_list[0] is not None
+                                and obj_verts_list[0].numel() > 0
+                            ):
+                                compact_losses = []
+
+                                for b_idx, verts_b in enumerate(obj_verts_list):
+                                    # verts_b: [V, 3] in approximately [-1.5, 1.5]^3 after extraction
+                                    if verts_b is None or verts_b.numel() == 0:
+                                        continue
+
+                                    # Center and radius
+                                    center = verts_b.mean(dim=0, keepdim=True)           # [1, 3]
+                                    dists = (verts_b - center).norm(dim=-1)             # [V]
+
+                                    # Encourage most mass inside a target radius (e.g. 1.0 in [-1.5,1.5])
+                                    target_radius = 1.0
+                                    max_dist = dists.max()
+                                    # Penalize outliers far from center
+                                    radius_penalty = torch.nn.functional.relu(max_dist - target_radius)
+
+                                    # Optional: encourage non-degenerate volume (avoid super-thin shells)
+                                    bbox_min, _ = verts_b.min(dim=0)
+                                    bbox_max, _ = verts_b.max(dim=0)
+                                    bbox_size = bbox_max - bbox_min                   # [3]
+                                    volume = bbox_size.prod()
+                                    # Target a moderate volume; adjust 0.01–0.1 depending on scale
+                                    target_volume = 0.02
+                                    volume_penalty = torch.abs(volume - target_volume)
+
+                                    compact_loss_b = 0.7 * radius_penalty + 0.3 * volume_penalty
+                                    compact_losses.append(compact_loss_b)
+
+                                    if self.global_step % 200 == 0:
+                                        logger.info(
+                                            f"[Obj Compactness] step={self.global_step}, "
+                                            f"batch={b_idx}, max_dist={float(max_dist):.4f}, "
+                                            f"radius_penalty={float(radius_penalty):.4f}, "
+                                            f"volume={float(volume):.6f}, "
+                                            f"volume_penalty={float(volume_penalty):.4f}"
+                                        )
+
+                                if len(compact_losses) > 0:
+                                    obj_compactness_loss = torch.stack(compact_losses).mean()
+                                    geometric_loss = geometric_loss + w_obj_compact * obj_compactness_loss
+                                    loss_output["loss/obj_compactness"] = float(obj_compactness_loss.item())
+
+                                    if self.global_step % 100 == 0:
+                                        logger.info(
+                                            f"[Obj Compactness] step={self.global_step}, "
+                                            f"loss={obj_compactness_loss.item():.6f}, "
+                                            f"w={w_obj_compact:.3f}"
+                                        )
+
+                            # ============================================================
+                            # Object Template Chamfer (single, unified path)
+                            # ============================================================
+                            try:
+                                # Check if template exists
+                                if obj_category in self.object_templates:
+                                    # Choose verts to use for Chamfer:
+                                    # 1) Prefer extracted mesh from SDF/MC (obj_verts_list)
+                                    # 2) Fallback to v3d_cano if extraction failed
+                                    obj_verts_for_chamfer = None
+
+                                    if (
+                                        isinstance(obj_verts_list, list)
+                                        and len(obj_verts_list) > 0
+                                        and obj_verts_list[0] is not None
+                                        and obj_verts_list[0].numel() > 0
+                                    ):
+                                        obj_verts = obj_verts_list[0]
+                                        if obj_verts.shape[0] > 0:
+                                            obj_verts_for_chamfer = obj_verts
+
+                                    # Fallback: use v3d_cano if SDF/MC failed
+                                    if obj_verts_for_chamfer is None:
+                                        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+                                            obj_node = self.model.nodes['object']
+                                            if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
+                                                obj_model = obj_node.server.object_model
+                                                if hasattr(obj_model, 'v3d_cano'):
+                                                    v3d = obj_model.v3d_cano
+                                                    if v3d is not None and v3d.numel() > 0:
+                                                        obj_verts_for_chamfer = v3d
+                                                        if self.global_step % 100 == 0:
+                                                            logger.info(
+                                                                f"[Object Chamfer] Using v3d_cano fallback for Chamfer at step {self.global_step}"
+                                                            )
+
+                                    if obj_verts_for_chamfer is not None and obj_verts_for_chamfer.shape[0] > 0:
+                                        template_verts = self.object_templates[obj_category]
+
+                                        # Normalize both to zero-mean, unit scale
+                                        obj_verts_centered = obj_verts_for_chamfer - obj_verts_for_chamfer.mean(
+                                            dim=0, keepdim=True
+                                        )
+                                        template_centered = template_verts - template_verts.mean(
+                                            dim=0, keepdim=True
+                                        )
+
+                                        obj_scale = obj_verts_centered.norm(dim=1).max()
+                                        template_scale = template_centered.norm(dim=1).max()
+
+                                        obj_verts_norm = obj_verts_centered / (obj_scale + 1e-6)
+                                        template_verts_norm = template_centered / (template_scale + 1e-6)
+
+                                        from pytorch3d.loss import chamfer_distance
+
+                                        chamfer_loss, _ = chamfer_distance(
+                                            obj_verts_norm.unsqueeze(0),
+                                            template_verts_norm.unsqueeze(0)
+                                        )
+
+                                        geometric_loss = geometric_loss + obj_chamfer_weight * chamfer_loss
+                                        loss_output['loss/obj_chamfer'] = chamfer_loss.item()
+
+                                        if self.global_step % 100 == 0:
+                                            logger.info(
+                                                f"[Object Chamfer] Step {self.global_step}: "
+                                                f"loss={chamfer_loss.item():.6f}, "
+                                                f"category={obj_category}, "
+                                                f"pred_verts={obj_verts_for_chamfer.shape[0]}, "
+                                                f"template_verts={template_verts.shape[0]}, "
+                                                f"weight={obj_chamfer_weight:.3f}"
+                                            )
+                                    else:
+                                        if self.global_step % 500 == 0:
+                                            logger.warning("[Object Chamfer] No valid verts for Chamfer (extraction + v3d_cano failed)")
+
                                 else:
-                                    if self.global_step % 500 == 0:
-                                        logger.warning("[Object Chamfer] Object mesh degenerate (max_dist=0)")
-                            else:
+                                    # Template not available - generic prior will be used later
+                                    if self.global_step == obj_chamfer_start:
+                                        logger.info(
+                                            f"[Object Chamfer] No template for '{obj_category}', will use generic prior"
+                                        )
+
+                            except Exception as e:
+                                # Error handling for Chamfer
                                 if self.global_step % 500 == 0:
-                                    logger.warning("[Object Chamfer] Empty object mesh extracted")
-                        else:
-                            if self.global_step % 500 == 0:
-                                logger.warning("[Object Chamfer] Mesh extraction returned None")
-                        # AFTER (updated):
-                        obj_verts_for_chamfer = None
-
-                        if obj_verts_list and len(obj_verts_list) > 0:
-                            obj_verts = obj_verts_list[0] if isinstance(obj_verts_list, list) else obj_verts_list
-                            if obj_verts.shape[0] > 0:
-                                obj_verts_for_chamfer = obj_verts
-
-                        # Fallback: use v3d_cano if SDF/MC failed
-                        if obj_verts_for_chamfer is None:
-                            if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-                                obj_node = self.model.nodes['object']
-                                if hasattr(obj_node, 'server') and hasattr(obj_node.server, 'object_model'):
-                                    obj_model = obj_node.server.object_model
-                                    if hasattr(obj_model, 'v3d_cano'):
-                                        v3d = obj_model.v3d_cano
-                                        if v3d is not None and v3d.numel() > 0:
-                                            obj_verts_for_chamfer = v3d
-                                            if self.global_step % 100 == 0:
-                                                logger.info(
-                                                    f"[Object Chamfer] Using v3d_cano fallback for Chamfer at step {self.global_step}"
-                                                )
-
-                        if obj_verts_for_chamfer is not None and obj_verts_for_chamfer.shape[0] > 0:
-                            template_verts = self.object_templates[obj_category]
-
-                            # Normalize both to zero-mean, unit scale (same as before)
-                            obj_verts_centered = obj_verts_for_chamfer - obj_verts_for_chamfer.mean(dim=0, keepdim=True)
-                            template_centered = template_verts - template_verts.mean(dim=0, keepdim=True)
-
-                            obj_scale = obj_verts_centered.norm(dim=1).max()
-                            template_scale = template_centered.norm(dim=1).max()
-
-                            obj_verts_norm = obj_verts_centered / (obj_scale + 1e-6)
-                            template_verts_norm = template_centered / (template_scale + 1e-6)
-
-                            from pytorch3d.loss import chamfer_distance
-                            chamfer_loss, _ = chamfer_distance(
-                                obj_verts_norm.unsqueeze(0),
-                                template_verts_norm.unsqueeze(0)
-                            )
-
-                            geometric_loss = geometric_loss + obj_chamfer_weight * chamfer_loss
-                            loss_output['loss/obj_chamfer'] = chamfer_loss.item()
-                    else:
-                        # Template not available - generic prior will be used later
-                        if self.global_step == obj_chamfer_start:
-                            logger.info(f"[Object Chamfer] No template for '{obj_category}', will use generic prior")
-
-                except Exception as e:
-                    # Log error occasionally to avoid spam
-                    if self.global_step % 500 == 0:
-                        logger.error(f"[Object Chamfer] Failed at step {self.global_step}: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
+                                    logger.error(
+                                        f"[Object Chamfer] Failed at step {self.global_step}: {e}"
+                                    )
+                                    import traceback
+                                    logger.error(traceback.format_exc())
 
                 # ============================================================
                 # GENERIC SHAPE PRIOR (Fallback for sequences without templates)
@@ -3648,15 +3668,11 @@ class HOLD(pl.LightningModule):
                 v3d_cano = obj_model.v3d_cano
 
                 # ------------------------------------------------------------
-                # NEW: Object geometry freeze / unfreeze schedule
+                # Object geometry freeze / unfreeze schedule (config-driven)
                 # ------------------------------------------------------------
-                # Config:
+                # Config keys (in training: section of YAML):
                 #   training.object_freeze_at:    step to start freezing v3d_cano
                 #   training.object_unfreeze_at:  step to re-enable gradients (optional)
-                training_cfg = getattr(self.opt, 'training', {})
-                freeze_at = training_cfg.get('object_freeze_at', None)
-                unfreeze_at = training_cfg.get('object_unfreeze_at', None)
-
                 if isinstance(v3d_cano, nn.Parameter):
                     should_require_grad = True
 
@@ -3687,13 +3703,15 @@ class HOLD(pl.LightningModule):
                         min_var = 0.05
                         vertex_collapse_loss = torch.nn.functional.relu(min_var - vertex_variance)
 
-                        vertex_collapse_weight = 0.1  # start small
+                        # Stronger early, relaxed later
                         if self.global_step < 5000:
                             vertex_collapse_weight = 0.1
                         else:
-                            vertex_collapse_weight = 0.02  # relax once basic shape is formed
+                            vertex_collapse_weight = 0.02
 
-                        total_loss = total_loss + vertex_collapse_weight * vertex_collapse_loss
+                        # CHANGED: add into geometric_loss, not total_loss
+                        geometric_loss = geometric_loss + vertex_collapse_weight * vertex_collapse_loss
+                        loss_output["loss/vertex_collapse"] = float(vertex_collapse_loss.item())
 
                         if self.global_step % 100 == 0:
                             self.log('loss/vertex_collapse', vertex_collapse_loss.item())
@@ -3734,7 +3752,8 @@ class HOLD(pl.LightningModule):
                                 ).clamp(-1.0, 1.0)
                                 normal_prior_loss = 1.0 - cos_sim.mean()
 
-                                total_loss = total_loss + w_vn * normal_prior_loss
+                                # CHANGED: add into geometric_loss, not total_loss
+                                geometric_loss = geometric_loss + w_vn * normal_prior_loss
                                 loss_output["loss/vertex_normal_prior"] = float(normal_prior_loss.item())
 
                                 if self.global_step % 100 == 0:
@@ -3753,6 +3772,30 @@ class HOLD(pl.LightningModule):
         # geom_mult: warm-up phase multiplier
         # Effective geometry weight = self._geom_scale * geom_mult
         geometric_loss = geometric_loss * self._geom_scale
+
+        # ================================================================
+        # GEOMETRY CAP AROUND 4K TO AVOID BAD BASIN
+        # ------------------------------------------------
+        # Limit the effective geometry loss in the 3k–6k window so that
+        # "Geometric Total" cannot spike into the ~0.4+ regime where the
+        # optimizer falls into the bad hand-contact basin.
+        # You can make geom_cap_max configurable via opt.training.geom_cap_max.
+        # ================================================================
+        if 3000 < self.global_step < 6000:
+            # Max geometry loss (after _geom_scale, before geom_mult)
+            geom_cap_max = getattr(self.opt.training, "geom_cap_max", 0.2)
+
+            geo_before_cap = geometric_loss.item()
+            if geo_before_cap > geom_cap_max:
+                geometric_loss = torch.clamp(geometric_loss, max=geom_cap_max)
+
+                # Optional: log only occasionally to avoid spam
+                if self.global_step % 100 == 0:
+                    logger.info(
+                        f"[GEOM-CAP] Step {self.global_step}: "
+                        f"clamped geometric_loss from {geo_before_cap:.6f} "
+                        f"to {geom_cap_max:.6f}"
+                    )
 
         # Rebuild total_loss from scaled base + scaled geometry
         total_loss = base_mult * base_loss + geom_mult * geometric_loss
