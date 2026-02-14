@@ -8,6 +8,67 @@ sys.path = [".."] + sys.path
 from common.rot import axis_angle_to_matrix
 from loguru import logger
 
+class GeometryEncoder3D(nn.Module):
+    """
+    3D CNN encoder: voxelized SDF [B,1,64,64,64] → latent z_geo [B, 128].
+
+    This module is pretrained offline (ShapeNet/templates) and then frozen
+    during HOLD training (Option B).
+    """
+    def __init__(self, in_channels: int = 1, base_channels: int = 32, latent_dim: int = 128):
+        super().__init__()
+        C = base_channels
+
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_channels, C, kernel_size=3, stride=2, padding=1),  # 64 → 32
+            nn.BatchNorm3d(C),
+            nn.ReLU(inplace=True),
+
+            nn.Conv3d(C, C * 2, kernel_size=3, stride=2, padding=1),        # 32 → 16
+            nn.BatchNorm3d(C * 2),
+            nn.ReLU(inplace=True),
+
+            nn.Conv3d(C * 2, C * 4, kernel_size=3, stride=2, padding=1),    # 16 → 8
+            nn.BatchNorm3d(C * 4),
+            nn.ReLU(inplace=True),
+
+            nn.Conv3d(C * 4, C * 4, kernel_size=3, stride=2, padding=1),    # 8 → 4
+            nn.BatchNorm3d(C * 4),
+            nn.ReLU(inplace=True),
+        )
+
+        self.fc = nn.Linear(C * 4, latent_dim)
+
+    def forward(self, x):
+        # x: [B, 1, 64, 64, 64]
+        feat = self.conv(x)              # [B, C4, 4, 4, 4]
+        feat = feat.mean(dim=(2, 3, 4))  # global avg pool → [B, C4]
+        z = self.fc(feat)                # [B, latent_dim]
+        return z
+
+
+class ResidualMLP(nn.Module):
+    """
+    Small residual adapter on top of z_geo: z_geo_refined = z + f(z).
+
+    2-layer MLP with 32 hidden units, initialized near identity so that
+    early training does not drastically alter the pretrained geometry prior.
+    """
+    def __init__(self, latent_dim: int = 128, hidden_dim: int = 32):
+        super().__init__()
+        self.fc1 = nn.Linear(latent_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, latent_dim)
+
+        # Near-identity init: small MLP output at start
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, z):
+        h = torch.relu(self.fc1(z))
+        delta = self.fc2(h)
+        return z + delta
+
+
 class ObjectModel(nn.Module):
     def __init__(self, seq_name, template=None, grid_res=64):
         super(ObjectModel, self).__init__()
@@ -17,6 +78,7 @@ class ObjectModel(nn.Module):
             v3d_cano = torch.FloatTensor(data["pts.cano"])
         else:
             v3d_cano = torch.FloatTensor(template.vertices)
+
         # Debug: check canonical vertices for non-finite values
         if not torch.isfinite(v3d_cano).all():
             logger.error(
@@ -44,8 +106,8 @@ class ObjectModel(nn.Module):
         self.register_buffer(
             "obj_scale", torch.FloatTensor(np.array([data["obj_scale"]]))
         )
-        # self.register_buffer("v3d_cano", v3d_cano)
-        # ✅ Make canonical object vertices learnable
+
+        # Canonical object vertices remain learnable (used for mesh-based priors, etc.)
         self.v3d_cano = nn.Parameter(v3d_cano, requires_grad=True)
 
         # Initialize SDF grid from vertices
@@ -84,10 +146,53 @@ class ObjectModel(nn.Module):
             # Add batch dimension so shape is [1, D, H, W]
             sdf_grid = sdf_grid.unsqueeze(0)
 
+        # In Option B, this grid acts as a derived teacher / diagnostic;
+        # it can be kept as a Parameter or converted to a buffer depending on config.
         self.sdf_grid = nn.Parameter(sdf_grid, requires_grad=True)
 
         self.register_buffer("norm_mat", torch.FloatTensor(data["norm_mat"]))
         self.register_buffer("denorm_mat", torch.inverse(self.norm_mat))
+
+        # ------------------------------------------------------------------
+        # NEW: GeometryEncoder3D (frozen) + ResidualMLP for Option B
+        # ------------------------------------------------------------------
+        # Latent dimension for geometry code
+        self.geo_latent_dim = 128
+
+        # 3D CNN encoder that consumes voxelized SDF [1,1,64,64,64] per instance
+        self.geometry_encoder = GeometryEncoder3D(
+            in_channels=1,
+            base_channels=32,
+            latent_dim=self.geo_latent_dim,
+        )
+
+        # Load pretrained weights for geometry_encoder here (offline checkpoint)
+        # Example:
+        #   state = torch.load(path_to_geo_encoder_ckpt, map_location="cpu")
+        #   self.geometry_encoder.load_state_dict(state["model"])
+        state = torch.load("pretrained/geo_encoder.pt", map_location="cpu")
+        self.geometry_encoder.load_state_dict(state["encoder_state_dict"])
+
+        # After loading, freeze encoder permanently:
+        for p in self.geometry_encoder.parameters():
+            p.requires_grad = False
+        self.geometry_encoder.eval()
+
+        # Small residual adapter that stays trainable
+        self.residual_mlp = ResidualMLP(
+            latent_dim=self.geo_latent_dim,
+            hidden_dim=32,
+        )
+
+        # Buffer to cache the latest geometry latent for this instance
+        # (used by the object node / implicit_network via FiLM)
+        self.register_buffer(
+            "z_geo", torch.zeros(1, self.geo_latent_dim, dtype=torch.float32)
+        )
+
+        # NOTE: L2 regularization on ResidualMLP parameters should be applied
+        # in the training loop (e.g., w_residual_l2 * ||theta_residual||²),
+        # not inside this model class, to keep concerns separated.
 
     def forward(self, rot, trans, scene_scale=None):
         device = self.v3d_cano.device

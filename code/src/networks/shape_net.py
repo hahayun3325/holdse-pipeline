@@ -34,10 +34,37 @@ class ImplicitNet(nn.Module):
         elif self.cond == "frame":
             self.cond_layer = [0]
             self.cond_dim = opt.dim_frame_encoding
+        else:
+            self.cond_layer = []
+            self.cond_dim = 0
+
         self.dim_pose_embed = 0
         if self.dim_pose_embed > 0:
             self.lin_p0 = nn.Linear(self.cond_dim, self.dim_pose_embed)
             self.cond_dim = self.dim_pose_embed
+
+        # ------------------------------------------------------------------
+        # NEW: optional FiLM conditioning for geometry latent (Option B)
+        # ------------------------------------------------------------------
+        # Only turn this on for the object implicit network via config:
+        #   opt.use_film = True, opt.cond = "geo" (or similar)
+        self.use_film = getattr(opt, "use_film", False)
+        if self.use_film and self.cond != "none":
+            # Expose conditioning dimension for callers (used by _query_object_implicit_sdf)
+            self.num_cond = self.cond_dim
+
+            # Per-layer FiLM MLPs: gamma_l(cond), beta_l(cond) → [feat_dim_l]
+            self.film_gamma = nn.ModuleList()
+            self.film_beta = nn.ModuleList()
+            for l in range(0, self.num_layers - 1):
+                out_dim = dims[l + 1]
+                self.film_gamma.append(nn.Linear(self.cond_dim, out_dim))
+                self.film_beta.append(nn.Linear(self.cond_dim, out_dim))
+        else:
+            # Backward-compatible default (no FiLM)
+            self.use_film = False
+            self.num_cond = getattr(self, "cond_dim", 0)
+
         for l in range(0, self.num_layers - 1):
             if l + 1 in self.skip_in:
                 out_dim = dims[l + 1] - dims[0]
@@ -95,11 +122,12 @@ class ImplicitNet(nn.Module):
 
         input = input.reshape(num_batch * num_point, num_dim)
 
+        # ================================================================
+        # Conditioning: build cond_tensor [B*N, cond_dim]
+        # ================================================================
+        input_cond = None
         if self.cond != "none":
-            # ================================================================
-            # ✅ FIX: Handle 2D or 3D cond tensors
-            # ================================================================
-            cond_tensor = cond[self.cond]
+            cond_tensor = cond[self.cond]  # e.g., 'pose', 'frame', 'geo'
 
             # If cond is 3D [B, N, D], reshape to 2D [B*N, D]
             if cond_tensor.ndim == 3:
@@ -153,10 +181,17 @@ class ImplicitNet(nn.Module):
 
         x = input
 
+        # ================================================================
+        # Main MLP with optional FiLM
+        # ================================================================
         for l in range(0, self.num_layers - 1):
             lin = getattr(self, "lin" + str(l))
 
-            if self.cond != "none" and l in self.cond_layer:
+            # Concatenative conditioning (old behavior) – ONLY when not using FiLM
+            if (self.cond != "none"
+                and l in self.cond_layer
+                and input_cond is not None
+                and not self.use_film):
                 # ✅ FIX: Ensure input_cond matches expected dimensions
                 # The linear layer after concat expects specific input size
                 # x.shape: [N, feat_dim]
@@ -190,13 +225,24 @@ class ImplicitNet(nn.Module):
                         x = torch.cat([x, input_cond], dim=-1)
                     # If expected_cond_dim == 0, don't concatenate
 
-
+            # Skip connections unchanged
             if l in self.skip_in:
                 x = torch.cat([x, input], 1) / np.sqrt(2)
 
+            # Linear layer
             x = lin(x)
+
+            # Nonlinearity on all but last layer
             if l < self.num_layers - 2:
                 x = self.softplus(x)
+
+            # ------------------------------------------------------------
+            # NEW: FiLM modulation using geometry latent (Option B)
+            # ------------------------------------------------------------
+            if self.use_film and self.cond != "none" and input_cond is not None:
+                gamma = self.film_gamma[l](input_cond)  # [B*N, feat_dim_l]
+                beta = self.film_beta[l](input_cond)    # [B*N, feat_dim_l]
+                x = gamma * x + beta
 
         x = x.reshape(num_batch, num_point, -1)
 

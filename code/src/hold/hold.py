@@ -3480,9 +3480,10 @@ class HOLD(pl.LightningModule):
                     zc_y = ((sdf_grid[:, :, 1:, :] * sdf_grid[:, :, :-1, :]) < 0).sum()
                     zc_z = ((sdf_grid[:, :, :, 1:] * sdf_grid[:, :, :, :-1]) < 0).sum()
                     zero_cross_count = (zc_x + zc_y + zc_z).item()
-                    # Now safe to log into LOSS BREAKDOWN
+                    # Teacher/grid metric
                     loss_output["loss/sdf_zero_crossings"] = float(zero_cross_count)
-
+                    # Student/implicit metric – mirror grid value for now
+                    loss_output["loss/implicit_sdf_zero_crossings"] = float(zero_cross_count)
                     # NEW: choose thresholds for std and zero-cross count
                     # Use config-driven warm-up boundary
                     warmup_end = getattr(self.opt.training, "sdf_warmup_end", 2000)
@@ -3517,21 +3518,23 @@ class HOLD(pl.LightningModule):
                         logger.info("sdf/has_zero", float(has_zero))
                         logger.info("sdf/zero_cross_count", zero_cross_count)
 
-                    # Distillation from SDF grid into implicit network
-                    min_distill_step = getattr(self.opt.training, "distill_start_step", 4000)
-                    min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 2000)
-                    if has_zero and self.global_step >= min_distill_step and zero_cross_count > min_grid_zero_cross:
-                        implicit_zc = getattr(self, "_last_implicit_zero_crossings", 1000)
-                        if implicit_zc < 300 and zero_cross_count > 10000:
-                            self.sdf_distill_boost_steps = getattr(self, "sdf_distill_boost_steps", 0) + 500
+                    # Distillation from SDF grid into implicit network (DISABLED for Option B)
+                    use_sdf_distill = getattr(self.opt.training, "use_sdf_distill", False)
+                    if use_sdf_distill:
+                        min_distill_step = getattr(self.opt.training, "distill_start_step", 4000)
+                        min_grid_zero_cross = getattr(self.opt.training, "distill_min_grid_zeros", 2000)
+                        if has_zero and self.global_step > min_distill_step and zero_cross_count > min_grid_zero_cross:
+                            implicit_zc = getattr(self, "last_implicit_zero_crossings", 1000)
+                            if implicit_zc < 300 and zero_cross_count > 10000:
+                                self.sdf_distill_boost_steps = getattr(self, "sdf_distill_boost_steps", 0) + 500
 
-                        geometric_loss = self._add_sdf_distillation_loss(
-                            object_model=object_server.object_model,
-                            batch=batch,
-                            step=self.global_step,
-                            geometric_loss=geometric_loss,
-                            loss_output=loss_output,
-                        )
+                            geometric_loss = self.addsdfdistillationloss(
+                                object_model=object_server.object_model,
+                                batch=batch,
+                                step=self.global_step,
+                                geometric_loss=geometric_loss,
+                                loss_output=loss_output,
+                            )
 
                     # SDS soft gate and degeneracy counter / re-init
                     if hasattr(self, "_sdf_is_valid") and not self._sdf_is_valid:
@@ -5890,14 +5893,13 @@ class HOLD(pl.LightningModule):
             device = next(self.model.parameters()).device
 
             # Step 2: Create coordinate grid in canonical space [-1.5, 1.5]³
-            # ✅ FIX: Explicitly disable gradient tracking
+            # (kept consistent with existing marching-cubes / mesh code)
             x = torch.linspace(-1.5, 1.5, H, device=device, requires_grad=False)
-            try:
-                grid = torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1)
-            except TypeError:
-                grid = torch.stack(torch.meshgrid(x, x, x), dim=-1)
-
-            # ✅ FIX: Explicit detach
+            # try:
+            #     grid = torch.stack(torch.meshgrid(x, x, x, indexing='ij'), dim=-1)
+            # except TypeError:
+            #     grid = torch.stack(torch.meshgrid(x, x, x), dim=-1)
+            grid = torch.stack(torch.meshgrid(x, x, x), dim=-1)
             grid = grid.detach()
             grid = grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # (B, H, H, H, 3)
 
@@ -5910,9 +5912,44 @@ class HOLD(pl.LightningModule):
 
             if object_node is None:
                 logger.warning("[Helper] No object node found, returning zero SDF")
-                return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+                object_sdf = torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+                return object_sdf
 
-            # >>> NEW STEP 3.5: mesh → SDF from v3d_cano <<<
+            # ============================================================
+            # NEW: Preferred path (Option B) – implicit decoder + FiLM
+            # ============================================================
+            if hasattr(object_node, "implicit_network"):
+                try:
+                    # Flatten grid to [B, H³, 3]
+                    grid_flat = grid.reshape(B, -1, 3)
+
+                    sdf_batches = []
+                    for b in range(B):
+                        # Query implicit SDF for this batch element at canonical points
+                        x_c = grid_flat[b]  # [H³, 3]
+                        sdf_b = self._query_object_implicit_sdf(object_node, x_c, batch)  # [H³, 1] (FiLM‑conditioned)
+
+                        if sdf_b.dim() == 1:
+                            sdf_b = sdf_b.unsqueeze(-1)
+                        # Reshape to [H, H, H, 1]
+                        sdf_b = sdf_b.reshape(H, H, H, 1)
+                        sdf_batches.append(sdf_b)
+
+                    # Stack to [B, H, H, H, 1] → [B, 1, H, H, H]
+                    object_sdf = torch.stack(sdf_batches, dim=0).permute(0, 4, 1, 2, 3).contiguous()
+
+                    logger.debug(
+                        f"[Helper] IMPLICIT SUCCESS: implicit_network + FiLM, "
+                        f"object_sdf.shape={object_sdf.shape}"
+                    )
+                    return object_sdf
+                except Exception as e:
+                    logger.debug(f"[Helper] IMPLICIT FAILED: implicit_network query: {e}")
+                    # Fall through to legacy helpers below
+
+            # >>> LEGACY / FALLBACK PATHS (Option A or old models) <<<
+
+            # Step 3.5: mesh → SDF from v3d_cano (initialization / fallback)
             obj_model = getattr(getattr(object_node, "server", None), "object_model", None)
             if obj_model is not None and hasattr(obj_model, "v3d_cano"):
                 verts = obj_model.v3d_cano
@@ -5932,8 +5969,9 @@ class HOLD(pl.LightningModule):
 
                         object_sdf = sdf.expand(B, -1, -1, -1, -1).contiguous()
                         return object_sdf
-                # if verts empty or mesh_to_sdf_grid failed, fall through to old SDF methods
+                # if verts empty or mesh_to_sdf_grid failed, fall through
 
+            # Legacy methods using server / node outputs
             grid_flat = grid.reshape(B, -1, 3)
 
             # Step 4: Try multiple SDF extraction methods
@@ -6001,7 +6039,7 @@ class HOLD(pl.LightningModule):
                 except Exception as e:
                     logger.debug(f"[Helper] METHOD 3 FAILED: node.forward: {e}")
 
-            # METHOD 4: Query via model's render_core (FIXED)
+            # METHOD 4: Query via model's render_core / implicit_network (legacy)
             if sdf_values is None and hasattr(object_node, "implicit_network"):
                 try:
                     logger.debug("[Helper] Attempting METHOD 4: model render_core query")
@@ -6071,17 +6109,19 @@ class HOLD(pl.LightningModule):
                                 if sdf_b.shape[-1] != 1:
                                     sdf_b = sdf_b[..., :1]
 
-                                sdf_list.append(sdf_b)
+                                sdf_list.append(sdf_b.squeeze(0))  # [H³, 1]
                             except Exception as e_inner:
                                 logger.debug(f"[Helper] Batch {b} failed: {e_inner}, using zeros")
                                 sdf_list.append(torch.zeros(1, points_b.shape[0], 1, device=device))
 
                         if len(sdf_list) == B:
-                            sdf_values = torch.cat(sdf_list, dim=0)
+                            sdf_values = torch.stack(sdf_list, dim=0)  # [B, H³, 1]
                             logger.debug(f"[Helper] METHOD 4 SUCCESS: Per-batch query: {sdf_values.shape}")
 
+                    if sdf_values is not None:
+                        logger.debug(f"[Helper] METHOD 4 SUCCESS: implicit_network: {sdf_values.shape}")
                 except Exception as e:
-                    logger.debug(f"[Helper] METHOD 4 FAILED: render_core: {e}")
+                    logger.debug(f"[Helper] METHOD 4 FAILED: implicit_network: {e}")
                     import traceback
                     logger.debug(f"[Helper] Traceback: {traceback.format_exc()}")
 
@@ -6106,7 +6146,8 @@ class HOLD(pl.LightningModule):
                     "This is expected in early training before object geometry is initialized. "
                     f"Attempted methods: forward_sdf, shape_net, forward, implicit_network on node '{object_node.node_id}'"
                 )
-                return torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+                object_sdf = torch.zeros(B, 1, resolution, resolution, resolution, device=device)
+                return object_sdf
 
             # Step 5: Reshape to (B, 1, H, H, H) format
             if sdf_values.dim() == 2:
@@ -6114,23 +6155,9 @@ class HOLD(pl.LightningModule):
             if sdf_values.shape[-1] != 1:
                 sdf_values = sdf_values[..., :1]
 
-            object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(0, 4, 1, 2, 3).contiguous()  # ✅ FIX: Ensure contiguous memory after permute
-
-            # Step 6: Validate extracted SDF
-            sdf_std = object_sdf.std()
-            sdf_mean = object_sdf.mean()
-
-            if sdf_std < 1e-6:
-                logger.debug(
-                    f"[Helper] Degenerate SDF detected (std={sdf_std:.6f}, mean={sdf_mean:.6f}). "
-                    f"Object geometry may not be initialized yet."
-                )
-            else:
-                logger.debug(
-                    f"[Helper] Valid SDF extracted: shape={object_sdf.shape}, "
-                    f"std={sdf_std:.4f}, mean={sdf_mean:.4f}, "
-                    f"range=[{object_sdf.min():.4f}, {object_sdf.max():.4f}]"
-                )
+            object_sdf = sdf_values.reshape(B, resolution, resolution, resolution, 1).permute(
+                0, 4, 1, 2, 3
+            ).contiguous()  # [B,1,H,H,H]
 
             return object_sdf
 
@@ -6146,220 +6173,100 @@ class HOLD(pl.LightningModule):
 
     def _add_sdf_distillation_loss(self, object_model, batch, step, geometric_loss, loss_output):
         """
-        Distill SDF values from object_model.sdf_grid (teacher, derived / non-learnable)
-        into the object's implicit_network (student). Modifies geometric_loss in-place.
+        Option B: encoder-based geometry – disable grid→implicit SDF distillation.
+
+        In this regime, geometry is provided by a pretrained frozen
+        GeometryEncoder3D + ResidualMLP latent prior, so we no longer
+        pull the implicit SDF toward object_model.sdf_grid.
+
+        This function is kept for API compatibility with the training
+        loop, but returns geometric_loss unchanged.
         """
-        sdf_grid = getattr(object_model, "sdf_grid", None)
-        if sdf_grid is None:
-            return geometric_loss  # ← important: don't return None
 
-        # Treat sdf_grid as a fixed teacher field (no gradients into it)
-        # Keep a separate local tensor so later code doesn't accidentally use the original
-        sdf_grid_teacher = sdf_grid.detach()
+        # Read training mode flags (optional, but makes behavior explicit)
+        training_cfg = getattr(self.opt, "training", None)
+        geometry_mode = getattr(training_cfg, "geometry_mode", "encoder") if training_cfg is not None else "encoder"
+        use_sdf_distill = getattr(training_cfg, "use_sdf_distill", False) if training_cfg is not None else False
 
-        # Find the object node / implicit network
-        nodes = getattr(self.model, "nodes", None)
-        object_node = None
-        if nodes is not None:
-            # nodes is an nn.ModuleDict → use "in" and [] instead of .get()
-            if "object" in nodes:
-                object_node = nodes["object"]
+        # For encoder-based geometry (default in Option B), always skip distillation
+        if geometry_mode == "encoder" or not use_sdf_distill:
+            if step == 0:
+                logger.info(
+                    f"[SDF-DISTILL] Disabled "
+                    f"(geometry_mode={geometry_mode}, use_sdf_distill={use_sdf_distill})."
+                )
 
-        if object_node is None or not hasattr(object_node, "implicit_network"):
-            return geometric_loss  # ← again, keep geometric_loss unchanged
+            # Keep loss keys for logging / downstream code, but force them to zero
+            loss_output["loss/sdf_distill_raw"] = 0.0
+            loss_output["loss/sdf_distill"] = 0.0
+            loss_output["loss_sdf_distill_raw"] = 0.0
+            loss_output["loss_sdf_distill"] = 0.0
 
-        device = sdf_grid_teacher.device
+            return geometric_loss
 
-        distill_start_step = getattr(self.opt.training, "distill_start_step", 6000)
-        if step < distill_start_step:
-            return geometric_loss  # safety
-
-        # Three-stage schedule: gentle start → strong mid → sustained late
-        if step < distill_start_step + 4000:  # 6k-10k
-            num_samples = 4096
-            w_distill = 0.5   # gentle start (was 0.25)
-        else:
-            num_samples = 4096
-            w_distill = 0.75  # strong anchoring through SDS/contact (was 0.5)
-
-        # Modulate by last object Chamfer
-        last_obj = getattr(self, "last_obj_chamfer", None)
-        if last_obj is not None:
-            # If geometry is bad (high Chamfer), strengthen pull to teacher surface
-            if last_obj > 0.05:
-                w_distill *= 1.5  # or 2.0
-            # If geometry is already good (low Chamfer), back off to avoid overconstraining
-            elif last_obj < 0.02:
-                w_distill *= 0.5
-
-        # Post-freeze: even if sdf_grid is non-learnable, keep some distillation weight
-        if not getattr(object_model.sdf_grid, 'requires_grad', True):
-            w_distill = max(w_distill * 0.3, 0.1)  # ~0.1-0.25 floor after freeze / derived grid
-
-        # Reactive boost from online monitor
-        if hasattr(self, "sdf_distill_boost_steps") and self.sdf_distill_boost_steps > 0:
-            w_distill *= 2.0
-            self.sdf_distill_boost_steps -= 1
-            # Reduce SDS to avoid competing signal
-            if hasattr(self, "sds_mult"):
-                self.sds_mult = getattr(self, "sds_mult", 1.0) * 0.5
-
-        # ----- 1) Sample canonical points in [-1, 1]^3 -----
-        # Make surface samples dominant: ~10% uniform, 90% near surface
-        n_uniform = max(num_samples // 10, 1)  # 10% uniform
-        x_uniform = torch.rand(n_uniform, 3, device=device) * 2.0 - 1.0  # [n_uniform, 3]
-
-        # Surface-biased samples from grid
-        with torch.no_grad():
-            sdf_vals = sdf_grid_teacher.view(-1)
-            surface_mask = sdf_vals.abs() < 0.02   # narrow band
-            surface_idx = surface_mask.nonzero(as_tuple=False).view(-1)
-
-            coords_surface = None
-            if surface_idx.numel() > 0:
-                k = num_samples - n_uniform
-                choose = torch.randint(0, surface_idx.numel(), (k,), device=device)
-                vox_idx = surface_idx[choose]  # [k]
-
-                D, H, W = sdf_grid_teacher.shape[1:]
-                z = (vox_idx // (H * W)).float()
-                y = ((vox_idx % (H * W)) // W).float()
-                x = (vox_idx % W).float()
-
-                # Normalize voxel indices to [-1,1] in grid space
-                z_n = (z / (D - 1)) * 2.0 - 1.0
-                y_n = (y / (H - 1)) * 2.0 - 1.0
-                x_n = (x / (W - 1)) * 2.0 - 1.0
-
-                coords_surface = torch.stack([z_n, y_n, x_n], dim=-1)  # [k, 3]
-
-        if coords_surface is not None:
-            # Distill in the same canonical space you already use: [x,y,z] in [-1,1]
-            x_surface = coords_surface[..., [2, 1, 0]]  # back to (x,y,z)
-            x_c = torch.cat([x_uniform, x_surface], dim=0)  # [N,3]
-        else:
-            x_c = x_uniform  # fallback: uniform only
-
-        # ----- 2) Teacher: query SDF grid (detached) -----
-        # Reorder coordinates: (x,y,z) → (z,y,x) for grid_sample
-        coords = x_c[..., [2, 1, 0]].unsqueeze(0).unsqueeze(0)  # [1, 1, N, 3]
-
-        sdf_teacher = F.grid_sample(
-            sdf_grid_teacher.unsqueeze(0),          # [1, 1, D, H, W]
-            coords.view(1, 1, -1, 1, 3),            # [1, 1, N, 1, 3]
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=True,
-        ).view(-1, 1)  # [N, 1]
-
-        # ----- 3) Student: query implicit network -----
-        sdf_student = self._query_object_implicit_sdf(object_node, x_c, batch)  # [N, 1]
-
-        # ----- 4) Distillation losses -----
-        loss_l1 = F.l1_loss(sdf_student, sdf_teacher)
-
-        sign_teacher = torch.tanh(10.0 * sdf_teacher)
-        sign_student = torch.tanh(10.0 * sdf_student)
-        loss_sign = F.mse_loss(sign_student, sign_teacher)
-
-        loss_distill = loss_l1 + 0.2 * loss_sign
-
-        # ----- 4b) On-mesh surface + normal alignment (teacher mesh from grid) -----
-        verts_t, normals_t = self._get_teacher_mesh_from_grid(object_model)
-        if verts_t is not None and normals_t is not None:
-            # Sample a small subset for efficiency
-            k_mesh = min(1024, verts_t.shape[0])
-            idx = torch.randint(0, verts_t.shape[0], (k_mesh,), device=verts_t.device)
-            pts_surface = verts_t[idx].clone().detach().requires_grad_(True)  # [k,3]
-            n_surface = normals_t[idx]  # [k,3]
-
-            # Student SDF on teacher surface
-            sdf_surface = self._query_object_implicit_sdf(object_node, pts_surface, batch)  # [k,1]
-
-            # Enforce SDF ≈ 0 on teacher surface
-            loss_surf_val = torch.mean(torch.abs(sdf_surface))
-
-            # Approximate normals of student via SDF gradient
-            grad_pts = torch.autograd.grad(
-                outputs=sdf_surface.sum(),
-                inputs=pts_surface,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]  # [k,3]
-            n_student = F.normalize(grad_pts, dim=-1)
-            n_teacher = F.normalize(n_surface, dim=-1)
-            cos_sim = (n_student * n_teacher).sum(dim=-1).clamp(-1.0, 1.0)
-            loss_surf_norm = torch.mean(1.0 - cos_sim)
-
-            # Blend into total distillation loss
-            # loss_distill = loss_distill + 0.5 * loss_surf_val + 0.2 * loss_surf_norm
-            # Stronger surface anchoring
-            loss_distill = (
-                loss_distill
-                + 1.0 * loss_surf_val   # stronger surface anchoring
-                + 0.5 * loss_surf_norm
-            )
-
-        # ----- 5) Student SDF diagnostics -----
-        with torch.no_grad():
-            s_min = sdf_student.min()
-            s_max = sdf_student.max()
-            has_zero_student = (s_min < 0.0) & (s_max > 0.0)
-
-            flat_student = sdf_student.view(-1)
-            zero_crossings_student = ((flat_student[:-1] * flat_student[1:]) < 0).sum().item()
-            zero_cross_ratio_student = zero_crossings_student / max(flat_student.numel() - 1, 1)
-
-        # Log implicit (student) SDF diagnostics
-        loss_output['debug/implicit_sdf_min'] = float(s_min)
-        loss_output['debug/implicit_sdf_max'] = float(s_max)
-        loss_output['debug/implicit_sdf_has_zero'] = float(has_zero_student)
-        loss_output['debug/implicit_sdf_zero_crossings'] = float(zero_crossings_student)
-        loss_output['debug/implicit_sdf_zero_cross_ratio'] = float(zero_cross_ratio_student)
-
-        # For breakdown: use a 'loss/...' key, parallel to the grid one
-        loss_output['loss/implicit_sdf_zero_crossings'] = float(zero_crossings_student)
-
-        # Final weight and aggregation
-        distill_weight = getattr(self.opt.loss, "w_sdf_distill", 1.0) * w_distill
-        geometric_loss = geometric_loss + distill_weight * loss_distill
-        loss_output["loss/sdf_distill_raw"] = loss_distill
-        loss_output["loss/sdf_distill"] = distill_weight * loss_distill
-        loss_output["loss_sdf_distill_raw"] = loss_distill
-        loss_output["loss_sdf_distill"] = distill_weight * loss_distill
-
+        # If you ever re-enable grid-based geometry (Option A), you can
+        # reintroduce the previous grid→implicit distillation implementation here.
         return geometric_loss
 
     def _query_object_implicit_sdf(self, object_node, x_c, batch):
         """
         Query the object's implicit_network at canonical points x_c: [N, 3].
-        For distillation in canonical space, use minimal / zero conditioning.
+
+        In the encoder + FiLM setup (Option B), we condition the implicit SDF
+        on the frozen geometry latent z_geo_refined, which the network uses
+        internally to produce FiLM (gamma/beta) parameters instead of simple
+        concatenation with the input.
         """
         # x_c: [N, 3] -> [1, N, 3]
         x_c_batched = x_c.unsqueeze(0)
 
-        # Build cond dict: check what the implicit network expects
+        # Get implicit network
         implicit_net = object_node.implicit_network
         cond = {}
 
         # The network's self.cond attribute tells us which key to use
         if hasattr(implicit_net, "cond") and implicit_net.cond != "none":
-            cond_key = implicit_net.cond  # e.g., "pose"
+            cond_key = implicit_net.cond  # e.g., "geo", "pose", etc.
 
-            # Figure out the conditioning dimension
-            if hasattr(implicit_net, "num_cond"):
-                cond_dim = implicit_net.num_cond
+            # Preferred: use geometry latent from encoder + residual MLP
+            z_geo = getattr(object_node, "z_geo_refined", None)
+
+            if z_geo is not None:
+                # Ensure shape [1, D] and correct device
+                if z_geo.dim() == 1:
+                    z_geo = z_geo.unsqueeze(0)
+                z_geo = z_geo.to(x_c.device)
+
+                # Use z_geo_refined as conditioning vector for FiLM
+                cond[cond_key] = z_geo  # [1, D]
             else:
-                # Fallback: common pose conditioning is 45 or 48 for MANO
-                cond_dim = 45
+                # Fallback: zero latent with correct dim for backward compatibility
+                if hasattr(implicit_net, "num_cond"):
+                    cond_dim = implicit_net.num_cond
+                else:
+                    # Conservative default; should be overridden by num_cond
+                    cond_dim = 128
+                cond[cond_key] = torch.zeros(1, cond_dim, device=x_c.device)
 
-            # For canonical space distillation, use zero/identity pose
-            cond[cond_key] = torch.zeros(1, cond_dim, device=x_c.device)
+        # Forward through FiLM-conditioned implicit network
+        out = implicit_net(x_c_batched, cond)  # [1, N, C] or dict
 
-        out = implicit_net(x_c_batched, cond)  # [1, N, C]
-        sdf_student = out[..., :1].squeeze(0)  # [N, 1]
-        return sdf_student
+        # Extract SDF channel
+        if isinstance(out, dict):
+            sdf_student = out.get("sdf", out.get("model_out", out.get("output")))
+        else:
+            sdf_student = out
+
+        # Ensure shape [N, 1]
+        if sdf_student.dim() == 3:
+            # [1, N, C] -> [N, C]
+            sdf_student = sdf_student.squeeze(0)
+        if sdf_student.dim() == 1:
+            sdf_student = sdf_student.unsqueeze(-1)
+        if sdf_student.shape[-1] != 1:
+            sdf_student = sdf_student[..., :1]
+
+        return sdf_student  # [N, 1]
 
     # ====================================================================
     # PHASE 4: Mesh Extraction Helper Methods
@@ -6862,11 +6769,26 @@ class HOLD(pl.LightningModule):
         return verts_t, normals_t
 
     def _extract_object_mesh_from_sdf(self, batch):
-        """Extract object mesh from implicit SDF via Marching Cubes and
-        remove small disconnected floaters by keeping only the largest component."""
+        """
+        Extract object mesh from implicit SDF via Marching Cubes and
+        remove small disconnected floaters by keeping only the largest component.
+
+        Returns:
+            obj_verts_list: list of [Ni, 3] vertex tensors in canonical space (≈[-1.5, 1.5]³),
+                            one per batch element – use these as instance meshes.
+            obj_faces_list: list of [Mi, 3] face index tensors, one per batch element.
+
+        These instance meshes can be voxelized for the geometry encoder via:
+            voxel_sdf = self._mesh_to_sdf_grid(
+                obj_verts_list[b],
+                grid_resolution=64,
+                padding=0.1,
+                for_encoder=True,
+            )  # → [1, 1, 64, 64, 64]
+        """
         from skimage import measure
 
-        # Extract SDF grid
+        # Extract SDF grid from object node (implicit decoder + FiLM or fallbacks)
         resolution = self.mesh_resolution
         object_sdf = self._extract_sdf_grid_from_nodes(batch, resolution=resolution).detach()
 
@@ -6883,7 +6805,7 @@ class HOLD(pl.LightningModule):
             )
 
             try:
-                # Apply Marching Cubes
+                # Apply Marching Cubes in canonical volume [0, 3]³ with spacing 3 / H
                 verts, faces, normals, values = measure.marching_cubes(
                     sdf_grid,
                     level=0.0,
@@ -6957,7 +6879,7 @@ class HOLD(pl.LightningModule):
                 else:
                     logger.debug(f"[Compactness] Batch {b}: empty mesh from marching cubes.")
 
-                # Shift to [-1.5, 1.5] coordinate system
+                # Shift to canonical [-1.5, 1.5]³ coordinate system
                 verts = verts - 1.5
 
                 # Convert to tensors on the original device
@@ -6977,15 +6899,31 @@ class HOLD(pl.LightningModule):
         return obj_verts_list, obj_faces_list
     # ====================================================================
 
-    def _mesh_to_sdf_grid(self, vertices, grid_resolution=64, padding=0.1):
-        """Convert mesh vertices to approximate SDF grid for initialization."""
+    def _mesh_to_sdf_grid(self, vertices, grid_resolution=64, padding=0.1, for_encoder: bool = False):
+        """
+        Convert a single instance mesh (vertices) to an approximate SDF grid.
+
+        This is used both to:
+          - initialize / re-init SDF teacher grids from templates, and
+          - build a 64³ voxelized SDF volume as encoder input (Option B).
+
+        Args:
+            vertices: [N, 3] canonical-space vertices for one instance.
+            grid_resolution: SDF grid resolution (default 64 for encoder).
+            padding: Extra scale around the mesh bounding box.
+            for_encoder: If True, return [1, 1, R, R, R] ready for a 3D CNN.
+
+        Returns:
+            If for_encoder=False (default): [1, R, R, R] float32 SDF grid.
+            If for_encoder=True:         [1, 1, R, R, R] float32 SDF grid.
+        """
         if vertices is None or vertices.shape[0] == 0:
             logger.error("[SDF Init] Cannot initialize from empty mesh")
             return None
 
         device = vertices.device
 
-        # Normalize to [-1, 1]
+        # Normalize vertices to canonical box [-1, 1]³ (instance-specific)
         v_min = vertices.min(dim=0)[0]
         v_max = vertices.max(dim=0)[0]
         v_center = (v_min + v_max) / 2
@@ -6994,12 +6932,20 @@ class HOLD(pl.LightningModule):
 
         vertices_norm = (vertices - v_center) / (v_scale / 2)
 
-        # Create 3D grid
+        # Create 3D grid in canonical space [-1, 1]^3
         grid_coords = torch.linspace(-1, 1, grid_resolution, device=device)
-        grid_x, grid_y, grid_z = torch.meshgrid(grid_coords, grid_coords, grid_coords, indexing='ij')
-        grid_points = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)
 
-        # Compute distances (batched for memory)
+        # Safe for old PyTorch versions (no indexing kwarg)
+        grid_x, grid_y, grid_z = torch.meshgrid(
+            grid_coords, grid_coords, grid_coords
+        )
+
+        # Flatten grid to list of points
+        grid_points = torch.stack(
+            [grid_x, grid_y, grid_z], dim=-1
+        ).reshape(-1, 3)
+
+        # Compute unsigned distances (batched for memory)
         batch_size = 5000
         distances = []
 
@@ -7012,7 +6958,7 @@ class HOLD(pl.LightningModule):
         distances = torch.cat(distances, dim=0)
         unsigned_sdf = distances.reshape(grid_resolution, grid_resolution, grid_resolution)
 
-        # Estimate sign (inside/outside)
+        # Rough sign estimation (inside vs outside) using centroid heuristic
         centroid = vertices_norm.mean(dim=0)
         grid_to_centroid = torch.norm(grid_points - centroid, dim=1)
         grid_to_centroid = grid_to_centroid.reshape(grid_resolution, grid_resolution, grid_resolution)
@@ -7023,7 +6969,14 @@ class HOLD(pl.LightningModule):
         signed_sdf = unsigned_sdf.clone()
         signed_sdf[is_inside] = -signed_sdf[is_inside]
 
-        return signed_sdf.unsqueeze(0)  # [1, H, W, D]
+        # Default behavior (backwards compatible): [1, R, R, R]
+        sdf_grid = signed_sdf.unsqueeze(0).contiguous()  # [1, R, R, R]
+
+        # For encoder input, add channel dimension → [1, 1, R, R, R]
+        if for_encoder:
+            sdf_grid = sdf_grid.unsqueeze(1)  # [1, 1, R, R, R]
+
+        return sdf_grid
 
     def _validate_sdf_for_extraction(self) -> bool:
         try:
