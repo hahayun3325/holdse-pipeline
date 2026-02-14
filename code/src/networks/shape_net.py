@@ -34,6 +34,9 @@ class ImplicitNet(nn.Module):
         elif self.cond == "frame":
             self.cond_layer = [0]
             self.cond_dim = opt.dim_frame_encoding
+        elif self.cond == "geo" or self.cond == "geometry":
+            self.cond_layer = [0]
+            self.cond_dim = opt.cond_dim  # Read from config
         else:
             self.cond_layer = []
             self.cond_dim = 0
@@ -243,6 +246,8 @@ class ImplicitNet(nn.Module):
                 gamma = self.film_gamma[l](input_cond)  # [B*N, feat_dim_l]
                 beta = self.film_beta[l](input_cond)    # [B*N, feat_dim_l]
                 x = gamma * x + beta
+                logger.debug(
+                    f"[FiLM] gamma range: [{gamma.min():.4f}, {gamma.max():.4f}], beta range: [{beta.min():.4f}, {beta.max():.4f}]")
 
         x = x.reshape(num_batch, num_point, -1)
 

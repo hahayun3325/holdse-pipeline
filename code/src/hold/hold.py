@@ -952,7 +952,7 @@ class HOLD(pl.LightningModule):
                 # Initialize Mesh Extractor
                 # ============================================================
                 logger.info("Initializing GHOP Mesh Extractor...")
-                self.mesh_resolution = phase4_cfg.get('mesh_resolution', 128)
+                self.mesh_resolution = phase4_cfg.get('mesh_resolution', 32)
                 self.mesh_extractor = GHOPMeshExtractor(
                     vqvae_wrapper=self.vqvae,
                     resolution=self.mesh_resolution
@@ -1017,7 +1017,7 @@ class HOLD(pl.LightningModule):
 
             # Set weights and parameters
             self.w_contact = 0.0
-            self.mesh_resolution = 128
+            self.mesh_resolution = 32
             self.log_contact_every = 50
 
             # Set component references to None
@@ -1584,11 +1584,49 @@ class HOLD(pl.LightningModule):
                 f"Expected >100 MB for full model with optimizer state."
             )
 
+        def patch_checkpoint_for_film(checkpoint_path, new_cond_dim=128):
+            """
+            Load checkpoint and strip implicit network weights to force reinitialization.
+            Preserves hand model, encoder, and residual MLP.
+            """
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+
+            if 'state_dict' not in ckpt:
+                print("[Checkpoint Patch] No state_dict found, returning as-is")
+                return ckpt
+
+            state_dict = ckpt['state_dict']
+
+            # Keys to remove (implicit network weights)
+            # These patterns match typical implicit network naming
+            implicit_keys = [
+                k for k in state_dict.keys()
+                if any(x in k for x in ['implicit_network', 'object_mlp', 'shape_net', 'object.implicit'])
+            ]
+
+            # Also remove object-specific MLP layers if named differently
+            film_keys = [
+                k for k in state_dict.keys()
+                if any(x in k for x in ['film_gamma', 'film_beta', 'film_mlp'])
+            ]
+
+            keys_to_remove = list(set(implicit_keys + film_keys))
+
+            print(f"[Checkpoint Patch] Removing {len(keys_to_remove)} implicit network keys:")
+            for k in keys_to_remove:
+                print(f"  - {k}")
+                del state_dict[k]
+
+            ckpt['state_dict'] = state_dict
+            print(f"[Checkpoint Patch] Preserved {len(state_dict)} keys")
+            return ckpt
+
         # ============================================================
         # Step 2: Load and inspect state dict
         # ============================================================
         try:
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            # ckpt = torch.load(checkpoint_path, map_location='cpu')
+            ckpt = patch_checkpoint_for_film(checkpoint_path, new_cond_dim=128)
             logger.info("[GHOP Validation] Checkpoint loaded successfully")
         except Exception as e:
             raise RuntimeError(f"[GHOP Validation] Failed to load checkpoint: {e}")
@@ -2508,14 +2546,21 @@ class HOLD(pl.LightningModule):
         logger.info(f"[GEOM-DEBUG] Before normal consistency: {geometric_loss.item()}")
 
         w_nc = getattr(self.opt.loss, "w_normal_consistency", 0.0)
+        # In src/hold/hold.py, normal consistency section (around line 2510)
+        # Ensure mesh is extracted before computing normal consistency
         if w_nc > 0.0:
             try:
                 # FIX: Use mesh-based normal consistency instead of SDF gradients
                 object_server = self.model.nodes['object'].server
                 obj_model = object_server.object_model
 
-                if hasattr(obj_model, 'v3d_cano') and hasattr(obj_model, 'faces'):
-                    # Create mesh from canonical vertices and faces
+                # NEW: Ensure we have faces
+                if not hasattr(obj_model, 'faces') or obj_model.faces is None:
+                    # Generate faces from voxel grid or use template
+                    logger.warning("[Normal Consistency] No faces available, skipping")
+                    normal_loss = None
+                elif hasattr(obj_model, 'v3d_cano'):
+                    # Create mesh
                     mesh = Meshes(
                         verts=[obj_model.v3d_cano],
                         faces=[obj_model.faces]
@@ -2536,13 +2581,12 @@ class HOLD(pl.LightningModule):
                     )
                     normal_loss = None
 
-                if normal_loss is not None and torch.isfinite(normal_loss).all():
-                    geometric_loss = geometric_loss + w_nc * normal_loss
-                elif normal_loss is not None:
-                    logger.warning(
-                        f"[Normal Consistency] Step {self.global_step}: non-finite value "
-                        f"{normal_loss.item():.4e}; skipping term."
-                    )
+                    # ADD to geometric_loss
+                if normal_loss is not None:
+                    geometric_loss += w_nc * normal_loss
+                    loss_output["loss/normal_consistency"] = normal_loss.item()
+                else:
+                    logger.warning(f"[Normal Consistency] Step {self.global_step}: No normal loss computed")
 
             except Exception as e:
                 logger.warning(
@@ -3343,6 +3387,15 @@ class HOLD(pl.LightningModule):
                         if self.global_step % 500 == 0:
                             logger.warning(f"[Object Generic] Failed: {e}")
 
+        # In src/hold/hold.py, after Chamfer optimization or v3d_cano updates
+        # Around line 2815 (after Object Template Chamfer section)
+        # Update geometry latent for FiLM conditioning
+        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+            object_node = self.model.nodes['object']
+            if hasattr(object_node, 'update_geometry_latent'):
+                object_node.update_geometry_latent()
+                logger.debug(f"[Step {self.global_step}] Updated z_geo_refined for conditioning")
+
         # ================================================================
         # ✅ OBJECT SMOOTHNESS REGULARIZATION
         # ================================================================
@@ -3769,6 +3822,17 @@ class HOLD(pl.LightningModule):
                                 # Fail-safe: log but do not break training
                                 if self.global_step % 500 == 0:
                                     logger.warning(f"[Vertex Normal Prior] Failed at step {self.global_step}: {e}")
+
+        # In src/hold/hold.py, where losses are computed
+        # Add L2 regularization on residual MLP to keep it near identity
+        w_residual_l2 = getattr(self.opt.loss, 'w_residual_l2', 0.01)
+        if w_residual_l2 > 0 and hasattr(self.model, 'nodes'):
+            object_node = self.model.nodes['object']
+            if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
+                residual_mlp = object_node.server.object_model.residual_mlp
+                residual_l2 = sum(p.pow(2).sum() for p in residual_mlp.parameters())
+                geometric_loss += w_residual_l2 * residual_l2
+                loss_output["loss/residual_l2"] = residual_l2.item()
 
         # Now that ALL geometry terms are in geometric_loss, apply scaling
         # self._geom_scale: auto controller (Phase 3)
@@ -6240,6 +6304,14 @@ class HOLD(pl.LightningModule):
                 # Use z_geo_refined as conditioning vector for FiLM
                 cond[cond_key] = z_geo  # [1, D]
             else:
+                logger.warning(f"[SDF Query] z_geo_refined is None on {object_node.node_id}")
+                if hasattr(object_node, 'server'):
+                    if hasattr(object_node.server, 'object_model'):
+                        obj_model = object_node.server.object_model
+                        if hasattr(obj_model, 'z_geo_refined'):
+                            z_geo = obj_model.z_geo_refined
+                        elif hasattr(obj_model, 'get_z_geo_refined'):
+                            z_geo = obj_model.get_z_geo_refined()
                 # Fallback: zero latent with correct dim for backward compatibility
                 if hasattr(implicit_net, "num_cond"):
                     cond_dim = implicit_net.num_cond
@@ -6247,6 +6319,9 @@ class HOLD(pl.LightningModule):
                     # Conservative default; should be overridden by num_cond
                     cond_dim = 128
                 cond[cond_key] = torch.zeros(1, cond_dim, device=x_c.device)
+        # Add debug in _query_object_implicit_sdf
+        logger.info(
+            f"[SDF Query] z_geo_refined stats: min={z_geo.min():.4f}, max={z_geo.max():.4f}, mean={z_geo.mean():.4f}")
 
         # Forward through FiLM-conditioned implicit network
         out = implicit_net(x_c_batched, cond)  # [1, N, C] or dict

@@ -194,6 +194,32 @@ class ObjectModel(nn.Module):
         # in the training loop (e.g., w_residual_l2 * ||theta_residual||²),
         # not inside this model class, to keep concerns separated.
 
+    # In src/model/obj/object_model.py, after __init__
+    def _voxelize_sdf(self, grid_res=64):
+        """
+        Convert current v3d_cano or sdf_grid into voxelized format [1,1,64,64,64]
+        for the GeometryEncoder3D.
+        """
+        # Option A: Use existing sdf_grid (already voxelized)
+        if hasattr(self, 'sdf_grid') and self.sdf_grid is not None:
+            # sdf_grid is [1, grid_res, H, W] or similar
+            # Ensure it's [1, 1, 64, 64, 64]
+            voxels = self.sdf_grid
+            if voxels.dim() == 4:
+                voxels = voxels.unsqueeze(0)  # Add batch dim
+            if voxels.shape[1] != 1:
+                voxels = voxels[:, :1, ...]  # Take first channel
+            # Resize to 64^3 if needed
+            if voxels.shape[2:] != (64, 64, 64):
+                voxels = torch.nn.functional.interpolate(
+                    voxels, size=(64, 64, 64), mode='trilinear', align_corners=False
+                )
+            return voxels  # [1, 1, 64, 64, 64]
+
+        # Option B: Voxelize from v3d_cano points (fallback)
+        # This requires implementing point-to-voxel conversion
+        raise NotImplementedError("Voxelization from points not yet implemented")
+
     def forward(self, rot, trans, scene_scale=None):
         device = self.v3d_cano.device
 
@@ -236,6 +262,42 @@ class ObjectModel(nn.Module):
         out["vertices"] = verts
         out["T"] = tf_mats
         return out
+
+    # In src/model/obj/object_model.py
+    def compute_z_geo_refined(self):
+        """
+        Compute geometry latent by:
+        1. Voxelizing current SDF
+        2. Encoding with frozen GeometryEncoder3D
+        3. Refining with trainable ResidualMLP
+
+        Returns:
+            z_geo_refined: [1, 128] tensor
+        """
+        # Ensure we're in eval mode for frozen encoder
+        self.geometry_encoder.eval()
+
+        # Get voxelized SDF [1, 1, 64, 64, 64]
+        voxels = self._voxelize_sdf()
+
+        # Encode (no gradients for frozen encoder)
+        with torch.no_grad():
+            z_geo = self.geometry_encoder(voxels)  # [1, 128]
+
+        # Refine (gradients enabled for residual MLP)
+        z_geo_refined = self.residual_mlp(z_geo)  # [1, 128]
+
+        # Cache for access by implicit network
+        self.z_geo_refined = z_geo_refined
+        self.z_geo = z_geo  # Also cache raw for debugging
+
+        return z_geo_refined
+
+    def get_z_geo_refined(self):
+        """Get cached z_geo_refined, computing if necessary."""
+        if not hasattr(self, 'z_geo_refined') or self.z_geo_refined is None:
+            return self.compute_z_geo_refined()
+        return self.z_geo_refined
 
     def _initialize_sdf_from_vertices(self, vertices, grid_res=64,
                                       max_verts_for_init: int = 5000,

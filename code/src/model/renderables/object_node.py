@@ -43,7 +43,7 @@ class ObjectNode(Node):
             opt,
             object_specs,
             sdf_bounding_sphere,
-            opt.implicit_network,
+            getattr(opt, 'obj_implicit_network', opt.implicit_network),
             opt.rendering_network,
             deformer,
             server,
@@ -56,6 +56,21 @@ class ObjectNode(Node):
         self.mesh_o = None
         v3d_cano = server.object_model.v3d_cano.cpu().detach().numpy()
         self.v_min_max = np.array([v3d_cano.min(axis=0), v3d_cano.max(axis=0)]) * 2.0
+
+    # In src/model/renderables/object_node.py, after __init__
+    # Add property to access geometry latent from object_model
+    @property
+    def z_geo_refined(self):
+        """Expose geometry latent from object_model for implicit network conditioning."""
+        if hasattr(self.server, 'object_model'):
+            return self.server.object_model.get_z_geo_refined()
+        return None
+
+    # Optional: Add method to force recomputation
+    def update_geometry_latent(self):
+        """Recompute z_geo_refined after v3d_cano updates."""
+        if hasattr(self.server, 'object_model'):
+            self.server.object_model.compute_z_geo_refined()
 
     def forward(self, input):
         time_code = self.frame_latent_encoder(input["idx"])

@@ -95,7 +95,7 @@ phase4:
   w_damping: 0.001               # ← ENABLED
 
   # Mesh extraction settings
-  mesh_resolution: 64          # Marching cubes resolution changed from 256
+  mesh_resolution: 32          # Marching cubes resolution changed from 256
   mesh_padding: 0.1             # Padding around object bounds
 
   log_contact_every: 100
@@ -167,6 +167,21 @@ model:
     max_total_iters: 5
     N_samples_inverse_sphere: 32
     add_tiny: 0.000001
+
+  # Object implicit network
+  obj_implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: geo
+    cond_dim: 128
+    use_film: True
 
   # Hand implicit network
   implicit_network:
