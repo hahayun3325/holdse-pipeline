@@ -274,8 +274,7 @@ class ImplicitNet(nn.Module):
                         beta = beta[:, :x.shape[1]]
 
                 x = gamma * x + beta
-                logger.debug(
-                    f"[FiLM] gamma range: [{gamma.min():.4f}, {gamma.max():.4f}], beta range: [{beta.min():.4f}, {beta.max():.4f}]")
+                logger.info(f"[FiLM] gamma range: [{gamma.min():.4f}, {gamma.max():.4f}], beta range: [{beta.min():.4f}, {beta.max():.4f}]")
 
         x = x.reshape(num_batch, num_point, -1)
 

@@ -67,10 +67,11 @@ class ObjectNode(Node):
         return None
 
     # Optional: Add method to force recomputation
-    def update_geometry_latent(self):
+    def update_geometry_latent(self, voxel_grid=None):
         """Recompute z_geo_refined after v3d_cano updates."""
         if hasattr(self.server, 'object_model'):
-            self.server.object_model.compute_z_geo_refined()
+            return self.server.object_model.update_geometry_latent(voxel_grid)
+        return False
 
     def forward(self, input):
         time_code = self.frame_latent_encoder(input["idx"])
@@ -97,11 +98,11 @@ class ObjectNode(Node):
             scene_scale = params[:, 0]
 
         # After line ~30 (after squeeze operations)
-        print(f"\n[ObjectNode.sample_points] Object parameters:")
-        print(f"  scene_scale: {scene_scale}")
-        print(f"  transl: {transl}")
-        print(f"  global_orient: {global_orient}")
-        # print(f"  global_orient (degrees): {(global_orient * 180 / np.pi).cpu().numpy()}")
+        logger.info(f"\n[ObjectNode.sample_points] Object parameters:")
+        logger.info(f"  scene_scale: {scene_scale}")
+        logger.info(f"  transl: {transl}")
+        logger.info(f"  global_orient: {global_orient}")
+        # logger.info(f"  global_orient (degrees): {(global_orient * 180 / np.pi).cpu().numpy()}")
 
         # ✅ Call server (returns output dict)
         output = self.server(scene_scale, transl, global_orient)
@@ -119,28 +120,39 @@ class ObjectNode(Node):
         cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)
         ray_dirs = ray_dirs.reshape(-1, 3)
 
-        # ✅ NEW DEBUG 1
-        print(f"[ObjectNode.sample_points] After get_camera_params:")
-        print(f"  ray_dirs has_nan: {torch.isnan(ray_dirs).any().item()}")
-        print(f"  cam_loc has_nan: {torch.isnan(cam_loc).any().item()}")
+        pose = cond["pose"]
+
+        # Ensure 2D
+        if pose.dim() == 1:
+            pose = pose.unsqueeze(0)
+        elif pose.dim() > 2:
+            # Squeeze all middle singleton dimensions
+            original_batch = pose.shape[0]
+            pose = pose.reshape(original_batch, -1)
+
+        num_pixels = ray_dirs.shape[0]  # ensure this is defined earlier
+
+        # Expand pose: [B, D] -> [B*num_pixels, D]
+        cond_expanded = pose.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, pose.shape[-1])
+
+        # Build **final** cond, including FiLM geometry
+        cond = {"pose": cond_expanded}
+        if hasattr(self, "z_geo_refined") and self.z_geo_refined is not None:
+            cond["geo"] = self.z_geo_refined
 
         # ================================================================
-        # ✅ FIX: Create deform_info with correct variable names
+        # Build deform_info using the FINAL cond
         # ================================================================
         deform_info = {
             "cond": cond,
-            "verts": output.get("verts", None),  # Use 'output' not 'obj_output'
+            "verts": output.get("verts", None),
         }
-
-        # Add tfs only if server provides it
         if "tfs" in output:
             deform_info["tfs"] = output["tfs"]
-
-        # Handle test mode
         if self.is_test and "obj_verts" in output:
             deform_info["verts"] = output["obj_verts"]
 
-        # Ray sampling
+        # Now call ray_sampler with consistent cond
         z_vals = self.ray_sampler.get_z_vals(
             volsdf_utils.sdf_func_with_deformer,
             self.deformer,
@@ -152,57 +164,13 @@ class ObjectNode(Node):
             deform_info,
         )
 
-        # ✅ NEW DEBUG 2
-        print(f"[ObjectNode.sample_points] After ray_sampler.get_z_vals:")
-        print(f"  z_vals has_nan: {torch.isnan(z_vals).any().item()}")
-        if torch.isnan(z_vals).any():
-            print(f"  ❌ z_vals is NaN from ray sampler!")
-            z_vals = torch.nan_to_num(z_vals, nan=1.0)
-        # After z_vals are computed (around line 80)
-        print(f"\n[ObjectNode.sample_points] Ray sampling statistics:")
-        print(f"  z_vals shape: {z_vals.shape}")
-        print(f"  z_vals min/max: {z_vals.min().item():.4f} / {z_vals.max().item():.4f}")
-        # print(f"  Object position (transl): {transl[0].cpu().numpy()}")
-        print(f"  Camera position: (will need from input)")
-
         # Compute sample points
         points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
 
-        # ✅ NEW DEBUG 3
-        print(f"[ObjectNode.sample_points] After computing points:")
-        print(f"  points has_nan: {torch.isnan(points).any().item()}")
-        if torch.isnan(points).any():
-            print(f"  ❌ points is NaN!")
-            points = torch.nan_to_num(points, nan=0.0)
-        # After points are computed
-        print(f"  Sampled points min/max:")
-        print(f"    x: {points[..., 0].min().item():.4f} / {points[..., 0].max().item():.4f}")
-        print(f"    y: {points[..., 1].min().item():.4f} / {points[..., 1].max().item():.4f}")
-        print(f"    z: {points[..., 2].min().item():.4f} / {points[..., 2].max().item():.4f}")
-
-        pose = cond["pose"]
-
-        # Ensure 2D
-        if pose.dim() == 1:
-            pose = pose.unsqueeze(0)
-        elif pose.dim() > 2:
-            # Squeeze all middle singleton dimensions
-            original_batch = pose.shape[0]
-            pose = pose.reshape(original_batch, -1)
-
-        # Expand: [B, D] -> [B*num_pixels, D]
-        cond_expanded = pose.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, pose.shape[-1])
-        cond = {"pose": cond_expanded}
-        if hasattr(self, 'z_geo_refined') and self.z_geo_refined is not None:
-            cond['geo'] = self.z_geo_refined
-
-        # ================================================================
-        # ✅ FIX: Build output dict with correct variable names
-        # ================================================================
         out = {}
         out["idx"] = input["idx"]
-        out["output"] = output              # ✅ Changed from obj_output to output
-        out["cond"] = cond                  # ✅ Changed from obj_cond to cond
+        out["output"] = output
+        out["cond"] = cond           # uses the same cond as deform_info["cond"]
         out["ray_dirs"] = ray_dirs
         out["cam_loc"] = cam_loc
         out["deform_info"] = deform_info

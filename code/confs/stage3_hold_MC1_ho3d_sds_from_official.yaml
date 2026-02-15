@@ -22,7 +22,7 @@ phase3:
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
-  grid_resolution: 32            # was 65
+  grid_resolution: 16            # was 32
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - Earlier start for refinement (804b0572f style)
@@ -95,7 +95,7 @@ phase4:
   w_damping: 0.001               # ← ENABLED
 
   # Mesh extraction settings
-  mesh_resolution: 32          # Marching cubes resolution changed from 256
+  mesh_resolution: 16          # Marching cubes resolution changed from 256
   mesh_padding: 0.1             # Padding around object bounds
 
   log_contact_every: 100

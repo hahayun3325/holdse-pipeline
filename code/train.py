@@ -299,20 +299,20 @@ def main():
     # ================================================================
     # Check for --no-comet flag in sys.argv BEFORE parsing
     if '--no-comet' in sys.argv:
-        print("\n" + "=" * 70)
-        print("⚠️  COMET LOGGING DISABLED")
-        print("=" * 70)
-        print("Running in debug mode without Comet ML metric uploads.")
-        print("Training will be MUCH faster but metrics won't be logged.")
-        print("To re-enable: Remove --no-comet flag")
-        print("=" * 70 + "\n")
+        logger.info("\n" + "=" * 70)
+        logger.info("⚠️  COMET LOGGING DISABLED")
+        logger.info("=" * 70)
+        logger.info("Running in debug mode without Comet ML metric uploads.")
+        logger.info("Training will be MUCH faster but metrics won't be logged.")
+        logger.info("To re-enable: Remove --no-comet flag")
+        logger.info("=" * 70 + "\n")
 
         # Set environment variable BEFORE any comet_ml imports
         os.environ['COMET_MODE'] = 'disabled'
 
     # Now parse arguments (comet_ml will see COMET_MODE=disabled)
     args, opt = parser_args()
-    print("Working dir:", os.getcwd())
+    logger.info("Working dir:", os.getcwd())
 
     # ================================================================
     # Read checkpoint callback config from YAML (if available)
@@ -423,7 +423,7 @@ def main():
         import warnings
         warnings.filterwarnings('ignore', category=UserWarning, module='comet_ml')
 
-    pprint(args)
+    logger.info(args)
 
     trainset = create_dataset_with_ghop_support(opt.dataset.train, args)
     validset = create_dataset_with_ghop_support(opt.dataset.valid, args)
@@ -441,9 +441,9 @@ def main():
                (hasattr(args, 'use_ghop') and args.use_ghop)
 
     if use_ghop:
-        print("\n" + "="*70)
-        print("PHASE 3: Initializing GHOP Two-Stage Training")
-        print("="*70)
+        logger.info("\n" + "="*70)
+        logger.info("PHASE 3: Initializing GHOP Two-Stage Training")
+        logger.info("="*70)
 
         # Determine if using config or command-line arguments
         if hasattr(opt, 'phase3') and opt.phase3.get('enabled', False):
@@ -456,7 +456,7 @@ def main():
             w_sds = phase3_cfg.get('w_sds', 5000.0)
             w_contact = phase3_cfg.get('w_contact', 10.0)
             use_modular = phase3_cfg.get('use_modular_init', False)
-            print("[Phase 3] Using config-based initialization")
+            logger.info("[Phase 3] Using config-based initialization")
         else:
             vqvae_ckpt = args.vqvae_ckpt
             unet_ckpt = args.unet_ckpt
@@ -466,7 +466,7 @@ def main():
             w_sds = getattr(args, 'w_sds', 5000.0)
             w_contact = getattr(args, 'w_contact', 10.0)
             use_modular = True
-            print("[Phase 3] Using command-line argument initialization")
+            logger.info("[Phase 3] Using command-line argument initialization")
 
         # Verify GHOP checkpoint paths
         if not os.path.exists(vqvae_ckpt):
@@ -481,35 +481,35 @@ def main():
                 f"Please download GHOP checkpoints and place in checkpoints/ghop/ directory"
             )
 
-        print(f"✓ VQ-VAE checkpoint verified: {vqvae_ckpt}")
-        print(f"✓ U-Net checkpoint verified: {unet_ckpt}")
+        logger.info(f"✓ VQ-VAE checkpoint verified: {vqvae_ckpt}")
+        logger.info(f"✓ U-Net checkpoint verified: {unet_ckpt}")
 
         # Set flags for training_step (components initialized in HOLD.__init__)
         model.phase3_enabled = True
         model.ghop_enabled = True
 
-        print(f"\n✓ Phase 3 two-stage training initialized:")
-        print(f"  - Stage 1 (SDS): {sds_iters} iterations")
-        print(f"  - Stage 2 (Contact): {contact_iters} iterations")
-        print(f"  - SDS loss weight: {w_sds}")
-        print(f"  - Contact loss weight: {w_contact}")
-        print(f"  - Grid resolution: {grid_resolution}³ voxels")
-        print(f"  - Modular init: {use_modular}")
+        logger.info(f"\n✓ Phase 3 two-stage training initialized:")
+        logger.info(f"  - Stage 1 (SDS): {sds_iters} iterations")
+        logger.info(f"  - Stage 2 (Contact): {contact_iters} iterations")
+        logger.info(f"  - SDS loss weight: {w_sds}")
+        logger.info(f"  - Contact loss weight: {w_contact}")
+        logger.info(f"  - Grid resolution: {grid_resolution}³ voxels")
+        logger.info(f"  - Modular init: {use_modular}")
 
         if hasattr(model, 'ghop_manager'):
-            print(f"  - Two-Stage Manager: Initialized")
+            logger.info(f"  - Two-Stage Manager: Initialized")
             stage_info = model.ghop_manager.get_stage_info(0)
-            print(f"  - Initial stage: {stage_info}")
+            logger.info(f"  - Initial stage: {stage_info}")
 
-        print("="*70 + "\n")
+        logger.info("="*70 + "\n")
 
     elif hasattr(opt, 'phase2') and opt.phase2.get('enabled', False):
         # Backward compatibility: Phase 2 legacy mode
-        print("\n" + "="*70)
-        print("PHASE 2: Initializing GHOP Prior (Legacy Mode)")
-        print("="*70 + "\n")
-        print("[Warning] Phase 2 detected. Consider upgrading to Phase 3 config.")
-        print("          Phase 2 will be supported but Phase 3 offers better features.\n")
+        logger.info("\n" + "="*70)
+        logger.info("PHASE 2: Initializing GHOP Prior (Legacy Mode)")
+        logger.info("="*70 + "\n")
+        logger.info("[Warning] Phase 2 detected. Consider upgrading to Phase 3 config.")
+        logger.info("          Phase 2 will be supported but Phase 3 offers better features.\n")
 
         vqvae_ckpt = opt.phase2.ghop.vqvae_checkpoint
         unet_ckpt = opt.phase2.ghop.unet_checkpoint
@@ -525,10 +525,10 @@ def main():
         model.phase3_enabled = False
         model.ghop_enabled = False
 
-        print(f"✓ GHOP prior initialized (Phase 2 legacy mode)")
-        print(f"✓ SDS loss weight: {opt.phase2.get('w_sds', 5000.0)}")
-        print(f"✓ Grid resolution: {opt.phase2.get('grid_resolution', 16)}³")
-        print("="*70 + "\n")
+        logger.info(f"✓ GHOP prior initialized (Phase 2 legacy mode)")
+        logger.info(f"✓ SDS loss weight: {opt.phase2.get('w_sds', 5000.0)}")
+        logger.info(f"✓ Grid resolution: {opt.phase2.get('grid_resolution', 16)}³")
+        logger.info("="*70 + "\n")
 
     else:
         # No GHOP integration
@@ -536,15 +536,15 @@ def main():
         model.phase2_enabled = False
         model.phase3_enabled = False
         model.ghop_enabled = False
-        print("\n[GHOP] Disabled - training with original HOLD losses only\n")
+        logger.info("\n[GHOP] Disabled - training with original HOLD losses only\n")
 
     # ========================================================================
     # Phase 4: Contact Refinement Configuration
     # ========================================================================
     if model.phase3_enabled:  # Phase 4 requires Phase 3
-        print("\n" + "=" * 70)
-        print("PHASE 4: Initializing Contact Refinement Module")
-        print("=" * 70)
+        logger.info("\n" + "=" * 70)
+        logger.info("PHASE 4: Initializing Contact Refinement Module")
+        logger.info("=" * 70)
 
         try:
             # Extract contact parameters from config or args
@@ -554,7 +554,7 @@ def main():
                 contact_start_iter = opt.phase4.get('contact_start_iter', 500)
                 w_contact = opt.phase4.get('w_contact', 10.0)
                 mesh_resolution = opt.phase4.get('mesh_resolution', 128)
-                print("[Phase 4] Using config-based initialization")
+                logger.info("[Phase 4] Using config-based initialization")
             else:
                 # Fallback to default Phase 4 parameters
                 contact_thresh = 0.01
@@ -562,7 +562,7 @@ def main():
                 contact_start_iter = 500
                 w_contact = 10.0
                 mesh_resolution = 128
-                print("[Phase 4] Using default parameters")
+                logger.info("[Phase 4] Using default parameters")
 
             # Store Phase 4 config in model
             model.phase4_enabled = True
@@ -576,36 +576,36 @@ def main():
             validation_passed = validate_phase4_config(opt, model)
 
             if validation_passed:
-                print(f"\n✓ Phase 4 contact refinement configured:")
-                print(f"   - Contact start iteration: {contact_start_iter}")
-                print(f"   - Contact loss weight: {w_contact}")
-                print(f"   - Mesh resolution: {mesh_resolution}³ voxels")
-                print(f"   - Contact threshold: {contact_thresh}m")
-                print(f"   - Collision threshold: {collision_thresh}m")
-                print("=" * 70 + "\n")
+                logger.info(f"\n✓ Phase 4 contact refinement configured:")
+                logger.info(f"   - Contact start iteration: {contact_start_iter}")
+                logger.info(f"   - Contact loss weight: {w_contact}")
+                logger.info(f"   - Mesh resolution: {mesh_resolution}³ voxels")
+                logger.info(f"   - Contact threshold: {contact_thresh}m")
+                logger.info(f"   - Collision threshold: {collision_thresh}m")
+                logger.info("=" * 70 + "\n")
             else:
                 logger.error("[Phase 4] Validation failed. Disabling Phase 4.")
                 model.phase4_enabled = False
-                print("=" * 70 + "\n")
+                logger.info("=" * 70 + "\n")
 
         except Exception as e:
             logger.error(f"[Phase 4] Initialization failed: {e}")
             import traceback
             traceback.print_exc()
             model.phase4_enabled = False
-            print("\n[Phase 4] Disabled due to initialization error\n")
-            print("=" * 70 + "\n")
+            logger.info("\n[Phase 4] Disabled due to initialization error\n")
+            logger.info("=" * 70 + "\n")
     else:
         model.phase4_enabled = False
-        print("\n[Phase 4] Disabled - Phase 3 must be enabled for Phase 4\n")
+        logger.info("\n[Phase 4] Disabled - Phase 3 must be enabled for Phase 4\n")
     # ========================================================================
 
     # ========================================================================
     # Dataset Summary Logging (FIXED VERSION)
     # ========================================================================
-    print("\n" + "="*70)
-    print("DATASET SUMMARY")
-    print("="*70)
+    logger.info("\n" + "="*70)
+    logger.info("DATASET SUMMARY")
+    logger.info("="*70)
 
     # Detect dataset type
     is_ghop_dataset = isinstance(trainset, GHOPHOIDataset)
@@ -614,61 +614,61 @@ def main():
         # ================================================================
         # GHOP HOI4D Video Dataset
         # ================================================================
-        print(f"Dataset type: GHOP HOI4D Video")
-        print(f"  Sequence: {trainset.data_dir.name}")
-        print(f"  Total frames: {trainset.n_frames}")
-        print(f"  Training frame pairs: {len(trainset)}")
-        print(f"  Validation frame pairs: {len(validset)}")
-        print(f"  Category: {trainset.category}")
-        print(f"  Split ratio: 80% train / 20% val")
+        logger.info(f"Dataset type: GHOP HOI4D Video")
+        logger.info(f"  Sequence: {trainset.data_dir.name}")
+        logger.info(f"  Total frames: {trainset.n_frames}")
+        logger.info(f"  Training frame pairs: {len(trainset)}")
+        logger.info(f"  Validation frame pairs: {len(validset)}")
+        logger.info(f"  Category: {trainset.category}")
+        logger.info(f"  Split ratio: 80% train / 20% val")
 
         # Show frame pair indices
         if len(trainset.frame_indices) > 0:
-            print(f"\n  Training frame pairs:")
-            print(f"    First 3: {trainset.frame_indices[:3]}")
+            logger.info(f"\n  Training frame pairs:")
+            logger.info(f"    First 3: {trainset.frame_indices[:3]}")
             if len(trainset.frame_indices) > 6:
-                print(f"    ...")
-            print(f"    Last 3: {trainset.frame_indices[-3:]}")
+                logger.info(f"    ...")
+            logger.info(f"    Last 3: {trainset.frame_indices[-3:]}")
 
         # Check temporal fields in first sample
         sample = trainset[0]
         has_temporal = 'hA_n' in sample and 'c2w_n' in sample
-        print(f"\n  Temporal fields present: {has_temporal}")
+        logger.info(f"\n  Temporal fields present: {has_temporal}")
         if has_temporal:
-            print(f"    ✅ Phase 5 will activate")
+            logger.info(f"    ✅ Phase 5 will activate")
         else:
-            print(f"    ⚠️  Phase 5 will skip")
+            logger.info(f"    ⚠️  Phase 5 will skip")
 
     else:
         # ================================================================
         # HOLD Single-Image Dataset
         # ================================================================
-        print(f"Dataset type: HOLD Single-Image")
-        print(f"  Training images: {len(trainset)}")
-        print(f"  Validation images: {len(validset)}")
+        logger.info(f"Dataset type: HOLD Single-Image")
+        logger.info(f"  Training images: {len(trainset)}")
+        logger.info(f"  Validation images: {len(validset)}")
 
         # Try to access img_paths if available
         if hasattr(trainset, 'dataset') and hasattr(trainset.dataset, 'img_paths'):
             img_paths = np.array(trainset.dataset.img_paths)
-            print(f"\n  Image paths:")
-            print(f"    First 3: {img_paths[:3]}")
+            logger.info(f"\n  Image paths:")
+            logger.info(f"    First 3: {img_paths[:3]}")
             if len(img_paths) > 6:
-                print(f"    ...")
-            print(f"    Last 3: {img_paths[-3:]}")
+                logger.info(f"    ...")
+            logger.info(f"    Last 3: {img_paths[-3:]}")
         elif hasattr(trainset, 'img_paths'):
             # Direct access
             img_paths = np.array(trainset.img_paths)
-            print(f"\n  Image paths:")
-            print(f"    First 3: {img_paths[:3]}")
+            logger.info(f"\n  Image paths:")
+            logger.info(f"    First 3: {img_paths[:3]}")
             if len(img_paths) > 6:
-                print(f"    ...")
-            print(f"    Last 3: {img_paths[-3:]}")
+                logger.info(f"    ...")
+            logger.info(f"    Last 3: {img_paths[-3:]}")
         else:
-            print(f"  (Image path details not available)")
+            logger.info(f"  (Image path details not available)")
 
-        print(f"\n  ⚠️  Phase 5 temporal will skip (single images)")
+        logger.info(f"\n  ⚠️  Phase 5 temporal will skip (single images)")
 
-    print("="*70 + "\n")
+    logger.info("="*70 + "\n")
 
     # ========================================================================
     # Continue with training setup
@@ -681,10 +681,10 @@ def main():
     # Resume training: Use --infer_ckpt to restore full training state
     # ============================================================================
     if args.infer_ckpt != "":
-        print(f"\n{'=' * 70}")
-        print("RESUME TRAINING: Restoring full training state")
-        print(f"{'=' * 70}")
-        print(f"  Checkpoint: {args.infer_ckpt}")
+        logger.info(f"\n{'=' * 70}")
+        logger.info("RESUME TRAINING: Restoring full training state")
+        logger.info(f"{'=' * 70}")
+        logger.info(f"  Checkpoint: {args.infer_ckpt}")
 
         # Verify checkpoint exists
         if not os.path.exists(args.infer_ckpt):
@@ -695,39 +695,46 @@ def main():
         current_epoch = ckpt_info.get('epoch', -1)
         global_step = ckpt_info.get('global_step', 0)
 
-        print(f"  Checkpoint epoch: {current_epoch}")
-        print(f"  Global step: {global_step}")
-        print(f"  Contains optimizer: {'optimizer_states' in ckpt_info}")
-        print(f"  Contains LR scheduler: {'lr_schedulers' in ckpt_info}")
+        logger.info(f"  Checkpoint epoch: {current_epoch}")
+        logger.info(f"  Global step: {global_step}")
+        logger.info(f"  Contains optimizer: {'optimizer_states' in ckpt_info}")
+        logger.info(f"  Contains LR scheduler: {'lr_schedulers' in ckpt_info}")
 
         # Validate epoch range
         if current_epoch >= args.num_epoch:
-            print(f"\n  ⚠️  WARNING: Checkpoint at epoch {current_epoch} >= target {args.num_epoch}")
-            print(f"      Training will complete immediately.")
-            print(f"      Increase --num_epoch to continue (e.g., --num_epoch {current_epoch + 10})")
+            logger.info(f"\n  ⚠️  WARNING: Checkpoint at epoch {current_epoch} >= target {args.num_epoch}")
+            logger.info(f"      Training will complete immediately.")
+            logger.info(f"      Increase --num_epoch to continue (e.g., --num_epoch {current_epoch + 10})")
         else:
-            print(f"\n  ✓ Will resume from epoch {current_epoch + 1} to {args.num_epoch}")
+            logger.info(f"\n  ✓ Will resume from epoch {current_epoch + 1} to {args.num_epoch}")
 
         # ✅ KEY: Set ckpt_path for trainer.fit() WITHOUT loading weights
         ckpt_path = args.infer_ckpt
-        print(f"{'=' * 70}\n")
+        logger.info(f"{'=' * 70}\n")
 
     if args.load_ckpt != "":
         # ================================================================
         # TRANSFER LEARNING: Load HOLD weights only (exclude GHOP)
         # ================================================================
-        print(f"\n{'='*70}")
-        print("TRANSFER LEARNING: Loading HOLD model weights")
-        print(f"{'='*70}")
-        print(f"Checkpoint: {args.load_ckpt}")
+        logger.info(f"\n{'='*70}")
+        logger.info("TRANSFER LEARNING: Loading HOLD model weights")
+        logger.info(f"{'='*70}")
+        logger.info(f"Checkpoint: {args.load_ckpt}")
 
         # Step 1: Load checkpoint to CPU
         sd = torch.load(args.load_ckpt, map_location='cpu')["state_dict"]
-        print(f"  Loaded {len(sd)} parameters from checkpoint")
+        logger.info(f"  Loaded {len(sd)} parameters from checkpoint")
+        # ADD THIS: Patch for FiLM compatibility
+        if hasattr(model, 'patch_checkpoint_for_film'):
+            # Create a mock checkpoint dict
+            ckpt = {"state_dict": sd}
+            patched_ckpt = model.patch_checkpoint_for_film(ckpt)
+            sd = patched_ckpt["state_dict"]
+            logger.info(f"  [Checkpoint Patch] Applied for FiLM compatibility")
 
         # Step 2: Aggressive GPU memory cleanup
         if torch.cuda.is_available():
-            print("  Clearing GPU memory...")
+            logger.info("  Clearing GPU memory...")
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
@@ -737,13 +744,13 @@ def main():
             torch.cuda.empty_cache()
 
             mem_before = torch.cuda.memory_allocated() / 1024**2
-            print(f"  GPU memory before load: {mem_before:.1f} MB")
+            logger.info(f"  GPU memory before load: {mem_before:.1f} MB")
 
         # ================================================================
         # Step 3: FILTER OUT GHOP COMPONENTS (if Phase 3 enabled)
         # ================================================================
         if hasattr(opt, 'phase3') and opt.phase3.get('enabled', False):
-            print("\n[FILTER] Phase 3 enabled - excluding GHOP components from checkpoint")
+            logger.info("\n[FILTER] Phase 3 enabled - excluding GHOP components from checkpoint")
 
             # Keys to exclude (GHOP components already initialized from GHOP checkpoint)
             ghop_component_prefixes = [
@@ -774,44 +781,44 @@ def main():
                 # Check shape mismatch (catches remaining GHOP conflicts)
                 if key in model_sd and value.shape != model_sd[key].shape:
                     excluded_by_shape.append(key)
-                    print(f"[FILTER] Shape mismatch: {key}")
-                    print(f"         Checkpoint: {value.shape} → Model: {model_sd[key].shape}")
+                    logger.info(f"[FILTER] Shape mismatch: {key}")
+                    logger.info(f"         Checkpoint: {value.shape} → Model: {model_sd[key].shape}")
                     continue
 
                 # Safe to load
                 filtered_sd[key] = value
 
-            print(f"[FILTER] Results:")
-            print(f"  Original checkpoint keys: {original_count}")
-            print(f"  Excluded (GHOP prefix): {len(excluded_by_prefix)}")
-            print(f"  Excluded (shape mismatch): {len(excluded_by_shape)}")
-            print(f"  Remaining HOLD keys: {len(filtered_sd)}")
+            logger.info(f"[FILTER] Results:")
+            logger.info(f"  Original checkpoint keys: {original_count}")
+            logger.info(f"  Excluded (GHOP prefix): {len(excluded_by_prefix)}")
+            logger.info(f"  Excluded (shape mismatch): {len(excluded_by_shape)}")
+            logger.info(f"  Remaining HOLD keys: {len(filtered_sd)}")
 
             if len(excluded_by_prefix) > 0:
-                print(f"\n[FILTER] Sample excluded GHOP keys:")
+                logger.info(f"\n[FILTER] Sample excluded GHOP keys:")
                 for key in excluded_by_prefix[:5]:
-                    print(f"  - {key}")
+                    logger.info(f"  - {key}")
 
             if len(excluded_by_shape) > 0:
-                print(f"\n[FILTER] Keys with shape mismatch:")
+                logger.info(f"\n[FILTER] Keys with shape mismatch:")
                 for key in excluded_by_shape[:10]:
-                    print(f"  - {key}")
+                    logger.info(f"  - {key}")
 
             sd = filtered_sd
-            print(f"\n✓ Filtered checkpoint ready: {len(sd)} parameters")
+            logger.info(f"\n✓ Filtered checkpoint ready: {len(sd)} parameters")
         else:
-            print("\n[FILTER] Phase 3 disabled - loading all checkpoint weights")
+            logger.info("\n[FILTER] Phase 3 disabled - loading all checkpoint weights")
 
         # ================================================================
         # Step 4: Load filtered state dict
         # ================================================================
-        print(f"\nLoading {len(sd)} parameters into model...")
+        logger.info(f"\nLoading {len(sd)} parameters into model...")
         missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
 
-        print(f"\n✓ Checkpoint loaded:")
-        print(f"  - Parameters loaded: {len(sd)}")
-        print(f"  - Missing in checkpoint: {len(missing_keys)}")
-        print(f"  - Unexpected in checkpoint: {len(unexpected_keys)}")
+        logger.info(f"\n✓ Checkpoint loaded:")
+        logger.info(f"  - Parameters loaded: {len(sd)}")
+        logger.info(f"  - Missing in checkpoint: {len(missing_keys)}")
+        logger.info(f"  - Unexpected in checkpoint: {len(unexpected_keys)}")
 
         # Log missing keys breakdown (if Phase 3 enabled)
         if hasattr(opt, 'phase3') and opt.phase3.get('enabled', False):
@@ -820,14 +827,14 @@ def main():
             hold_missing = [k for k in missing_keys if k not in ghop_missing]
 
             if len(ghop_missing) > 0:
-                print(f"\n✅ GHOP components not loaded from checkpoint (expected): {len(ghop_missing)}")
-                print(f"   These were initialized from GHOP checkpoint instead")
+                logger.info(f"\n✅ GHOP components not loaded from checkpoint (expected): {len(ghop_missing)}")
+                logger.info(f"   These were initialized from GHOP checkpoint instead")
 
             if len(hold_missing) > 0:
-                print(f"\n⚠️  HOLD components missing from checkpoint: {len(hold_missing)}")
+                logger.info(f"\n⚠️  HOLD components missing from checkpoint: {len(hold_missing)}")
                 if len(hold_missing) <= 10:
                     for key in hold_missing:
-                        print(f"   - {key}")
+                        logger.info(f"   - {key}")
 
         # Step 5: Post-load cleanup
         if torch.cuda.is_available():
@@ -835,25 +842,25 @@ def main():
             torch.cuda.empty_cache()
 
             mem_after = torch.cuda.memory_allocated() / 1024**2
-            print(f"\n  GPU memory after load: {mem_after:.1f} MB")
-            print(f"  Memory increase: {mem_after - mem_before:.1f} MB")
+            logger.info(f"\n  GPU memory after load: {mem_after:.1f} MB")
+            logger.info(f"  Memory increase: {mem_after - mem_before:.1f} MB")
 
-        print(f"\n✅ Transfer learning setup complete")
-        print(f"✅ Training will start from epoch 0")
-        print(f"{'='*70}\n")
+        logger.info(f"\n✅ Transfer learning setup complete")
+        logger.info(f"✅ Training will start from epoch 0")
+        logger.info(f"{'='*70}\n")
         ckpt_path = None
 
     if args.load_pose != "":
         sd = torch.load(args.load_pose)["state_dict"]
         mysd = model.state_dict()
-        print("Loading pose from: ", args.load_pose)
-        print("Keys in loaded state dict:")
+        logger.info("Loading pose from: ", args.load_pose)
+        logger.info("Keys in loaded state dict:")
         for k, v in sd.items():
             if ".params." in k or "object_model.obj_scale" in k:
                 assert k in mysd, f"{k} not in mysd"
-                print("\t" + k)
+                logger.info("\t" + k)
                 mysd[k] = v
-        print("End of keys")
+        logger.info("End of keys")
         model.load_state_dict(mysd, strict=True)
         ckpt_path = None
 
@@ -864,9 +871,9 @@ def main():
     # not raw Dataset objects. This is especially important for
     # GHOPHOIDataset which doesn't have a built-in DataLoader wrapper.
 
-    print("\n" + "="*70)
-    print("DATALOADER CREATION")
-    print("="*70)
+    logger.info("\n" + "="*70)
+    logger.info("DATALOADER CREATION")
+    logger.info("="*70)
 
     from torch.utils.data import DataLoader
 
@@ -901,14 +908,14 @@ def main():
         drop_last=opt.dataset.train.get('drop_last', False)
     )
 
-    print(f"Training DataLoader:")
-    print(f"  Dataset type: {type(trainset).__name__}")
-    print(f"  Dataset size: {len(trainset)}")
-    print(f"  Batch size: {train_batch_size}")
-    print(f"  Num workers: {num_workers}")
-    print(f"  Pin memory: {use_pin_memory}  # ✅ {'DISABLED' if not use_pin_memory else 'ENABLED'}")
-    print(f"  Shuffle: {shuffle_train}")
-    print(f"  Total batches: {len(train_loader)}")
+    logger.info(f"Training DataLoader:")
+    logger.info(f"  Dataset type: {type(trainset).__name__}")
+    logger.info(f"  Dataset size: {len(trainset)}")
+    logger.info(f"  Batch size: {train_batch_size}")
+    logger.info(f"  Num workers: {num_workers}")
+    logger.info(f"  Pin memory: {use_pin_memory}  # ✅ {'DISABLED' if not use_pin_memory else 'ENABLED'}")
+    logger.info(f"  Shuffle: {shuffle_train}")
+    logger.info(f"  Total batches: {len(train_loader)}")
 
     # Create validation DataLoader
     val_loader = DataLoader(
@@ -920,26 +927,26 @@ def main():
         drop_last=False
     )
 
-    print(f"\nValidation DataLoader:")
-    print(f"  Dataset type: {type(validset).__name__}")
-    print(f"  Dataset size: {len(validset)}")
-    print(f"  Batch size: {val_batch_size}")
-    print(f"  Total batches: {len(val_loader)}")
+    logger.info(f"\nValidation DataLoader:")
+    logger.info(f"  Dataset type: {type(validset).__name__}")
+    logger.info(f"  Dataset size: {len(validset)}")
+    logger.info(f"  Batch size: {val_batch_size}")
+    logger.info(f"  Total batches: {len(val_loader)}")
 
-    print("="*70 + "\n")
+    logger.info("="*70 + "\n")
 
     # ================================================================
     # Start training with DataLoaders (not raw datasets)
     # ================================================================
-    print("Starting training...")
-    print(f"  Max epochs: {args.num_epoch}")
-    print(f"  Checkpoint: {ckpt_path if ckpt_path else 'Training from scratch'}")
-    print("")
+    logger.info("Starting training...")
+    logger.info(f"  Max epochs: {args.num_epoch}")
+    logger.info(f"  Checkpoint: {ckpt_path if ckpt_path else 'Training from scratch'}")
+    logger.info("")
 
     # ✅ FIX: Pass DataLoaders instead of raw datasets
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
-    print("\n✅ Training complete!")
+    logger.info("\n✅ Training complete!")
 
 
 if __name__ == "__main__":

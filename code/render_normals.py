@@ -220,7 +220,7 @@ python render_normals.py \
   --agent_id -1
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/6041306f3_000003000/checkpoints/last.ckpt \
+  --load_ckpt logs/8ef7aae99_000030000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1

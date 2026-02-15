@@ -140,8 +140,11 @@ class Node(nn.Module):
         print(f"  density mean: {density.mean().item():.6f}")
         if density.max().item() < 0.001:
             print(f"  ⚠️  Density is near-zero! Object will be invisible!")
+        # Calculate correct num_pixels based on actual canonical_points size
+        total_points = canonical_points.shape[0]
+        expected_num_pixels = total_points // (sample_dict["batch_size"] * num_samples * 3)
         sample_dict["canonical_pts"] = canonical_points.view(
-            sample_dict["batch_size"], sample_dict["num_pixels"], num_samples, 3
+            sample_dict["batch_size"], -1, num_samples, 3
         )
         # color, normal, density, semantics
         factors = {

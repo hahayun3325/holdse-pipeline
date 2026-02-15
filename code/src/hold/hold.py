@@ -129,11 +129,11 @@ class HOLD(pl.LightningModule):
         betas_r = entities["right"]["mean_shape"] if "right" in entities else None
         betas_l = entities["left"]["mean_shape"] if "left" in entities else None
 
-        # # Force FiLM configuration before model creation (around line 130)
-        # if hasattr(opt.model, 'obj_implicit_network'):
-        #     opt.model.obj_implicit_network.cond_dim = 128
-        #     opt.model.obj_implicit_network.use_film = True
-        #     logger.info(f"[Config Override] Set obj_implicit_network cond_dim=128, use_film=True")
+        # Force FiLM configuration before model creation (around line 130)
+        if hasattr(opt.model, 'obj_implicit_network'):
+            opt.model.obj_implicit_network.cond_dim = 128
+            opt.model.obj_implicit_network.use_film = True
+            logger.info(f"[Config Override] Set obj_implicit_network cond_dim=128, use_film=True")
 
         self.model = HOLDNet(
             opt.model,
@@ -1720,7 +1720,7 @@ class HOLD(pl.LightningModule):
             checkpoint['state_dict'] = state_dict
             print(f"[Checkpoint Patch] Preserved {len(state_dict)} keys")
 
-        return ckpt
+        return checkpoint
 
     def on_load_checkpoint(self, checkpoint):
         """
@@ -2304,8 +2304,9 @@ class HOLD(pl.LightningModule):
         # ================================================================
         if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
             object_node = self.model.nodes['object']
+            logger.info(f"update_geometry_latent hasattr result: {hasattr(object_node, 'update_geometry_latent')}")
             if hasattr(object_node, 'update_geometry_latent'):
-                logger.info(f"[Step {self.global_step}] Pre-forward: Updating z_geo_refined...")
+                logger.info(f"[update_geometry_latent Step {self.global_step}] Pre-forward: Updating z_geo_refined...")
                 obj_model = None
                 if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
                     obj_model = object_node.server.object_model
@@ -2316,17 +2317,18 @@ class HOLD(pl.LightningModule):
                         if hasattr(obj_model, 'v3d_cano'):
                             obj_verts = obj_model.v3d_cano
                     if obj_verts is not None:
+                        grid_res = getattr(self.opt.model, "grid_resolution", 16)
                         voxel_sdf = self._mesh_to_sdf_grid(
                             obj_verts,
-                            grid_resolution=32, # hard coded resolution
+                            grid_resolution=grid_res, # hard coded resolution
                             for_encoder=True
                         )
                         obj_model.cache_voxel_grid(voxel_sdf)
                         success = object_node.update_geometry_latent()
                         if success:
-                            logger.info(f"[Step {self.global_step}] Updated z_geo_refined pre-forward")
+                            logger.info(f"[update_geometry_latent Step {self.global_step}] Updated z_geo_refined pre-forward")
                 except Exception as e:
-                    logger.debug(f"[Step {self.global_step}] Could not update geometry latent: {e}")
+                    logger.debug(f"[update_geometry_latent Step {self.global_step}] Could not update geometry latent: {e}")
 
             # Check sdf_grid
             if hasattr(obj_model, 'sdf_grid'):
@@ -3857,6 +3859,8 @@ class HOLD(pl.LightningModule):
         # In src/hold/hold.py, where losses are computed
         # Add L2 regularization on residual MLP to keep it near identity
         w_residual_l2 = getattr(self.opt.loss, 'w_residual_l2', 0.01)
+        logger.info(
+            f"[Residual L2] w_residual_l2={w_residual_l2}, has object_node={hasattr(self.model.nodes, 'object')}")
         if w_residual_l2 > 0 and hasattr(self.model, 'nodes'):
             object_node = self.model.nodes['object']
             if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
@@ -4154,7 +4158,7 @@ class HOLD(pl.LightningModule):
                     std_thresh = 1e-5 if self.global_step < self.opt.training.sdf_warmup_end else 5e-6
                     if sdf_std < std_thresh:
                         logger.warning(
-                            f"Phase 3 objectsdf is weak/flat std={sdfstd:.6f} "
+                            f"Phase 3 objectsdf is weak/flat std={sdf_std:.6f} "
                             f"(thresh={std_thresh:.1e}) – skipping SDS this step."
                         )
                         # Soft‑skip: set a flag or just return 0 SDS, but DO NOT throw.
@@ -5624,7 +5628,7 @@ class HOLD(pl.LightningModule):
         # self.manual_backward(final_loss, retain_graph=is_phase_transition or True)
         # self.manual_backward(final_loss, retain_graph=is_phase_transition)
         self.manual_backward(final_loss, retain_graph=True)
-        # self.manual_backward(final_loss, retain_graph=False)
+        # self.manual_backward(final_loss, retain_graph=False) # 02/15 test: temporary disable
 
         # ================================================================
         # ✅ VERIFICATION: Check if gradients actually reached MANO params
@@ -7005,7 +7009,7 @@ class HOLD(pl.LightningModule):
         return obj_verts_list, obj_faces_list
     # ====================================================================
 
-    def _mesh_to_sdf_grid(self, vertices, grid_resolution=32, padding=0.1, for_encoder: bool = False):
+    def _mesh_to_sdf_grid(self, vertices, grid_resolution=16, padding=0.1, for_encoder: bool = False):
         """
         Convert a single instance mesh (vertices) to an approximate SDF grid.
 
