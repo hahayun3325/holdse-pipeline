@@ -129,6 +129,12 @@ class HOLD(pl.LightningModule):
         betas_r = entities["right"]["mean_shape"] if "right" in entities else None
         betas_l = entities["left"]["mean_shape"] if "left" in entities else None
 
+        # Force FiLM configuration before model creation (around line 130)
+        if hasattr(opt.model, 'obj_implicit_network'):
+            opt.model.obj_implicit_network.cond_dim = 128
+            opt.model.obj_implicit_network.use_film = True
+            logger.info(f"[Config Override] Set obj_implicit_network cond_dim=128, use_film=True")
+
         self.model = HOLDNet(
             opt.model,
             betas_r,
@@ -2554,7 +2560,12 @@ class HOLD(pl.LightningModule):
                 object_server = self.model.nodes['object'].server
                 obj_model = object_server.object_model
 
-                # NEW: Ensure we have faces
+                # NOTE: Why normal consistency may be 0.000000:
+                # Templates (e.g., foam_brick.pt) are torch.Tensor objects without faces.
+                # ObjectModel.__init__ checks for template.faces (line 114-119) but finds None,
+                # so self.faces is set to None. Without triangular faces, mesh_normal_consistency
+                # cannot compute surface smoothness. Fallback: use w_vertex_normal_prior (config)
+                # for vertex-level normal regularization instead.
                 if not hasattr(obj_model, 'faces') or obj_model.faces is None:
                     # Generate faces from voxel grid or use template
                     logger.warning("[Normal Consistency] No faces available, skipping")
@@ -3165,7 +3176,7 @@ class HOLD(pl.LightningModule):
                                             logger.info(f"  f3d_cano shape: {obj_model.f3d_cano.shape}")
 
                                         logger.info(f"  Has faces: {hasattr(obj_model, 'faces')}")
-                                        if hasattr(obj_model, 'faces'):
+                                        if hasattr(obj_model, 'faces') and obj_model.faces is not None:
                                             logger.info(f"  faces shape: {obj_model.faces.shape}")
 
                             # Try to extract object mesh from SDF (largest component only)

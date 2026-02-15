@@ -110,6 +110,14 @@ class ObjectModel(nn.Module):
         # Canonical object vertices remain learnable (used for mesh-based priors, etc.)
         self.v3d_cano = nn.Parameter(v3d_cano, requires_grad=True)
 
+        # In ObjectModel.__init__ after line 111, add:
+        if template is not None and hasattr(template, 'faces'):
+            faces = template.faces
+            self.register_buffer('faces', torch.LongTensor(faces))
+        else:
+            # Generate faces from point cloud using convex hull or template mesh
+            self.faces = None  # Will skip normal consistency
+
         # Initialize SDF grid from vertices
         with torch.no_grad():
             logger.info(
