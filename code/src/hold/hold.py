@@ -5629,6 +5629,7 @@ class HOLD(pl.LightningModule):
         # self.manual_backward(final_loss, retain_graph=is_phase_transition)
         self.manual_backward(final_loss, retain_graph=True)
         # self.manual_backward(final_loss, retain_graph=False) # 02/15 test: temporary disable
+        # distable retaining graph failed:pytorch_lightning.utilities.exceptions.MisconfigurationException: In manual optimization, `training_step` must either return a Tensor, a dict with extras to pass to `training_epoch_end` or have no return.
 
         # ================================================================
         # ✅ VERIFICATION: Check if gradients actually reached MANO params
