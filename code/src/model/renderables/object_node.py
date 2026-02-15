@@ -108,6 +108,8 @@ class ObjectNode(Node):
 
         # ✅ Create cond dictionary (2D after squeezing)
         cond = {"pose": global_orient / np.pi}  # [B, 3]
+        if hasattr(self, 'z_geo_refined') and self.z_geo_refined is not None:
+            cond['geo'] = self.z_geo_refined  # Add FiLM conditioning here
 
         # Get camera parameters
         ray_dirs, cam_loc = get_camera_params(
@@ -191,6 +193,8 @@ class ObjectNode(Node):
         # Expand: [B, D] -> [B*num_pixels, D]
         cond_expanded = pose.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, pose.shape[-1])
         cond = {"pose": cond_expanded}
+        if hasattr(self, 'z_geo_refined') and self.z_geo_refined is not None:
+            cond['geo'] = self.z_geo_refined
 
         # ================================================================
         # ✅ FIX: Build output dict with correct variable names
@@ -235,6 +239,8 @@ class ObjectNode(Node):
         # 4. Canonical mesh update
         # ================================================================
         cond = {"pose": torch.zeros(1, self.specs.pose_dim).float().cuda()}
+        if hasattr(self, 'z_geo_refined') and self.z_geo_refined is not None:
+            cond['geo'] = self.z_geo_refined
 
         # Ensure condition tensor doesn't have gradients
         # cond["pose"] = cond["pose"].detach()

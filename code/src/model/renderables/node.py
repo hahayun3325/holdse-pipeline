@@ -83,15 +83,18 @@ class Node(nn.Module):
             print(f"  ⚠️  deform_info is None or missing!")
         # In Node.forward, before calling sdf_func_with_deformer:
         # Choose SDF source based on training mode
-        if (not self.training and
-            self.node_id == "object" and  # <-- CRITICAL: Only for object node
-            hasattr(self, 'server') and
-            hasattr(self.server.object_model, 'sdf_grid')):
-            # Inference: use optimized SDF grid (bypasses drifted implicit network)
-            sdf_fn = lambda x_c, cond: self.query_sdf_grid(x_c, cond)
-        else:
-            # Training: keep original behavior (implicit network)
-            sdf_fn = self.implicit_network
+        # if (not self.training and
+        #     self.node_id == "object" and  # <-- CRITICAL: Only for object node
+        #     hasattr(self, 'server') and
+        #     hasattr(self.server.object_model, 'sdf_grid')):
+        #     # Inference: use optimized SDF grid (bypasses drifted implicit network)
+        #     sdf_fn = lambda x_c, cond: self.query_sdf_grid(x_c, cond)
+        # else:
+        #     # Training: keep original behavior (implicit network)
+        #     sdf_fn = self.implicit_network
+
+        # REPLACE WITH:
+        sdf_fn = self.implicit_network
 
         # Then call with the selected function:
         sdf_output, canonical_points, feature_vectors = volsdf_utils.sdf_func_with_deformer(

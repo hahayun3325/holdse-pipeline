@@ -41,6 +41,9 @@ class ImplicitNet(nn.Module):
             self.cond_layer = []
             self.cond_dim = 0
 
+        if self.cond_dim == 0:
+            logger.warning("c - FiLM disabled!")
+
         self.dim_pose_embed = 0
         if self.dim_pose_embed > 0:
             self.lin_p0 = nn.Linear(self.cond_dim, self.dim_pose_embed)
@@ -232,6 +235,18 @@ class ImplicitNet(nn.Module):
             if l in self.skip_in:
                 x = torch.cat([x, input], 1) / np.sqrt(2)
 
+            # FiLM compatibility: Handle checkpoint dimension mismatch
+            if self.use_film and x.shape[1] != lin.weight.shape[1]:
+                expected_dim = lin.weight.shape[1]
+                actual_dim = x.shape[1]
+                if actual_dim < expected_dim:
+                    # Pad with zeros to match old checkpoint dimensions
+                    padding = torch.zeros(x.shape[0], expected_dim - actual_dim, device=x.device)
+                    x = torch.cat([x, padding], dim=-1)
+                else:
+                    # Slice if too large
+                    x = x[:, :expected_dim]
+
             # Linear layer
             x = lin(x)
 
@@ -245,6 +260,19 @@ class ImplicitNet(nn.Module):
             if self.use_film and self.cond != "none" and input_cond is not None:
                 gamma = self.film_gamma[l](input_cond)  # [B*N, feat_dim_l]
                 beta = self.film_beta[l](input_cond)    # [B*N, feat_dim_l]
+
+                # Handle dimension mismatch between gamma/beta and x
+                if gamma.shape[1] != x.shape[1]:
+                    if gamma.shape[1] < x.shape[1]:
+                        # Pad gamma/beta to match x
+                        pad_size = x.shape[1] - gamma.shape[1]
+                        gamma = torch.cat([gamma, torch.zeros(gamma.shape[0], pad_size, device=gamma.device)], dim=1)
+                        beta = torch.cat([beta, torch.zeros(beta.shape[0], pad_size, device=beta.device)], dim=1)
+                    else:
+                        # Slice gamma/beta to match x
+                        gamma = gamma[:, :x.shape[1]]
+                        beta = beta[:, :x.shape[1]]
+
                 x = gamma * x + beta
                 logger.debug(
                     f"[FiLM] gamma range: [{gamma.min():.4f}, {gamma.max():.4f}], beta range: [{beta.min():.4f}, {beta.max():.4f}]")

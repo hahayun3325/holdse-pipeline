@@ -129,11 +129,11 @@ class HOLD(pl.LightningModule):
         betas_r = entities["right"]["mean_shape"] if "right" in entities else None
         betas_l = entities["left"]["mean_shape"] if "left" in entities else None
 
-        # Force FiLM configuration before model creation (around line 130)
-        if hasattr(opt.model, 'obj_implicit_network'):
-            opt.model.obj_implicit_network.cond_dim = 128
-            opt.model.obj_implicit_network.use_film = True
-            logger.info(f"[Config Override] Set obj_implicit_network cond_dim=128, use_film=True")
+        # # Force FiLM configuration before model creation (around line 130)
+        # if hasattr(opt.model, 'obj_implicit_network'):
+        #     opt.model.obj_implicit_network.cond_dim = 128
+        #     opt.model.obj_implicit_network.use_film = True
+        #     logger.info(f"[Config Override] Set obj_implicit_network cond_dim=128, use_film=True")
 
         self.model = HOLDNet(
             opt.model,
@@ -202,7 +202,7 @@ class HOLD(pl.LightningModule):
             opt = validate_phase2_config(opt)
             phase3_cfg = opt.phase3
 
-            self.grid_resolution = phase3_cfg.get('grid_resolution', 64)  # ← changed from 24
+            self.grid_resolution = phase3_cfg.get('grid_resolution', 32)  # match with the config
 
             # Determine initialization mode
             use_modular_init = phase3_cfg.get('use_modular_init', False)
@@ -366,7 +366,7 @@ class HOLD(pl.LightningModule):
                 logger.info("Initializing Hand Field Builder...")
                 self.hand_field_builder = HandFieldBuilder(
                     mano_server=mano_server,
-                    resolution=phase3_cfg.get('grid_resolution', 64),
+                    resolution=phase3_cfg.get('grid_resolution', 32),
                     spatial_limit=phase3_cfg.get('spatial_limit', 1.5)
                 )
                 logger.info("✓ Hand Field Builder initialized")
@@ -872,7 +872,7 @@ class HOLD(pl.LightningModule):
             logger.info(f"  warmup_iters: {self.warmup_iters}")
             logger.info(f"  sds_iters: {self.sds_iters}")
             logger.info(f"  w_sds: {self.w_sds}")
-            logger.info(f"  grid_resolution: {phase3_cfg.get('grid_resolution', 64)}")
+            logger.info(f"  grid_resolution: {phase3_cfg.get('grid_resolution', 32)}")
             logger.info(f"  spatial_lim: {phase3_cfg.get('spatial_lim', 1.5)}")
             logger.info(f"  guidance_scale: {phase3_cfg.sds.get('guidance_scale', 4.0)}")
             logger.info("\n  🔍 GHOP will activate when:")
@@ -1590,43 +1590,6 @@ class HOLD(pl.LightningModule):
                 f"Expected >100 MB for full model with optimizer state."
             )
 
-        def patch_checkpoint_for_film(checkpoint_path, new_cond_dim=128):
-            """
-            Load checkpoint and strip implicit network weights to force reinitialization.
-            Preserves hand model, encoder, and residual MLP.
-            """
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
-
-            if 'state_dict' not in ckpt:
-                print("[Checkpoint Patch] No state_dict found, returning as-is")
-                return ckpt
-
-            state_dict = ckpt['state_dict']
-
-            # Keys to remove (implicit network weights)
-            # These patterns match typical implicit network naming
-            implicit_keys = [
-                k for k in state_dict.keys()
-                if any(x in k for x in ['implicit_network', 'object_mlp', 'shape_net', 'object.implicit'])
-            ]
-
-            # Also remove object-specific MLP layers if named differently
-            film_keys = [
-                k for k in state_dict.keys()
-                if any(x in k for x in ['film_gamma', 'film_beta', 'film_mlp'])
-            ]
-
-            keys_to_remove = list(set(implicit_keys + film_keys))
-
-            print(f"[Checkpoint Patch] Removing {len(keys_to_remove)} implicit network keys:")
-            for k in keys_to_remove:
-                print(f"  - {k}")
-                del state_dict[k]
-
-            ckpt['state_dict'] = state_dict
-            print(f"[Checkpoint Patch] Preserved {len(state_dict)} keys")
-            return ckpt
-
         # ============================================================
         # Step 2: Load and inspect state dict
         # ============================================================
@@ -1722,6 +1685,58 @@ class HOLD(pl.LightningModule):
         logger.info("=" * 70)
 
         return True
+
+    def patch_checkpoint_for_film(self, checkpoint, new_cond_dim=128):
+        """
+        Patch checkpoint dict to strip implicit network weights for FiLM reinit.
+        Preserves hand model, encoder, and residual MLP.
+        """
+        if 'state_dict' not in checkpoint:
+            print("[Checkpoint Patch] No state_dict found, returning as-is")
+            return checkpoint
+
+        state_dict = checkpoint['state_dict']
+
+        # Keys to remove (implicit network weights)
+        # These patterns match typical implicit network naming
+        implicit_keys = [
+            k for k in state_dict.keys()
+            if any(x in k for x in ['implicit_network', 'object_mlp', 'shape_net', 'object.implicit'])
+        ]
+
+        # Also remove object-specific MLP layers if named differently
+        film_keys = [
+            k for k in state_dict.keys()
+            if any(x in k for x in ['film_gamma', 'film_beta', 'film_mlp'])
+        ]
+
+        keys_to_remove = list(set(implicit_keys + film_keys))
+
+        if len(keys_to_remove) > 0:
+            print(f"[Checkpoint Patch] Removing {len(keys_to_remove)} implicit network keys:")
+            for k in keys_to_remove:
+                print(f"  - {k}")
+                del state_dict[k]
+            checkpoint['state_dict'] = state_dict
+            print(f"[Checkpoint Patch] Preserved {len(state_dict)} keys")
+
+        return ckpt
+
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Called when loading checkpoint. Patch to reinitialize implicit network with FiLM.
+        """
+        # Apply the patch to strip old implicit network weights
+        checkpoint = self.patch_checkpoint_for_film(checkpoint)
+
+        # Now load the checkpoint properly
+        super().on_load_checkpoint(checkpoint)
+
+        # Force FiLM configuration after checkpoint load (redundant but safe)
+        if hasattr(self.model, 'obj_implicit_network'):
+            self.model.obj_implicit_network.cond_dim = 128
+            self.model.obj_implicit_network.use_film = True
+            logger.info(f"[Checkpoint Load] Enforced FiLM: cond_dim=128, use_film=True")
 
     def save_misc(self):
         """Save miscellaneous outputs (meshes, camera params, etc.)."""
@@ -2284,6 +2299,59 @@ class HOLD(pl.LightningModule):
         logger.info("[FIX] ✓ Metadata detached, MANO parameters preserved for gradient flow")
 
         # ================================================================
+        # UPDATE GEOMETRY LATENT (Option B - FiLM)
+        # Must happen BEFORE forward pass to avoid inplace modification
+        # ================================================================
+        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
+            object_node = self.model.nodes['object']
+            if hasattr(object_node, 'update_geometry_latent'):
+                logger.info(f"[Step {self.global_step}] Pre-forward: Updating z_geo_refined...")
+                obj_model = None
+                if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
+                    obj_model = object_node.server.object_model
+                try:
+                    obj_verts = None
+                    if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
+                        obj_model = object_node.server.object_model
+                        if hasattr(obj_model, 'v3d_cano'):
+                            obj_verts = obj_model.v3d_cano
+                    if obj_verts is not None:
+                        voxel_sdf = self._mesh_to_sdf_grid(
+                            obj_verts,
+                            grid_resolution=32, # hard coded resolution
+                            for_encoder=True
+                        )
+                        obj_model.cache_voxel_grid(voxel_sdf)
+                        success = object_node.update_geometry_latent()
+                        if success:
+                            logger.info(f"[Step {self.global_step}] Updated z_geo_refined pre-forward")
+                except Exception as e:
+                    logger.debug(f"[Step {self.global_step}] Could not update geometry latent: {e}")
+
+            # Check sdf_grid
+            if hasattr(obj_model, 'sdf_grid'):
+                sdf = obj_model.sdf_grid
+                is_param = isinstance(sdf, nn.Parameter)
+                requires_grad = sdf.requires_grad if hasattr(sdf, 'requires_grad') else False
+
+                logger.info(f"[sdf_grid] Type: {type(sdf).__name__}")
+                logger.info(f"[sdf_grid] Is Parameter: {is_param}")
+                logger.info(f"[sdf_grid] Requires Grad: {requires_grad}")
+                logger.info(f"[sdf_grid] Shape: {sdf.shape}")
+                logger.info(f"[sdf_grid] Stats: mean={sdf.mean().item():.4f}, std={sdf.std().item():.4f}")
+                logger.info(f"[sdf_grid] Range: [{sdf.min().item():.4f}, {sdf.max().item():.4f}]")
+
+                has_zero_crossing = (sdf.min() < 0) and (sdf.max() > 0)
+                logger.info(f"[sdf_grid] Has zero-crossing: {has_zero_crossing}")
+
+                if not is_param:
+                    logger.info("[sdf_grid] Not an nn.Parameter (treated as derived/cached grid).")
+                if not requires_grad:
+                    logger.info("[sdf_grid] requires_grad=False (OK for derived grid).")
+                if not has_zero_crossing:
+                    logger.warning("⚠️ [sdf_grid] No zero-crossing at initialization!")
+
+        # ================================================================
         # FORWARD PASS
         # ================================================================
         logger.info("[Forward] Calling self.model(batch)...")
@@ -2695,51 +2763,6 @@ class HOLD(pl.LightningModule):
             logger.info("=" * 60)
             logger.info("[PARAMETER VALIDATION] Checking learnable parameters...")
 
-            # Check object vertices
-            if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-                object_node = self.model.nodes['object']
-                if hasattr(object_node, 'server') and hasattr(object_node.server, 'object_model'):
-                    object_model = object_node.server.object_model
-
-                    # Check v3d_cano
-                    if hasattr(object_model, 'v3d_cano'):
-                        v3d = object_model.v3d_cano
-                        is_param = isinstance(v3d, nn.Parameter)
-                        requires_grad = v3d.requires_grad if hasattr(v3d, 'requires_grad') else False
-
-                        logger.info(f"[v3d_cano] Type: {type(v3d).__name__}")
-                        logger.info(f"[v3d_cano] Is Parameter: {is_param}")
-                        logger.info(f"[v3d_cano] Requires Grad: {requires_grad}")
-                        logger.info(f"[v3d_cano] Shape: {v3d.shape}")
-
-                        if not is_param:
-                            logger.error("❌ CRITICAL: v3d_cano is NOT nn.Parameter!")
-                        if not requires_grad:
-                            logger.error("❌ CRITICAL: v3d_cano has requires_grad=False!")
-
-                    # Check sdf_grid
-                    if hasattr(object_model, 'sdf_grid'):
-                        sdf = object_model.sdf_grid
-                        is_param = isinstance(sdf, nn.Parameter)
-                        requires_grad = sdf.requires_grad if hasattr(sdf, 'requires_grad') else False
-
-                        logger.info(f"[sdf_grid] Type: {type(sdf).__name__}")
-                        logger.info(f"[sdf_grid] Is Parameter: {is_param}")
-                        logger.info(f"[sdf_grid] Requires Grad: {requires_grad}")
-                        logger.info(f"[sdf_grid] Shape: {sdf.shape}")
-                        logger.info(f"[sdf_grid] Stats: mean={sdf.mean().item():.4f}, std={sdf.std().item():.4f}")
-                        logger.info(f"[sdf_grid] Range: [{sdf.min().item():.4f}, {sdf.max().item():.4f}]")
-
-                        has_zero_crossing = (sdf.min() < 0) and (sdf.max() > 0)
-                        logger.info(f"[sdf_grid] Has zero-crossing: {has_zero_crossing}")
-
-                        if not is_param:
-                            logger.info("[sdf_grid] Not an nn.Parameter (treated as derived/cached grid).")
-                        if not requires_grad:
-                            logger.info("[sdf_grid] requires_grad=False (OK for derived grid).")
-                        if not has_zero_crossing:
-                            logger.warning("⚠️ [sdf_grid] No zero-crossing at initialization!")
-
             # Check optimizer groups
             logger.info("\n[OPTIMIZER] Learning rates:")
             for idx, group in enumerate(self.optimizers().param_groups):
@@ -2872,7 +2895,8 @@ class HOLD(pl.LightningModule):
         # Object Template Chamfer
         if self.global_step % 50 == 0:  # Log every 50 steps
             logger.info(f"[Object Chamfer DEBUG - Step {self.global_step}]")
-            logger.info(f"  w_obj_chamfer: {getattr(self.opt.loss, 'w_obj_chamfer', 'NOT SET')}")
+            logger.info(
+                f"  w_obj_chamfer: {getattr(self, 'current_obj_chamfer_weight', getattr(self.opt.loss, 'w_obj_chamfer', 'NOT SET'))}")
             logger.info(f"  start_step: {getattr(self.opt.loss, 'obj_chamfer_start_step', 'NOT SET')}")
             logger.info(
                 f"  Should activate: {self.global_step >= getattr(self.opt.loss, 'obj_chamfer_start_step', 20000)}")
@@ -2882,8 +2906,11 @@ class HOLD(pl.LightningModule):
         step = self.global_step
 
         # NEW: Check for decay schedule in config
-        decay_cfg = getattr(self.opt.loss, 'w_obj_chamfer_decay', None)
-        if decay_cfg and decay_cfg.get('enabled', False):
+        decay_cfg = getattr(self.opt.loss, 'w_obj_chamfer_decay', {})
+        logger.info(f"[Chamfer Decay] decay_cfg type: {type(decay_cfg)}, value: {decay_cfg}")
+        decay_enabled = decay_cfg.get('enabled', False)
+        logger.info(f"[Chamfer Decay] enabled={decay_enabled}, step={step}, cfg={decay_cfg.keys()}")
+        if decay_enabled:
             # Config-driven decay schedule
             obj_chamfer_weight = base_w  # Default
 
@@ -2896,6 +2923,8 @@ class HOLD(pl.LightningModule):
                 obj_chamfer_weight = decay_cfg.get('step_15000_weight', base_w * 0.75)
             elif step >= decay_cfg.get('step_10000', 10000):
                 obj_chamfer_weight = decay_cfg.get('step_10000_weight', base_w * 0.9)
+            elif step >= decay_cfg.get('step_3000', 3000):  # ADD THIS
+                obj_chamfer_weight = decay_cfg.get('step_3000', base_w * 0.05)  # ADD THIS
             else:
                 obj_chamfer_weight = base_w
         else:
@@ -3397,15 +3426,6 @@ class HOLD(pl.LightningModule):
                     except Exception as e:
                         if self.global_step % 500 == 0:
                             logger.warning(f"[Object Generic] Failed: {e}")
-
-        # In src/hold/hold.py, after Chamfer optimization or v3d_cano updates
-        # Around line 2815 (after Object Template Chamfer section)
-        # Update geometry latent for FiLM conditioning
-        if hasattr(self.model, 'nodes') and 'object' in self.model.nodes:
-            object_node = self.model.nodes['object']
-            if hasattr(object_node, 'update_geometry_latent'):
-                object_node.update_geometry_latent()
-                logger.debug(f"[Step {self.global_step}] Updated z_geo_refined for conditioning")
 
         # ================================================================
         # ✅ OBJECT SMOOTHNESS REGULARIZATION
@@ -5603,8 +5623,8 @@ class HOLD(pl.LightningModule):
         # Single backward call with appropriate retain_graph setting
         # self.manual_backward(final_loss, retain_graph=is_phase_transition or True)
         # self.manual_backward(final_loss, retain_graph=is_phase_transition)
-        # self.manual_backward(final_loss, retain_graph=True)
-        self.manual_backward(final_loss, retain_graph=False)
+        self.manual_backward(final_loss, retain_graph=True)
+        # self.manual_backward(final_loss, retain_graph=False)
 
         # ================================================================
         # ✅ VERIFICATION: Check if gradients actually reached MANO params
@@ -6867,7 +6887,7 @@ class HOLD(pl.LightningModule):
         These instance meshes can be voxelized for the geometry encoder via:
             voxel_sdf = self._mesh_to_sdf_grid(
                 obj_verts_list[b],
-                grid_resolution=64,
+                grid_resolution=32,
                 padding=0.1,
                 for_encoder=True,
             )  # → [1, 1, 64, 64, 64]
@@ -6985,7 +7005,7 @@ class HOLD(pl.LightningModule):
         return obj_verts_list, obj_faces_list
     # ====================================================================
 
-    def _mesh_to_sdf_grid(self, vertices, grid_resolution=64, padding=0.1, for_encoder: bool = False):
+    def _mesh_to_sdf_grid(self, vertices, grid_resolution=32, padding=0.1, for_encoder: bool = False):
         """
         Convert a single instance mesh (vertices) to an approximate SDF grid.
 
@@ -6995,7 +7015,7 @@ class HOLD(pl.LightningModule):
 
         Args:
             vertices: [N, 3] canonical-space vertices for one instance.
-            grid_resolution: SDF grid resolution (default 64 for encoder).
+            grid_resolution: SDF grid resolution (default 32 for encoder).
             padding: Extra scale around the mesh bounding box.
             for_encoder: If True, return [1, 1, R, R, R] ready for a 3D CNN.
 

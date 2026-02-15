@@ -271,6 +271,52 @@ class ObjectModel(nn.Module):
         out["T"] = tf_mats
         return out
 
+    def update_geometry_latent(self, voxel_grid=None):
+        """
+        Update z_geo_refined from current object geometry for FiLM conditioning.
+
+        Args:
+            voxel_grid: Optional pre-computed voxelized SDF [1,1,64,64,64].
+                       If None, will be computed from v3d_cano.
+        """
+        if not hasattr(self, 'geometry_encoder') or not hasattr(self, 'residual_mlp'):
+            return False
+
+        # Ensure encoder is frozen
+        self.geometry_encoder.eval()
+
+        try:
+            if voxel_grid is None:
+                # Need to voxelize current vertices - requires external voxelization
+                # For now, assume voxel_grid is passed or stored
+                if hasattr(self, '_cached_voxel_grid'):
+                    voxel_grid = self._cached_voxel_grid
+                else:
+                    # Cannot update without voxelization input
+                    return False
+
+            # Encode (frozen, no gradient)
+            with torch.no_grad():
+                z_geo = self.geometry_encoder(voxel_grid)  # [1, 128]
+
+            # Refine through residual MLP (trainable)
+            z_geo_refined = self.residual_mlp(z_geo)  # [1, 128]
+
+            # Cache the result
+            # self.z_geo_refined = z_geo_refined
+            self.z_geo_refined = z_geo_refined.detach().clone()
+            self._cached_z_geo = z_geo  # Store base latent too
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"[update_geometry_latent] Failed: {e}")
+            return False
+
+    def cache_voxel_grid(self, voxel_grid):
+        """Cache voxel grid for use in update_geometry_latent."""
+        self._cached_voxel_grid = voxel_grid
+
     # In src/model/obj/object_model.py
     def compute_z_geo_refined(self):
         """

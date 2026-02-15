@@ -22,7 +22,7 @@ phase3:
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
-  grid_resolution: 64
+  grid_resolution: 32            # was 65
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - Earlier start for refinement (804b0572f style)
@@ -301,7 +301,7 @@ loss:
   obj_chamfer_start_step: 1500  # was 2000
   w_obj_chamfer_decay:
     enabled: true               # Keep steady
-    step_3000: 0.05    # ADD: cap at 3k
+    step_3000: 0.05             # ADD: cap at 3k
     step_8000: 0.02
     step_12000: 0.01
     step_16000: 0.005

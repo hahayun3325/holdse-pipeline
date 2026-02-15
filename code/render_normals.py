@@ -129,6 +129,22 @@ def main():
 
     # Load checkpoint
     ckpt = torch.load(args.load_ckpt, map_location=device)
+    # Strip old incompatible weights (same as training)
+    if 'state_dict' in ckpt:
+        state_dict = ckpt['state_dict']
+        keys_to_remove = [k for k in state_dict.keys()
+                          if any(x in k for x in ['implicit_network', 'film_gamma', 'film_beta'])]
+        for k in keys_to_remove:
+            del state_dict[k]
+        ckpt['state_dict'] = state_dict
+        logger.info(f"[Render] Removed {len(keys_to_remove)} old keys for FiLM compatibility")
+    # Update geometry latent for FiLM conditioning
+    if hasattr(model, 'model') and hasattr(model.model, 'nodes'):
+        obj_node = model.model.nodes['object'] if 'object' in model.model.nodes else None
+        if obj_node and hasattr(obj_node, 'update_geometry_latent'):
+            # Trigger latent update (similar to training pre-forward)
+            obj_node.update_geometry_latent()
+            logger.info(f"[Render] Updated z_geo_refined for FiLM conditioning")
     model.load_state_dict(ckpt["state_dict"], strict=False)
     model.to(device)
     model.eval()
@@ -154,7 +170,14 @@ def main():
     for idx, batch in enumerate(testset):
         with torch.no_grad():
             batch = thing.thing2dev(batch, device)
-
+            # In render loop, before calling model(batch):
+            if hasattr(model.model, 'nodes') and 'object' in model.model.nodes:
+                obj_node = model.model.nodes['object']
+                if hasattr(obj_node, 'z_geo_refined'):
+                    # Ensure cond includes geo key
+                    if 'cond' not in batch:
+                        batch['cond'] = {}
+                    batch['cond']['geo'] = obj_node.z_geo_refined
             # Standard inference - now uses SDF grid internally for object
             out = model.inference_step(batch)
 
@@ -197,7 +220,7 @@ python render_normals.py \
   --agent_id -1
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/4d60198fa_000003000/checkpoints/last.ckpt \
+  --load_ckpt logs/6041306f3_000003000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1
