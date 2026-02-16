@@ -1,70 +1,118 @@
+import argparse
 import torch
 import numpy as np
 
+def count_zero_crossings(sdf_grid: torch.Tensor):
+    # sdf_grid: [1, D, H, W] or [D, H, W]
+    if sdf_grid.dim() == 4:
+        sdf = sdf_grid[0]
+    else:
+        sdf = sdf_grid
 
-def inspect_checkpoint(path, name):
-    ckpt = torch.load(path, map_location='cpu')
-    sd = ckpt['state_dict']
+    signs = torch.sign(sdf)
+    # treat zeros as +1 to avoid fake crossings
+    signs[signs == 0] = 1.0
 
-    print(f"\n{'=' * 60}")
-    print(f"Inspecting: {name}")
-    print(f"{'=' * 60}")
+    cx = (signs[:, :, 1:] * signs[:, :, :-1] < 0).sum().item()
+    cy = (signs[:, 1:, :] * signs[:, :-1, :] < 0).sum().item()
+    cz = (signs[1:, :, :] * signs[:-1, :, :] < 0).sum().item()
+    return cx + cy + cz
 
-    # Find all object-related keys
-    obj_keys = [k for k in sd.keys() if 'object' in k.lower()]
-    print(f"\n1. Found {len(obj_keys)} object-related keys")
 
-    # Check for specific geometry keys
-    geometry_patterns = ['v3d_cano', 'f3d_cano', 'sdf', 'implicit', 'verts', 'mesh']
-    for pattern in geometry_patterns:
-        matching = [k for k in obj_keys if pattern in k.lower()]
-        print(f"   - {pattern}: {len(matching)} keys")
-        for k in matching[:3]:  # Show first 3
-            tensor = sd[k]
-            if tensor.dtype.is_floating_point:
-                print(f"     {k}: shape={tensor.shape}, "
-                      f"mean={tensor.mean():.4f}, std={tensor.std():.4f}, "
-                      f"has_nan={torch.isnan(tensor).any().item()}")
-            else:
-                print(f"     {k}: shape={tensor.shape}, dtype={tensor.dtype} "
-                      f"(integer tensor, skipping mean/std)")
-    # Add to inspection script for HOLDSE
-    sdf_keys = [k for k in sd.keys() if 'sdf' in k.lower() or 'implicit' in k.lower()]
-    print(f"\nSDF/Implicit network keys: {len(sdf_keys)}")
+def summarize_tensor(name, t):
+    t = t.float()
+    print(f"{name}: shape={tuple(t.shape)}, "
+          f"min={t.min().item():.4f}, max={t.max().item():.4f}, "
+          f"mean={t.mean().item():.4f}, std={t.std().item():.4f}")
 
-    # Check if object model has valid parameters
-    obj_param_keys = [k for k in sd.keys() if 'object' in k.lower() and 'model' in k.lower()]
-    for k in obj_param_keys[:10]:
-        tensor = sd[k]
-        if tensor.dtype.is_floating_point:
-            print(f"{k}: shape={tensor.shape}, mean={tensor.mean():.4f}, has_nan={torch.isnan(tensor).any()}")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt", type=str,
+                        default="logs/cb20a1702/checkpoints/last.ckpt")
+    args = parser.parse_args()
+
+    ckpt = torch.load(args.ckpt, map_location="cpu")
+    state_dict = ckpt.get("state_dict", ckpt)
+
+    print("\n============================================================")
+    print(f"Inspecting checkpoint: {args.ckpt}")
+    print("============================================================\n")
+
+    # ---- 1. Detect FiLM vs baseline ----
+    object_prefix = "model.nodes.object."
+    implicit_prefix = object_prefix + "implicit_network."
+
+    has_film = any(
+        k.startswith(implicit_prefix + "film_gamma") or
+        k.startswith(implicit_prefix + "film_beta")
+        for k in state_dict.keys()
+    )
+
+    lin0_wv_key = implicit_prefix + "lin0.weight_v"
+    lin0_wv = state_dict.get(lin0_wv_key, None)
+
+    print("Architecture detection:")
+    print(f"  has_film: {has_film}")
+    if lin0_wv is not None:
+        print(f"  lin0.weight_v shape: {tuple(lin0_wv.shape)}")
+        if lin0_wv.shape[1] == 39:
+            print("  -> Interpreted as FiLM+PE (39‑dim positional encoding).")
+        elif lin0_wv.shape[1] == 167:
+            print("  -> Interpreted as concatenation (39 + 128).")
         else:
-            print(f"{k}: shape={tensor.shape}, dtype={tensor.dtype} (integer tensor)")
+            print("  -> Unexpected lin0 input dim, manual check needed.")
+    else:
+        print("  lin0.weight_v: MISSING (will be randomly initialized at load).")
 
-    # Check for NaN or extreme values
-    print(f"\n2. Checking for invalid values...")
-    for k in obj_keys:
-        if torch.isnan(sd[k]).any():
-            print(f"   WARNING: {k} contains NaN!")
-        if torch.isinf(sd[k]).any():
-            print(f"   WARNING: {k} contains Inf!")
+    # ---- 2. Report FiLM weights if present ----
+    if has_film:
+        for i in range(4):
+            gk = f"{implicit_prefix}film_gamma.{i}.weight"
+            bk = f"{implicit_prefix}film_gamma.{i}.bias"
+            if gk in state_dict:
+                summarize_tensor(f"film_gamma.{i}.weight", state_dict[gk])
+            if bk in state_dict:
+                summarize_tensor(f"film_gamma.{i}.bias", state_dict[bk])
 
-    # Check SDF health
-    sdf_grid = sd.get('model.nodes.object.server.object_model.sdf_grid', None)
-    if sdf_grid is not None:
-        print(f"\nSDF Grid Analysis:")
-        print(f"  min: {sdf_grid.min():.4f}, max: {sdf_grid.max():.4f}")
-        print(f"  zero-crossings: {((sdf_grid[:-1] * sdf_grid[1:]) < 0).sum().item()}")
+    # ---- 3. Inspect SDF grid (Option B) ----
+    sdf_key = object_prefix + "server.object_model.sdf_grid"
+    if sdf_key in state_dict:
+        sdf = state_dict[sdf_key]
+        print("\nSDF grid:")
+        summarize_tensor("  sdf_grid", sdf)
+        try:
+            zc = count_zero_crossings(sdf)
+            print(f"  zero-crossings: {zc}")
+        except Exception as e:
+            print(f"  zero-crossings: ERROR ({e})")
+    else:
+        print("\nSDF grid: not found (baseline-style object).")
 
-    # Check v3d_cano variance
-    v3d = sd.get('model.nodes.object.server.object_model.v3d_cano', None)
-    if v3d is not None:
-        print(f"\nv3d_cano Analysis:")
-        print(f"  bbox: [{v3d.min():.4f}, {v3d.max():.4f}]")
-        print(f"  std: {v3d.std():.4f} (very low = collapsed)")
+    # ---- 4. Inspect canonical vertices ----
+    v3d_key = object_prefix + "server.object_model.v3d_cano"
+    if v3d_key in state_dict:
+        v = state_dict[v3d_key].float()
+        mins = v.min(dim=0).values
+        maxs = v.max(dim=0).values
+        print("\nv3d_cano:")
+        print(f"  bbox: [{mins.min().item():.4f}, {maxs.max().item():.4f}]")
+        print(f"  std: {v.std().item():.4f}")
+    else:
+        print("\nv3d_cano: not found.")
+
+    print("\nDone.\n")
 
 
-# Run comparison
-inspect_checkpoint('logs/3618b7f9f_000004000/checkpoints/last.ckpt', 'HOLDSE step 4000 without Distillation')
-# inspect_checkpoint('logs/bd68a88d0_000004000/checkpoints/last.ckpt', 'HOLDSE step 4000 with Distillation')
-inspect_checkpoint('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 'OFFICIAL HOLD')
+if __name__ == "__main__":
+    main()
+
+# # Run comparison
+# inspect_checkpoint('logs/816cf7741_000000500/checkpoints/last.ckpt', 'HOLDSE step 500')
+# # inspect_checkpoint('logs/bd68a88d0_000004000/checkpoints/last.ckpt', 'HOLDSE step 4000 with Distillation')
+# inspect_checkpoint('/home/fredcui/Projects/hold/code/logs/cb20a1702/checkpoints/last.ckpt', 'OFFICIAL HOLD')
+
+'''
+python scripts/inspect_checkpoint.py --ckpt logs/cb20a1702_test/checkpoints/last.ckpt
+
+'''

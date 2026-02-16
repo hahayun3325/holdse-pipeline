@@ -168,7 +168,8 @@ def render_fg_rgb(
     deformer,
     implicit_network,
     rendering_network,
-    points,
+    sdf_query_points,    # for SDF/querying
+    view_points,         # for rendering position encoding
     view_dirs,
     cond,
     tfs,
@@ -176,9 +177,10 @@ def render_fg_rgb(
     is_training=True,
     time_code=None,
 ):
-    pnts_c = points
+    pnts_c = sdf_query_points  # for SDF features
+    pnts_render = view_points  # for rendering network position
 
-    # features on samples for rendering
+    # SDF query at canonical/object-space points
     _, normals, feature_vectors = extract_features(
         deformer,
         implicit_network,
@@ -227,7 +229,7 @@ def render_fg_rgb(
     try:
         # Rendering
         fg_rendering_output = rendering_network(
-            pnts_c, normals, view_dirs, cond["pose"], feature_vectors
+            pnts_render, normals, view_dirs, cond["pose"], feature_vectors
         )
         rgb_vals = fg_rendering_output[:, :3]
         return rgb_vals, normals

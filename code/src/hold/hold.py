@@ -131,9 +131,10 @@ class HOLD(pl.LightningModule):
 
         # Force FiLM configuration before model creation (around line 130)
         if hasattr(opt.model, 'obj_implicit_network'):
-            opt.model.obj_implicit_network.cond_dim = 128
+            # opt.model.obj_implicit_network.cond_dim = 0  # FiLM doesn't concatenate
             opt.model.obj_implicit_network.use_film = True
-            logger.info(f"[Config Override] Set obj_implicit_network cond_dim=128, use_film=True")
+            # opt.model.obj_implicit_network.film_cond_dim = 128  # Separate FiLM dim
+
 
         self.model = HOLDNet(
             opt.model,
@@ -1734,9 +1735,19 @@ class HOLD(pl.LightningModule):
 
         # Force FiLM configuration after checkpoint load (redundant but safe)
         if hasattr(self.model, 'obj_implicit_network'):
-            self.model.obj_implicit_network.cond_dim = 128
-            self.model.obj_implicit_network.use_film = True
-            logger.info(f"[Checkpoint Load] Enforced FiLM: cond_dim=128, use_film=True")
+            net = self.model.obj_implicit_network
+            net.use_film = True
+            net.cond_dim = 0  # No concatenation at input
+
+            # Reinitialize FiLM layers with correct film_cond_dim
+            if hasattr(net, 'film_cond_dim') and hasattr(net, 'film_gamma'):
+                import torch.nn as nn
+                for l in range(len(net.film_gamma)):
+                    out_dim = net.film_gamma[l].out_features
+                    device = net.film_gamma[l].weight.device
+                    net.film_gamma[l] = nn.Linear(net.film_cond_dim, out_dim).to(device)
+                    net.film_beta[l] = nn.Linear(net.film_cond_dim, out_dim).to(device)
+                logger.info(f"[Checkpoint Load] Reinitialized FiLM with film_cond_dim={net.film_cond_dim}")
 
     def save_misc(self):
         """Save miscellaneous outputs (meshes, camera params, etc.)."""

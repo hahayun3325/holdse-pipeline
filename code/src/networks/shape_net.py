@@ -8,7 +8,12 @@ from ..engine.embedders import get_embedder
 class ImplicitNet(nn.Module):
     def __init__(self, opt, args, body_specs):
         super().__init__()
-
+        # --- DEBUG START ---
+        logger.info(f"c")
+        logger.info(f"DEBUG: opt.cond_dim = {getattr(opt, 'cond_dim', 'MISSING')}")
+        logger.info(f"DEBUG: opt.use_film = {getattr(opt, 'use_film', 'MISSING')}")
+        logger.info(f"DEBUG: self.cond = {opt.cond}")
+        # --- DEBUG END ---
         dims = [opt.d_in] + list(opt.dims) + [opt.d_out + opt.feature_vector_size]
         self.num_layers = len(dims)
         self.skip_in = opt.skip_in
@@ -36,7 +41,15 @@ class ImplicitNet(nn.Module):
             self.cond_dim = opt.dim_frame_encoding
         elif self.cond == "geo" or self.cond == "geometry":
             self.cond_layer = [0]
-            self.cond_dim = opt.cond_dim  # Read from config
+            # Store original cond_dim for FiLM before potentially zeroing it
+            self.film_cond_dim = opt.cond_dim  # Always 128 for geometry latent
+            if getattr(opt, "use_film", False):
+                # FiLM mode: no concatenation at input layer (cond_dim=0)
+                self.cond_dim = 0
+            else:
+                # Concatenation mode: add latent to input
+                self.cond_dim = opt.cond_dim
+
         else:
             self.cond_layer = []
             self.cond_dim = 0
@@ -56,16 +69,17 @@ class ImplicitNet(nn.Module):
         #   opt.use_film = True, opt.cond = "geo" (or similar)
         self.use_film = getattr(opt, "use_film", False)
         if self.use_film and self.cond != "none":
-            # Expose conditioning dimension for callers (used by _query_object_implicit_sdf)
-            self.num_cond = self.cond_dim
+            # Use film_cond_dim (128), not cond_dim (0)
+            self.num_cond = self.film_cond_dim
 
             # Per-layer FiLM MLPs: gamma_l(cond), beta_l(cond) → [feat_dim_l]
             self.film_gamma = nn.ModuleList()
             self.film_beta = nn.ModuleList()
             for l in range(0, self.num_layers - 1):
                 out_dim = dims[l + 1]
-                self.film_gamma.append(nn.Linear(self.cond_dim, out_dim))
-                self.film_beta.append(nn.Linear(self.cond_dim, out_dim))
+                # Use film_cond_dim for FiLM layers
+                self.film_gamma.append(nn.Linear(self.film_cond_dim, out_dim))  # 128 input dim
+                self.film_beta.append(nn.Linear(self.film_cond_dim, out_dim))  # 128 input dim
         else:
             # Backward-compatible default (no FiLM)
             self.use_film = False

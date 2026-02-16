@@ -8,6 +8,7 @@ from ...engine.density import LaplaceDensity
 from ...engine.ray_sampler import ErrorBoundSampler
 from ...networks.shape_net import ImplicitNet
 from ...networks.texture_net import RenderingNet
+from loguru import logger
 
 
 class Node(nn.Module):
@@ -56,97 +57,69 @@ class Node(nn.Module):
 
         # ✅ FIX: Guard against NaN sampled points
         if torch.isnan(sample_dict['points']).any():
-            print(f"[Node.forward] ⚠️ sample_dict['points'] has NaN, replacing with zeros")
+            logger.info(f"[Node.forward] ⚠️ sample_dict['points'] has NaN, replacing with zeros")
             sample_dict['points'] = torch.nan_to_num(sample_dict['points'], nan=0.0)
         if 'z_vals' in sample_dict and torch.isnan(sample_dict['z_vals']).any():
-            print(f"[Node.forward] ⚠️ sample_dict['z_vals'] has NaN, replacing with 1.0")
+            logger.info(f"[Node.forward] ⚠️ sample_dict['z_vals'] has NaN, replacing with 1.0")
             sample_dict['z_vals'] = torch.nan_to_num(sample_dict['z_vals'], nan=1.0)
 
-        # ✅ NEW DEBUG: Check deform_info structure
-        print(f"\n[Node.forward] {self.node_id} - About to call sdf_func_with_deformer:")
-        print(f"  points shape: {sample_dict['points'].shape}")
-        if 'deform_info' in sample_dict and sample_dict['deform_info'] is not None:
-            deform_info = sample_dict['deform_info']
-            print(f"  deform_info type: {type(deform_info)}")
-            if isinstance(deform_info, dict):
-                print(f"  deform_info keys: {list(deform_info.keys())}")
-                for k, v in deform_info.items():
-                    if isinstance(v, torch.Tensor):
-                        print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
-                    elif isinstance(v, dict):
-                        print(f"    {k}: (nested dict with keys {list(v.keys())})")
-                    else:
-                        print(f"    {k}: type={type(v)}")
-            else:
-                print(f"  deform_info: {deform_info}")
+        # ✅ PRESERVE VIEW-SPACE POINTS before any deformation
+        view_points = sample_dict["points"]  # [B, N, 3] in camera/world space
+
+        # ✅ ONLY apply deformer/canonicalization for object nodes
+        if self.node_id == "object":
+            # Object: query SDF in canonical space
+            sdf_fn = self.implicit_network
+
+            sdf_output, canonical_points, feature_vectors = volsdf_utils.sdf_func_with_deformer(
+                self.deformer,
+                sdf_fn,  # Use conditional function
+                self.training,
+                view_points.reshape(-1, 3),  # input is view-space
+                sample_dict["deform_info"],
+            )
+            # Use canonical for SDF query, but view_points for rendering
+            render_points = view_points
+            sdf_query_points = canonical_points
+
         else:
-            print(f"  ⚠️  deform_info is None or missing!")
-        # In Node.forward, before calling sdf_func_with_deformer:
-        # Choose SDF source based on training mode
-        # if (not self.training and
-        #     self.node_id == "object" and  # <-- CRITICAL: Only for object node
-        #     hasattr(self, 'server') and
-        #     hasattr(self.server.object_model, 'sdf_grid')):
-        #     # Inference: use optimized SDF grid (bypasses drifted implicit network)
-        #     sdf_fn = lambda x_c, cond: self.query_sdf_grid(x_c, cond)
-        # else:
-        #     # Training: keep original behavior (implicit network)
-        #     sdf_fn = self.implicit_network
+            # Hand/MANO: stay in view space entirely
+            cond = sample_dict["deform_info"]["cond"]
+            output = self.implicit_network(view_points, cond)  # Pass [B, N, 3] directly
+            sdf_output = output[..., :1]  # Gives [B, N, 1] - extracts SDF channel
+            canonical_points = view_points.view(-1, 3)  # identity (no canonicalization)
+            feature_vectors = None
+            render_points = view_points
+            sdf_query_points = view_points.reshape(-1, 3)
 
-        # REPLACE WITH:
-        sdf_fn = self.implicit_network
+        # ✅ DEBUG
+        logger.info(f"\n[Node.forward] After processing:")
+        logger.info(f"  sdf_output has_nan: {torch.isnan(sdf_output).any().item()}")
+        logger.info(f"  canonical_points has_nan: {torch.isnan(canonical_points).any().item()}")
 
-        # Then call with the selected function:
-        sdf_output, canonical_points, feature_vectors = volsdf_utils.sdf_func_with_deformer(
-            self.deformer,
-            sdf_fn,  # Use conditional function instead of hard-coded self.implicit_network
-            self.training,
-            sample_dict["points"].reshape(-1, 3),
-            sample_dict["deform_info"],
-        )
-
-        # ✅ NEW DEBUG: Check immediately after sdf_func_with_deformer
-        print(f"\n[Node.forward] After sdf_func_with_deformer:")
-        print(f"  sdf_output has_nan: {torch.isnan(sdf_output).any().item()}")
-        print(f"  canonical_points has_nan: {torch.isnan(canonical_points).any().item()}")
-        print(f"  feature_vectors has_nan: {torch.isnan(feature_vectors).any().item()}")
-        if torch.isnan(canonical_points).any():
-            print(f"  ❌ canonical_points is NaN right after deformer!")
-            # Also check input points
-            print(f"  input points (sample_dict['points']) has_nan: {torch.isnan(sample_dict['points']).any().item()}")
-        # After line ~100 where sdf_output is computed
-        print(f"\n[Node.forward] {self.node_id} SDF statistics:")
-        print(f"  sdf_output shape: {sdf_output.shape}")
-        print(f"  sdf min/max: {sdf_output.min().item():.4f} / {sdf_output.max().item():.4f}")
-        print(f"  sdf mean: {sdf_output.mean().item():.4f}")
-        print(f"  sdf std: {sdf_output.std().item():.4f}")
-
-        # Count how many points are inside (SDF < 0) vs outside (SDF > 0)
-        inside_count = (sdf_output < 0).sum().item()
-        outside_count = (sdf_output > 0).sum().item()
-        print(f"  Points inside surface (SDF<0): {inside_count}")
-        print(f"  Points outside surface (SDF>0): {outside_count}")
         num_samples = sample_dict["z_vals"].shape[1]
+
+        # ✅ Pass both view_points (for shading) and sdf_query_points (for SDF)
         color, normal, semantics = self.render(
-            sample_dict, num_samples, canonical_points, feature_vectors, time_code
+            sample_dict,
+            num_samples,
+            render_points,        # view space for rendering
+            sdf_query_points,     # canonical for object, view for hand
+            feature_vectors,
+            time_code
         )
         self.device = color.device
 
-        num_samples = color.shape[1]
         density = self.density(sdf_output).view(-1, num_samples, 1)
-        print(f"\n[Node.forward] {self.node_id} Density statistics:")
-        print(f"  density shape: {density.shape}")
-        print(f"  density min/max: {density.min().item():.6f} / {density.max().item():.6f}")
-        print(f"  density mean: {density.mean().item():.6f}")
-        if density.max().item() < 0.001:
-            print(f"  ⚠️  Density is near-zero! Object will be invisible!")
-        # Calculate correct num_pixels based on actual canonical_points size
-        total_points = canonical_points.shape[0]
-        expected_num_pixels = total_points // (sample_dict["batch_size"] * num_samples * 3)
+
+        # Store both for downstream use
         sample_dict["canonical_pts"] = canonical_points.view(
             sample_dict["batch_size"], -1, num_samples, 3
         )
-        # color, normal, density, semantics
+        sample_dict["view_pts"] = view_points.view(
+            sample_dict["batch_size"], -1, num_samples, 3
+        )
+
         factors = {
             "color": color,
             "normal": normal,
@@ -158,7 +131,7 @@ class Node(nn.Module):
         return factors, sample_dict
 
     def render(
-        self, sample_dict, num_samples, canonical_points, feature_vectors, time_code
+        self, sample_dict, num_samples, view_points, sdf_query_points, feature_vectors, time_code
     ):
         color, normal, semantics = render_color(
             self.deformer,
@@ -167,11 +140,12 @@ class Node(nn.Module):
             sample_dict["ray_dirs"],
             sample_dict["cond"],
             sample_dict["tfs"],
-            canonical_points,
+            view_points,           # ✅ view space for shading
+            sdf_query_points,      # canonical for object SDF
             feature_vectors,
             self.training,
             num_samples,
-            self.class_id,
+            self.class_id if hasattr(self, 'class_id') else 0,
             time_code,
         )
         return color, normal, semantics

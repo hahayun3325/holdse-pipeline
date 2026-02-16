@@ -119,7 +119,7 @@ def main():
     for d in [hand_dir, object_dir, combined_dir]:
         os.makedirs(d, exist_ok=True)
 
-    logger.info(f"Test data dir: {opt.dataset.test.data_dir}")
+    # logger.info(f"Test data dir: {opt.dataset.test.data_dir}")
     logger.info(f"Saving normals to: {output_dir}")
 
     # Initialize model
@@ -127,25 +127,68 @@ def main():
     testset = create_dataset(opt.dataset.test, args)
     logger.info(f"Rendering {len(testset)} frames...")
 
-    # Load checkpoint
+    # Load checkpoint file
     ckpt = torch.load(args.load_ckpt, map_location=device)
-    # Strip old incompatible weights (same as training)
-    if 'state_dict' in ckpt:
-        state_dict = ckpt['state_dict']
-        keys_to_remove = [k for k in state_dict.keys()
-                          if any(x in k for x in ['implicit_network', 'film_gamma', 'film_beta'])]
-        for k in keys_to_remove:
-            del state_dict[k]
-        ckpt['state_dict'] = state_dict
-        logger.info(f"[Render] Removed {len(keys_to_remove)} old keys for FiLM compatibility")
-    # Update geometry latent for FiLM conditioning
+    state_dict = ckpt.get("state_dict", ckpt)
+
+    # Model's current shapes (Option B, FiLM-only input = 39 dims)
+    model_state = model.state_dict()
+
+    obj_imp_prefix = "model.nodes.object.implicit_network."
+    lin0_wv_key = obj_imp_prefix + "lin0.weight_v"
+
+    # Detect FiLM
+    has_film = any(
+        k.startswith(obj_imp_prefix + "film_gamma") or
+        k.startswith(obj_imp_prefix + "film_beta")
+        for k in state_dict.keys()
+    )
+    logger.info(f"[Render] has_film={has_film}")
+
+    # Fix object.lin0 only, leave hand/background untouched
+    if lin0_wv_key in state_dict and lin0_wv_key in model_state:
+        ckpt_w = state_dict[lin0_wv_key]
+        model_w = model_state[lin0_wv_key]
+        logger.info(f"[Render] lin0.weight_v ckpt={tuple(ckpt_w.shape)}, "
+                    f"model={tuple(model_w.shape)}")
+
+        if ckpt_w.shape[1] != model_w.shape[1]:
+            # Case: old mixed checkpoint (concat 39+128) -> new FiLM-only model (39)
+            if has_film and ckpt_w.shape[1] == 167 and model_w.shape[1] == 39:
+                logger.info("[Render] Slicing lin0.weight_v from [256,167] "
+                            "to [256,39] (drop latent concat, keep FiLM).")
+                state_dict[lin0_wv_key] = ckpt_w[:, :39]
+            # Case: old baseline without FiLM but same mismatch
+            elif (not has_film) and ckpt_w.shape[1] == 167 and model_w.shape[1] == 39:
+                logger.info("[Render] Baseline checkpoint [256,167] -> [256,39].")
+                state_dict[lin0_wv_key] = ckpt_w[:, :39]
+            else:
+                logger.warning("[Render] Unhandled lin0 shape mismatch, "
+                               "dropping object.lin0 params (random init).")
+                for k in list(state_dict.keys()):
+                    if k.startswith(obj_imp_prefix + "lin0."):
+                        del state_dict[k]
+        else:
+            logger.info("[Render] lin0.weight_v shapes match; no fix needed.")
+    else:
+        logger.warning("[Render] lin0.weight_v missing in checkpoint or model; "
+                       "object.lin0 will use random init.")
+
+    # Load patched state dict
+    model.load_state_dict(state_dict, strict=False)
+    model.to(device)
+    model.eval()
+
+    # Initialize geometry latent for FiLM conditioning
     if hasattr(model, 'model') and hasattr(model.model, 'nodes'):
-        obj_node = model.model.nodes['object'] if 'object' in model.model.nodes else None
-        if obj_node and hasattr(obj_node, 'update_geometry_latent'):
-            # Trigger latent update (similar to training pre-forward)
-            obj_node.update_geometry_latent()
-            logger.info(f"[Render] Updated z_geo_refined for FiLM conditioning")
-    model.load_state_dict(ckpt["state_dict"], strict=False)
+        if 'object' in model.model.nodes:
+            obj_node = model.model.nodes['object']
+            if hasattr(obj_node, 'update_geometry_latent'):
+                obj_node.update_geometry_latent()
+                logger.info("[Render] Updated z_geo_refined for FiLM conditioning")
+
+    model.load_state_dict(state_dict, strict=False)
+
     model.to(device)
     model.eval()
 
@@ -220,7 +263,7 @@ python render_normals.py \
   --agent_id -1
 python render_normals.py \
   --case hold_MC1_ho3d \
-  --load_ckpt logs/8ef7aae99_000030000/checkpoints/last.ckpt \
+  --load_ckpt logs/1dc871e9f_000030000/checkpoints/last.ckpt \
   --config confs/render_stage3_hold_MC1_ho3d_sds_from_official.yaml \
   --mute \
   --agent_id -1
