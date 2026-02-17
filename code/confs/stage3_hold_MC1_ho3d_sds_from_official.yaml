@@ -256,17 +256,17 @@ dataset:
     enabled: false
 
 # ================================================================
-# LOSS CONFIGURATION - 804b0572f Performance with 9fdbae668 Protection
+# LOSS CONFIGURATION
 # ================================================================
 loss:
-  # Geometry Controller (804b0572f levels for strong refinement)
-  target_geom_share: 0.12        # was 0.07
+  # Geometry Controller
+  target_geom_share: 0.25        # was 0.12
   max_geom_scale: 6.0            # was 4.0
   geom_boost_factor: 1.2         # keep 804b0572f value
 
   # SDF Protection (keep from 9fdbae668 - prevents SDF death)
   w_sdf_reg: 0.5                 # was 1.0
-  w_eikonal: 0.5                 # was 1.0
+  w_eikonal: 1.0                 # was 0.5
   w_sdf_on_verts: 0.3            # was 0.5
 
   # RGB Schedule
@@ -292,8 +292,8 @@ loss:
   w_depth_smoothness: 0.1
   # Object compactness (anti-floater prior)
   w_obj_compactness: 0.1       # NEW: used in mesh-based regularization
-  # Chamfer Settings (earlier start like 804b0572f)
-  w_chamfer: 0.1                 # was 0.03
+  # Chamfer Settings
+  w_chamfer: 0.5                 # was 0.1
   chamfer_start_step: 1000       # was 4000
 
   # Object Template Chamfer (earlier start)
@@ -301,17 +301,16 @@ loss:
   obj_chamfer_start_step: 1000  # was 1500
   w_obj_chamfer_decay:
     enabled: true               # Keep steady
-    step_3000: 0.05             # ADD: cap at 3k
-    step_8000: 0.02
-    step_12000: 0.01
-    step_16000: 0.005
-    step_20000: 0.0
+    step_3000: 0.50             #
+    step_8000: 0.50
+    step_15000: 0.2
+    step_30000: 0.1
 
   w_obj_generic: 0.0
   w_obj_smoothness: 0.05         # was 0.0
-  w_sdf_distill: 0.0             # was 0.1
+  w_sdf_distill: 0.0             # was 0.1 Turned off now
   w_vertex_normal_prior: 0.5     # NEW: weight for vertex normal prior on v3d_cano
-  w_residual_l2: 1.0e-4          # or 5.0e-5; keep it small
+  w_residual_l2: 0.001           # or 5.0e-5; keep it small
 
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
@@ -331,8 +330,8 @@ training:
   sdf_warmup_end: 3500           # ↑ from 5000
   distill_start_step: 4000       # was 8000
   distill_min_grid_zeros: 2000   # was 5000
-  object_freeze_at: 3000        # NEW: freeze object vertices after geometry is solid
-  object_unfreeze_at: 10000     # NEW: allow refinement again after contact stabilizes
+  object_freeze_at: 30000        # NEW: freeze object vertices after geometry is solid
+  object_unfreeze_at: 60000      # NEW: allow refinement again after contact stabilizes
 
 # ================================================================
 # OPTIMIZER CONFIGURATION (STAGE 3 FINE-TUNE)
