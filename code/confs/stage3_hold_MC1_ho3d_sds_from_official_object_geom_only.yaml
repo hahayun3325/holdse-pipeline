@@ -22,17 +22,17 @@ phase3:
     use_huggingface_clip: true
     clip_model_name: "openai/clip-vit-large-patch14"  # Optional: default if not specified
 
-  grid_resolution: 64
+  grid_resolution: 16            # was 32
   spatial_lim: 1.5
 
   # Phase 3 Boundaries - Earlier start for refinement (804b0572f style)
-  phase3_start_iter: 1500        # was 4000 - start at joint warm-up (804b0572f)
-  phase3_end_iter: 34999
+  phase3_start_iter: 60000        # was 4000 - start at joint warm-up (804b0572f)
+  phase3_end_iter: 60000
 
   # SDS Configuration - Stronger guidance for refinement (804b0572f)
   sds:
     diffusion_steps: 1000
-    guidance_scale: 3.0          # was 4.0
+    guidance_scale: 7.5          # FIX: Increased from 2.5 to 7.5
     max_step_ratio: 0.98
     min_step_ratio: 0.02
     noise_schedule: linear
@@ -44,11 +44,10 @@ phase3:
   # Re-tuned SDS weight schedule
   w_sds_schedule:
     enabled: true
-    step_1500: 0.15              # was 0.00
-    step_2000: 0.20              # was 0.40 - start strong at 2k (804b0572f)
-    step_4000: 0.30              # was 0.60 - reach 0.60 by step 4k
-    step_8000: 0.40              # was 0.70 - peak at 0.70 (capped vs 0.90 for safety)
-    step_15000: 0.50             # was 0.30
+    step_3000: 0.20              # FIX: Stronger start (was 0.05)
+    step_4000: 0.30              # FIX: Faster ramp (was 0.15)
+    step_8000: 0.50              # FIX: High cap (was 0.30)
+    step_15000: 0.50             # FIX: Maintain high
     step_20000: 0.50             # was 0.20
     step_25000: 0.50             # was 0.10
     step_30000: 0.40             # was 0.05
@@ -95,7 +94,7 @@ phase4:
   w_damping: 0.001               # ← ENABLED
 
   # Mesh extraction settings
-  mesh_resolution: 64          # Marching cubes resolution changed from 256
+  mesh_resolution: 32          # Marching cubes resolution changed from 256
   mesh_padding: 0.1             # Padding around object bounds
 
   log_contact_every: 100
@@ -115,7 +114,7 @@ phase5:
   scheduler:
     total_iterations: 60000
     warmup_iters: 0
-    phase3_start: 1500          # match phase3.phase3_start_iter (updated)
+    phase3_start: 60000          # match phase3.phase3_start_iter (updated)
     phase4_start: 35000         # match contact_start_iter
     phase5_start: 59500         # match phase5_start_iter
     finetune_start: 59750       # 250 steps before end
@@ -167,6 +166,21 @@ model:
     max_total_iters: 5
     N_samples_inverse_sphere: 32
     add_tiny: 0.000001
+
+  # Object implicit network
+  obj_implicit_network:
+    feature_vector_size: 256
+    d_in: 3
+    d_out: 1
+    dims: [256, 256, 256, 256, 256, 256, 256, 256]
+    init: geometry
+    bias: 0.6
+    skip_in: [4]
+    weight_norm: true
+    multires: 6
+    cond: geo
+    cond_dim: 128
+    use_film: True
 
   # Hand implicit network
   implicit_network:
@@ -242,29 +256,30 @@ dataset:
     enabled: false
 
 # ================================================================
-# LOSS CONFIGURATION - 804b0572f Performance with 9fdbae668 Protection
+# LOSS CONFIGURATION
 # ================================================================
 loss:
-  # Geometry Controller (804b0572f levels for strong refinement)
-  target_geom_share: 0.07        # was 0.03 - restore 804b0572f level
-  max_geom_scale: 4.0            # was 2.0 - restore 804b0572f level
+  # Geometry Controller
+  target_geom_share: 0.25        # was 0.12
+  max_geom_scale: 6.0            # was 4.0
   geom_boost_factor: 1.2         # keep 804b0572f value
 
   # SDF Protection (keep from 9fdbae668 - prevents SDF death)
   w_sdf_reg: 0.5                 # was 1.0
-  w_eikonal: 0.5                 # was 1.0
+  w_eikonal: 1.0                 # was 0.5
   w_sdf_on_verts: 0.3            # was 0.5
 
   # RGB Schedule
   w_rgb: 1.0
   w_rgb_schedule:
     enabled: true
-    step_0: 1.0
-    step_8000: 0.30              # give room to geometry + SDS
-    step_15000: 0.50             # was 0.3
-    step_25000: 0.80
-    step_30000: 1.0              # restore for final refinement
-    step_35000: 1.0
+    step_0: 0.1                  # FIX 4: Drastic reduction (was 0.3)
+    step_3000: 0.1               # FIX 4: Force geometry focus
+    step_8000: 0.2               # FIX 4: Gradual increase
+    step_15000: 0.2              # FIX 4: Cap at 0.2
+    step_25000: 0.2
+    step_30000: 0.2              # restore for final refinement
+    step_35000: 0.2
     interpolation: "linear"
 
   w_mask: 0.5
@@ -273,26 +288,30 @@ loss:
   rgb_loss_type: "l1"
 
   # Self-supervised geometry
-  w_normal_consistency: 0.1
+  w_normal_consistency: 0.5      # ↑ stronger normal smoothing; tune 0.3–1.0
   w_depth_smoothness: 0.1
-
-  # Chamfer Settings (earlier start like 804b0572f)
-  w_chamfer: 0.1                 # was 0.03
+  # Object compactness (anti-floater prior)
+  w_obj_compactness: 0.1       # NEW: used in mesh-based regularization
+  # Chamfer Settings
+  w_chamfer: 0.5                 # was 0.1
   chamfer_start_step: 1000       # was 4000
 
   # Object Template Chamfer (earlier start)
-  w_obj_chamfer: 0.1             # was 0.05
-  obj_chamfer_start_step: 1500  # Let SDS work first, was 4000
+  w_obj_chamfer: 0.50           # was 0.15
+  obj_chamfer_start_step: 1000  # was 1500
   w_obj_chamfer_decay:
-    enabled: false               # Keep steady
-    step_8000: 0.02
-    step_12000: 0.01
-    step_16000: 0.005
-    step_20000: 0.0
+    enabled: true               # Enabled, but values are flat
+    step_3000: 0.50             # FIX 1: Never decay below 0.5 was 0.5
+    step_8000: 0.50             # FIX 1: Keep strong was 0.5
+    step_15000: 0.50            # FIX 1: Keep strong was 0.2
+    step_30000: 0.50            # FIX 1: Keep strong was 0.1
 
   w_obj_generic: 0.0
-  w_obj_smoothness: 0.0
-  w_sdf_distill: 0.1             # was 1.0
+  w_obj_smoothness: 0.05         # was 0.0
+  w_sdf_distill: 0.0             # was 0.1 Turned off now
+  w_vertex_normal_prior: 0.5     # NEW: weight for vertex normal prior on v3d_cano
+  w_residual_l2: 0.001           # or 5.0e-5; keep it small
+
 # ================================================================
 # TRAINING CONFIGURATION - 30 EPOCHS
 # ================================================================
@@ -306,11 +325,14 @@ training:
   # Warm-up phase boundaries (in global_step units)
   geom_warmup_end: 0             # was 3500
   render_warmup_end: 1500
-  joint_warmup_end: 3500         # ↑ from 3500 – more joint warm-up
+  joint_warmup_end: 60000        # from 3500 prevent this phase switch from killing the training
   # Extended SDF-focused window
-  sdf_warmup_end: 3500           # ↑ from 5000
-  distill_start_step: 4000       # was 8000
+  sdf_warmup_end: 60000          # from 3500 prevent this phase switch from killing the training
+  distill_start_step: 60000      # was 8000
   distill_min_grid_zeros: 2000   # was 5000
+  object_freeze_at: 60000        # Disable
+  object_unfreeze_at: 60000      # Disable
+
 # ================================================================
 # OPTIMIZER CONFIGURATION (STAGE 3 FINE-TUNE)
 # ================================================================

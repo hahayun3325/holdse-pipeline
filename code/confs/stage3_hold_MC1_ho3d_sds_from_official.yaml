@@ -29,10 +29,10 @@ phase3:
   phase3_start_iter: 3000        # was 1500 - wait until geometry is stable
   phase3_end_iter: 34999
 
-  # SDS Configuration - Stronger guidance for refinement (804b0572f)
+  # SDS Configuration
   sds:
     diffusion_steps: 1000
-    guidance_scale: 3.0          # was 4.0
+    guidance_scale: 7.5          # FIX: Increased from 2.5 to 7.5
     max_step_ratio: 0.98
     min_step_ratio: 0.02
     noise_schedule: linear
@@ -44,10 +44,10 @@ phase3:
   # Re-tuned SDS weight schedule
   w_sds_schedule:
     enabled: true
-    step_3000: 0.05              # was 0.20
-    step_4000: 0.15              # was 0.30
-    step_8000: 0.30              # was 0.40
-    step_15000: 0.40             # was 0.50
+    step_3000: 0.20              # FIX: Stronger start (was 0.05)
+    step_4000: 0.30              # FIX: Faster ramp (was 0.15)
+    step_8000: 0.50              # FIX: High cap (was 0.30)
+    step_15000: 0.50             # FIX: Maintain high
     step_20000: 0.50             # was 0.20
     step_25000: 0.50             # was 0.10
     step_30000: 0.40             # was 0.05
@@ -94,7 +94,7 @@ phase4:
   w_damping: 0.001               # ← ENABLED
 
   # Mesh extraction settings
-  mesh_resolution: 16          # Marching cubes resolution changed from 256
+  mesh_resolution: 32          # Marching cubes resolution changed from 256
   mesh_padding: 0.1             # Padding around object bounds
 
   log_contact_every: 100
@@ -273,13 +273,13 @@ loss:
   w_rgb: 1.0
   w_rgb_schedule:
     enabled: true
-    step_0: 0.5
-    step_3000: 0.30              # give room to geometry + SDS
-    step_8000: 0.50
-    step_15000: 0.50             # was 0.3
-    step_25000: 0.80
-    step_30000: 1.0              # restore for final refinement
-    step_35000: 1.0
+    step_0: 0.1                  # FIX 4: Drastic reduction (was 0.3)
+    step_3000: 0.1               # FIX 4: Force geometry focus
+    step_8000: 0.2               # FIX 4: Gradual increase
+    step_15000: 0.2              # FIX 4: Cap at 0.2
+    step_25000: 0.2
+    step_30000: 0.2              # restore for final refinement
+    step_35000: 0.2
     interpolation: "linear"
 
   w_mask: 0.5
@@ -300,11 +300,11 @@ loss:
   w_obj_chamfer: 0.50           # was 0.15
   obj_chamfer_start_step: 1000  # was 1500
   w_obj_chamfer_decay:
-    enabled: true               # Keep steady
-    step_3000: 0.50             #
-    step_8000: 0.50
-    step_15000: 0.2
-    step_30000: 0.1
+    enabled: true               # Enabled, but values are flat
+    step_3000: 0.50             # FIX 1: Never decay below 0.5 was 0.5
+    step_8000: 0.50             # FIX 1: Keep strong was 0.5
+    step_15000: 0.50            # FIX 1: Keep strong was 0.2
+    step_30000: 0.50            # FIX 1: Keep strong was 0.1
 
   w_obj_generic: 0.0
   w_obj_smoothness: 0.05         # was 0.0
@@ -325,13 +325,13 @@ training:
   # Warm-up phase boundaries (in global_step units)
   geom_warmup_end: 0             # was 3500
   render_warmup_end: 1500
-  joint_warmup_end: 3500         # ↑ from 3500 – more joint warm-up
+  joint_warmup_end: 60000        # from 3500 prevent this phase switch from killing the training
   # Extended SDF-focused window
-  sdf_warmup_end: 3500           # ↑ from 5000
-  distill_start_step: 4000       # was 8000
+  sdf_warmup_end: 60000          # from 3500 prevent this phase switch from killing the training
+  distill_start_step: 60000      # was 8000
   distill_min_grid_zeros: 2000   # was 5000
-  object_freeze_at: 30000        # NEW: freeze object vertices after geometry is solid
-  object_unfreeze_at: 60000      # NEW: allow refinement again after contact stabilizes
+  object_freeze_at: 60000        # Disable
+  object_unfreeze_at: 60000      # Disable
 
 # ================================================================
 # OPTIMIZER CONFIGURATION (STAGE 3 FINE-TUNE)

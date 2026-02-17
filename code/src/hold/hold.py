@@ -104,7 +104,7 @@ def validate_phase2_config(opt):
         f"Phase 2 configuration validated:\n"
         f"  - SDS weight: {phase2_cfg.get('w_sds', 5000.0)}\n"
         f"  - Warmup iterations: {phase2_cfg.get('warmup_iters', 1000)}\n"
-        f"  - Grid resolution: {phase2_cfg.get('grid_resolution', 16)}³\n"
+        f"  - Grid resolution: {phase2_cfg.get('grid_resolution', 32)}³\n"
         f"  - Guidance scale: {phase2_cfg.sds.get('guidance_scale', 4.0)}"
     )
 
@@ -2081,8 +2081,18 @@ class HOLD(pl.LightningModule):
         # Fix 1: Handle idx field
         if isinstance(batch["idx"], list):
             # HOLD format: stack list of tensors
-            batch["idx"] = torch.stack(batch["idx"], dim=1)
+            # Ensure we don't accidentally create a 1D tensor of size [B*N]
+            try:
+                batch["idx"] = torch.stack(batch["idx"], dim=0) # usually dim=0 is safer for lists of scalars
+            except:
+                batch["idx"] = torch.stack(batch["idx"], dim=1)
+
+            # If stacked result is 2D [1, B], transpose to [B, 1]
+            if batch["idx"].shape[0] == 1 and batch["idx"].shape[1] > 1:
+                 batch["idx"] = batch["idx"].t()
+
             logger.debug(f"[Batch] Stacked idx from list: {batch['idx'].shape}")
+
         elif isinstance(batch["idx"], torch.Tensor):
             # GHOP format: already tensor, ensure correct shape [B, 1]
             if batch["idx"].dim() == 1:
@@ -2101,6 +2111,8 @@ class HOLD(pl.LightningModule):
                 if len(batch[key]) > 0 and isinstance(batch[key][0], torch.Tensor):
                     batch[key] = torch.stack(batch[key], dim=0)
                     logger.debug(f"[Batch] Stacked {key} from list: {batch[key].shape}")
+        if 'right.params' in batch and batch['right.params'].shape[0] != batch['idx'].shape[0]:
+             logger.warning(f"[Batch] Mismatch detected! right.params {batch['right.params'].shape} vs idx {batch['idx'].shape}")
 
         # ================================================================
         # Continue with existing preprocessing (keep unchanged)
@@ -2145,16 +2157,54 @@ class HOLD(pl.LightningModule):
             logger.info(f"[training_step] Calling node.params(batch['idx'])...")
             params_dict = node.params(batch['idx'])
 
+            # ✅ FIX 2 (Batch Mismatch): Pre-expand parameters
+            # We only expand if we are in "Image Mode" (batch contains images, not rays).
+            # Heuristic: If 'uv' is missing, we will generate rays later, so we must expand params now.
+
+            if 'uv' not in batch:
+                num_sample = getattr(self.args, 'num_sample', 128)
+                B = batch['idx'].shape[0]
+
+                # Check if we are really in image mode (small batch)
+                # If B is already large (e.g. 256), we might be in ray mode despite missing UVs?
+                # But 'idx' usually tracks images.
+
+                expanded_updates = {}
+
+                for k, v in params_dict.items():
+                    # Only expand tensors that match the image batch size B
+                    if isinstance(v, torch.Tensor) and v.shape[0] == B:
+                        try:
+                            v_exp = None
+                            # Case 1: [B, D] -> [B, N, D] -> [B*N, D]
+                            if v.dim() == 2:
+                                v_exp = v.unsqueeze(1).expand(B, num_sample, -1).reshape(B * num_sample, -1)
+                            # Case 2: [B, 1, D] -> [B, N, D] -> [B*N, D]
+                            elif v.dim() == 3 and v.shape[1] == 1:
+                                v_exp = v.expand(B, num_sample, -1).reshape(B * num_sample, -1)
+                            # Case 3: [B, 1, 1, D] -> [B, N, 1, D] -> [B*N, 1, D]
+                            elif v.dim() == 4 and v.shape[1] == 1 and v.shape[2] == 1:
+                                 v_exp = v.expand(B, num_sample, -1, -1).reshape(B * num_sample, -1, v.shape[-1])
+
+                            if v_exp is not None:
+                                expanded_updates[k] = v_exp
+                                logger.debug(f"[FIX] Expanded {k}: {v.shape} -> {v_exp.shape}")
+                        except Exception as e:
+                            logger.warning(f"[FIX] Skipping expansion for {k} {v.shape}: {e}")
+
+                # Robust Update: Only update params_dict with successfully expanded values
+                params_dict.update(expanded_updates)
             logger.info(f"[training_step] node.params() returned:")
             for k, v in params_dict.items():
                 if isinstance(v, torch.Tensor):
                     logger.info(f"    {k}: {v.shape}")
 
+            # Update batch, overwriting with expanded params
             batch.update(params_dict)
 
-            for key, value in preserved_values.items():
-                batch.overwrite(key, value)
-                logger.info(f"[FIX] Restored {key}: {value.shape}")
+            # REMOVED: Do not restore unexpanded values. We want the expanded ones!
+            # for key, value in preserved_values.items():
+            #    batch.overwrite(key, value)
 
             logger.info(f"[training_step] After batch.update:")
 
@@ -2175,50 +2225,105 @@ class HOLD(pl.LightningModule):
         # ================================================================
         # ✅ FINAL FIX: Create params for all nodes with correct shapes
         # ================================================================
+        # (Cleaned up: removed duplicate UV generation blocks to prefer gen_random_sample below)
+
         for node in self.model.nodes.values():
             node_id = node.node_id
             params_key = f"{node_id}.params"
 
-            # For MANO nodes (right/left): create from full_pose
+            # For MANO nodes (right/left): Force expansion check
             if node_id in ['right', 'left']:
                 full_pose_key = f"{node_id}.full_pose"
-                if full_pose_key in batch and params_key not in batch:
-                    batch[params_key] = batch[full_pose_key]
-                    logger.info(f"[FIX] Created {params_key} from {full_pose_key}: {batch[params_key].shape}")
+
+                # Check if we have the source data to fix the params
+                if full_pose_key in batch:
+                    fp = batch[full_pose_key]
+                    num_sample = getattr(self.args, 'num_sample', 128)
+                    B_sz = fp.shape[0]
+
+                    # Determine if we NEED to expand
+                    # If params_key exists but has wrong shape (e.g. [B, D]), we overwrite it.
+                    # If params_key is missing, we create it.
+
+                    should_expand = False
+                    if params_key not in batch:
+                        should_expand = True
+                    else:
+                        current_params = batch[params_key]
+                        # If current is [B, D] but we expect [B*N, D] (approx check via size)
+                        if current_params.shape[0] == B_sz and num_sample > 1:
+                            should_expand = True
+
+                    if should_expand:
+                        if fp.dim() == 2:
+                            # [B, D] -> [B*N, D]
+                            fp_exp = fp.unsqueeze(1).expand(B_sz, num_sample, -1).reshape(B_sz * num_sample, -1)
+
+                            # ✅ FIX: Use overwrite() or del/set to handle xdict restriction
+                            if hasattr(batch, 'overwrite'):
+                                batch.overwrite(params_key, fp_exp)
+                            else:
+                                if params_key in batch:
+                                    del batch[params_key]
+                                batch[params_key] = fp_exp
+
+                            logger.info(f"[FIX] Created/Updated & Expanded {params_key}: {fp.shape} -> {fp_exp.shape}")
+
+                            # --------------------------------------------------------
+                            # NEW FIX: Also expand individual MANO components if present
+                            # MANONode/Server uses these directly!
+                            # --------------------------------------------------------
+                            components = [
+                                f"{node_id}.transl",
+                                f"{node_id}.global_orient",
+                                f"{node_id}.betas",
+                                f"{node_id}.pose",
+                                f"{node_id}.full_pose"  # ✅ FIX: Add full_pose to expansion list
+                            ]
+                            for comp_key in components:
+                                if comp_key in batch:
+                                    comp_val = batch[comp_key]
+                                    # [B, 1, D] -> [B, N, D] -> [B*N, 1, D] (preserving structure usually expected by MANO server)
+                                    # Wait, MANO server logs show transl is [2, 1, 3] and squeezed to [2, 3].
+                                    # If we want 256 batch, we need [256, 1, 3] or [256, 3].
+
+                                    if comp_val.shape[0] == B_sz:
+                                        # Generic expansion
+                                        if comp_val.dim() == 3: # [B, 1, D]
+                                             comp_exp = comp_val.expand(B_sz, num_sample, -1).reshape(B_sz * num_sample, 1, -1)
+                                        elif comp_val.dim() == 2: # [B, D]
+                                             comp_exp = comp_val.unsqueeze(1).expand(B_sz, num_sample, -1).reshape(B_sz * num_sample, -1)
+                                        else:
+                                             continue
+
+                                        if hasattr(batch, 'overwrite'):
+                                            batch.overwrite(comp_key, comp_exp)
+                                        else:
+                                            del batch[comp_key]
+                                            batch[comp_key] = comp_exp
+                                        logger.info(f"[FIX] Expanded component {comp_key}: {comp_val.shape} -> {comp_exp.shape}")
+                        else:
+                            # Already expanded or unknown shape
+                            if hasattr(batch, 'overwrite'):
+                                batch.overwrite(params_key, fp)
+                            else:
+                                if params_key in batch:
+                                    del batch[params_key]
+                                batch[params_key] = fp
 
             # For object node: create scene_scale (scalar per sample)
             elif node_id == 'object':
                 if params_key not in batch:
+                    # Need [B*N, 1, 1]
                     batch_size = batch['idx'].shape[0]
-                    object_params = torch.ones(batch_size, 1, 1, device=batch['idx'].device)
-                    batch[params_key] = object_params
-                    logger.info(f"[FIX] Created {params_key} (scene_scale=1.0): {object_params.shape}")
+                    num_sample = getattr(self.args, 'num_sample', 128)
+                    # Create [B, N, 1] -> [B*N, 1]
+                    object_params = torch.ones(batch_size * num_sample, 1, device=batch['idx'].device)
+                    # Some nodes expect [TotalRays, 1, 1] or [TotalRays, 1]
+                    batch[params_key] = object_params.unsqueeze(-1)
+                    logger.info(f"[FIX] Created {params_key} (scene_scale=1.0): {batch[params_key].shape}")
 
-        # ================================================================
-        # Generate UV coordinates if missing
-        # ================================================================
-        if 'uv' not in batch:
-            logger.info("[FIX] Generating UV coordinates for ray sampling...")
-            batch_size = batch['idx'].shape[0]
-            num_sample = self.args.num_sample if hasattr(self.args, 'num_sample') else 128
-            uv = torch.rand(batch_size, num_sample, 2, device=batch['idx'].device)
-            batch['uv'] = uv
-            logger.info(f"[FIX] Generated UV: {uv.shape}")
-
-        # ================================================================
-        # Generate extrinsics from c2w
-        # ================================================================
-        if 'extrinsics' not in batch and 'c2w' in batch:
-            logger.info("[FIX] Generating extrinsics from c2w...")
-            c2w = batch['c2w']
-            try:
-                extrinsics = torch.linalg.inv(c2w)
-            except:
-                logger.warning("[FIX] GPU inverse failed, using CPU...")
-                c2w_cpu = c2w.cpu()
-                extrinsics = torch.linalg.inv(c2w_cpu).to(c2w.device)
-            batch['extrinsics'] = extrinsics
-            logger.info(f"[FIX] Generated extrinsics: {extrinsics.shape}")
+        # (Deleted duplicate UV/Extrinsics generation block here - relying on the correct one below)
 
         # Get batch size and device
         B = batch['idx'].shape[0]
@@ -2328,7 +2433,7 @@ class HOLD(pl.LightningModule):
                         if hasattr(obj_model, 'v3d_cano'):
                             obj_verts = obj_model.v3d_cano
                     if obj_verts is not None:
-                        grid_res = getattr(self.opt.model, "grid_resolution", 16)
+                        grid_res = getattr(self.opt.model, "grid_resolution", 32)
                         voxel_sdf = self._mesh_to_sdf_grid(
                             obj_verts,
                             grid_resolution=grid_res, # hard coded resolution
@@ -2532,7 +2637,7 @@ class HOLD(pl.LightningModule):
         geom_warmup_end = getattr(self.opt.training, 'geom_warmup_end', 2000)   # Phase 2.1
         render_warmup_end = getattr(self.opt.training, 'render_warmup_end', 4000)  # Phase 2.2
         joint_warmup_end = getattr(self.opt.training, 'joint_warmup_end', 8000)    # Phase 2.3
-        sdf_warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 2000)
+        sdf_warmup_end = getattr(self.opt.training, 'sdf_warmup_end', 60000)
 
         # Persistent dynamic multipliers for closed-loop curriculum (INIT IF MISSING)
         if not hasattr(self, "dynamic_sds_mult"):
@@ -6919,109 +7024,85 @@ class HOLD(pl.LightningModule):
         obj_faces_list = []
 
         for b in range(batch_size):
-            # [H, H, H] grid for this batch element
+            # [H, H, H] grid
             sdf_grid = object_sdf[b, 0].cpu().numpy().copy()
-            logger.debug(
-                f"[Stride Debug] sdf_grid strides: {sdf_grid.strides}, "
-                f"negative: {any(s < 0 for s in sdf_grid.strides)}"
-            )
 
-            try:
-                # Apply Marching Cubes in canonical volume [0, 3]³ with spacing 3 / H
-                verts, faces, normals, values = measure.marching_cubes(
-                    sdf_grid,
-                    level=0.0,
-                    spacing=(3.0 / resolution, 3.0 / resolution, 3.0 / resolution),
-                )
-                logger.debug(
-                    f"[MC Debug] verts shape: {verts.shape}, strides: {verts.strides}, "
-                    f"negative: {any(s < 0 for s in verts.strides)}"
-                )
-                logger.debug(f"[MC Debug] faces shape: {faces.shape}, strides: {faces.strides}")
+            # Check for zero crossing before running MC to avoid crash
+            if sdf_grid.min() > 0 or sdf_grid.max() < 0:
+                logger.warning(f"[Mesh Extract] No zero crossing in SDF (min={sdf_grid.min():.4f}, max={sdf_grid.max():.4f}).")
+                # Fallback logic below
+                verts, faces = None, None
+            else:
+                try:
+                    verts, faces, normals, values = measure.marching_cubes(
+                        sdf_grid,
+                        level=0.0,
+                        spacing=(3.0 / resolution, 3.0 / resolution, 3.0 / resolution),
+                    )
+                    # Shift to canonical [-1.5, 1.5]
+                    verts = verts - 1.5
 
-                # ------------------------------------------------------------------
-                # Compactness / anti-floater: keep only largest connected component
-                # ------------------------------------------------------------------
-                num_verts = verts.shape[0]
-                num_faces = faces.shape[0]
+                    # ✅ FIX: Ensure positive strides to avoid "At least one stride is negative" error
+                    if isinstance(verts, np.ndarray):
+                        verts = verts.copy()
+                    if isinstance(faces, np.ndarray):
+                        faces = faces.copy()
 
-                if num_verts > 0 and num_faces > 0:
-                    # Build vertex adjacency from faces
-                    neighbors = [[] for _ in range(num_verts)]
-                    for f in faces:
-                        i, j, k = int(f[0]), int(f[1]), int(f[2])
-                        neighbors[i].append(j); neighbors[j].append(i)
-                        neighbors[j].append(k); neighbors[k].append(j)
-                        neighbors[k].append(i); neighbors[i].append(k)
+                except Exception as e:
+                    logger.warning(f"[Mesh Extract] MC failed: {e}")
+                    verts, faces = None, None
 
-                    labels = -np.ones(num_verts, dtype=np.int32)
-                    comp_id = 0
+            # =========================================================
+            # Fallback: Use v3d_cano if MC failed or produced empty mesh
+            # =========================================================
+            if verts is None or verts.shape[0] == 0:
+                logger.warning(f"[Mesh Extract] Batch {b}: MC failed. Trying fallback to v3d_cano.")
 
-                    for v in range(num_verts):
-                        if labels[v] != -1:
-                            continue
-                        # BFS/DFS to label this component
-                        stack = [v]
-                        labels[v] = comp_id
-                        while stack:
-                            curr = stack.pop()
-                            for nb in neighbors[curr]:
-                                if labels[nb] == -1:
-                                    labels[nb] = comp_id
-                                    stack.append(nb)
-                        comp_id += 1
+                # Check if object model has explicit vertices
+                try:
+                    obj_node = self.model.nodes['object']
+                    if hasattr(obj_node.server.object_model, 'v3d_cano'):
+                        v_cano = obj_node.server.object_model.v3d_cano
+                        # Check if v_cano is valid (has faces?)
+                        # Often v3d_cano is just points, so we might need a convex hull or just return points
+                        # For now, if we have points, we can return them as a "mesh" (faces might be empty)
 
-                    if comp_id > 1:
-                        comp_sizes = np.bincount(labels)
-                        main_comp = int(comp_sizes.argmax())
-                        keep_mask = (labels == main_comp)
-                        kept_indices = np.nonzero(keep_mask)[0]
-
-                        # Map old vertex indices to new compact indices
-                        new_index = -np.ones(num_verts, dtype=np.int64)
-                        new_index[kept_indices] = np.arange(kept_indices.shape[0], dtype=np.int64)
-
-                        # Keep only faces fully inside the main component
-                        face_keep_mask = keep_mask[faces].all(axis=1)
-                        faces_main = faces[face_keep_mask]
-                        faces_main = new_index[faces_main]
-
-                        verts_main = verts[kept_indices]
-
-                        logger.debug(
-                            f"[Compactness] Batch {b}: {comp_id} components, "
-                            f"keeping {verts_main.shape[0]} verts / {faces_main.shape[0]} faces "
-                            f"(dropped {num_verts - verts_main.shape[0]} floater verts)."
-                        )
-
-                        verts = verts_main
-                        faces = faces_main
+                        # Better fallback: Use the TEMPLATE mesh if available
+                        if hasattr(self, 'object_templates'):
+                            # Assuming category 0 for batch 0 (simplification)
+                            # Ideally use batch['obj_id']
+                            temp_verts = list(self.object_templates.values())[0] # [V, 3]
+                            verts = temp_verts.cpu().numpy()
+                            # Create dummy faces or use template faces if we had them
+                            # Since templates are usually just verts in this codebase, faces=empty
+                            faces = np.zeros((0, 3), dtype=np.int32)
+                            logger.info(f"[Mesh Extract] Fallback to template vertices.")
+                        else:
+                             # Last resort: tiny box
+                             verts = np.array([[-0.1, -0.1, -0.1], [0.1, 0.1, 0.1]], dtype=np.float32)
+                             faces = np.zeros((0, 3), dtype=np.int32)
                     else:
-                        logger.debug(f"[Compactness] Batch {b}: single component, no floater removal.")
-                else:
-                    logger.debug(f"[Compactness] Batch {b}: empty mesh from marching cubes.")
+                         verts = np.zeros((0, 3), dtype=np.float32)
+                         faces = np.zeros((0, 3), dtype=np.int32)
+                except:
+                     verts = np.zeros((0, 3), dtype=np.float32)
+                     faces = np.zeros((0, 3), dtype=np.int32)
 
-                # Shift to canonical [-1.5, 1.5]³ coordinate system
-                verts = verts - 1.5
+            # Convert to tensors
+            if isinstance(verts, np.ndarray):
+                v_tensor = torch.from_numpy(verts).float().to(object_sdf.device)
+                f_tensor = torch.from_numpy(faces).long().to(object_sdf.device)
+            else:
+                v_tensor = verts
+                f_tensor = faces
 
-                # Convert to tensors on the original device
-                obj_verts_list.append(torch.from_numpy(verts.copy()).float().to(object_sdf.device))
-                obj_faces_list.append(torch.from_numpy(faces.copy()).long().to(object_sdf.device))
-
-                logger.debug(
-                    f"[Phase 4] Extracted object mesh {b}: {verts.shape[0]} verts, {faces.shape[0]} faces"
-                )
-
-            except Exception as e:
-                logger.warning(f"[Phase 4] Marching Cubes failed for batch {b}: {e}")
-                # Fallback to empty mesh
-                obj_verts_list.append(torch.zeros((0, 3), device=object_sdf.device))
-                obj_faces_list.append(torch.zeros((0, 3), dtype=torch.long, device=object_sdf.device))
+            obj_verts_list.append(v_tensor)
+            obj_faces_list.append(f_tensor)
 
         return obj_verts_list, obj_faces_list
     # ====================================================================
 
-    def _mesh_to_sdf_grid(self, vertices, grid_resolution=16, padding=0.1, for_encoder: bool = False):
+    def _mesh_to_sdf_grid(self, vertices, grid_resolution=32, padding=0.1, for_encoder: bool = False):
         """
         Convert a single instance mesh (vertices) to an approximate SDF grid.
 
